@@ -4301,6 +4301,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 ));
             }
         }
+        Effect::ModifyAnnouncedX { modification } => {
+            d.push(("modifies X".into(), format!("{modification:?}")));
+        }
         Effect::Double {
             target_kind,
             target,
