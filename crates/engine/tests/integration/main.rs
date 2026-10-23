@@ -1372,6 +1372,7 @@ mod raubahn_bull_of_ala_mhigo;
 mod raw_resolution_stack_restore;
 mod reapers_scythe;
 mod recurring_insight_6856;
+mod recursive_recruitment;
 mod refurbished_familiar;
 mod rejoin_the_fight_choose_pool;
 mod relic_of_progenitus_6446;
