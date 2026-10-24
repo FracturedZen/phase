@@ -1651,6 +1651,7 @@ mod wise_mothman_milled_trigger;
 mod wise_mothman_target_distinctness;
 mod wish_outside_game_scope;
 mod witherbloom_altar_probe;
+mod wizards_rockets_announced_x_mana;
 mod wolverine_best_there_is_dealt_damage_counter;
 mod wolverine_fierce_fighter_heal;
 mod woodwork_prodigy_upkeep_becomes_prepared;

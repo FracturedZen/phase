@@ -10260,13 +10260,22 @@ pub struct PendingManaAbility {
     /// `chosen_counter_counts_missing_field_wire_shape_is_rejected` in this
     /// file's test module.
     pub chosen_counter_counts: Vec<u32>,
-    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
-    /// writers, both binding the same CR 107.3a announcement:
+    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Four
+    /// writers, all binding the same CR 107.3a announcement:
     ///
     /// * CR 702.179e/f: a `Pay X speed` cost (Chicago Loop's `Pay X speed: Add
     ///   X mana in any combination of colors`), announced before cost payment
     ///   and bound to BOTH the speed cost and the produced-mana count via
     ///   `set_chosen_x_recursive`;
+    /// * an `{X}` mana cost leg (Wizard's Rockets' `{X}, {T}, Sacrifice this
+    ///   artifact: Add X mana in any combination of colors`), announced through
+    ///   `PayableResource::ManaGeneric` before cost payment; the activation pays
+    ///   the leg with X concretized and the produced-mana count reads the same
+    ///   value;
+    /// * a literal `Remove X counters` cost (Saltcrusted Steppe class), where
+    ///   the `SubmitPayAmount` handler binds X from the `PayableResource::Counters`
+    ///   answer for the leaf `next_chosen_counter_leaf_is_literal_x` identifies
+    ///   (CR 107.3i: every X on the object shares that value);
     /// * the X-sentinel `TapCreatures` form (Hazel of the Rootbloom's
     ///   `Tap X untapped tokens you control`), where
     ///   `handle_tap_creatures_for_mana_ability` binds X to the size of the
@@ -10275,7 +10284,7 @@ pub struct PendingManaAbility {
     ///   `advance_mana_ability_selection_cursor` read that single stored value
     ///   rather than re-deriving it from `requirement.fixed_count()`.
     ///
-    /// `None` until X is announced. Because this slot is shared by two costs, it
+    /// `None` until X is announced. Because this slot is shared by several costs, it
     /// is NOT a stage-completion marker — each selection stage owns its own
     /// typed presence field (see [`Self::chosen_tappers`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -18579,6 +18588,12 @@ pub enum PayableResource {
     /// silently resolve to `ManaCost::zero()`, which would concretize to a
     /// free payment (drops the fixed pips AND the X basis) instead of
     /// visibly rejecting the incompatible/corrupt save.
+    ///
+    /// CR 107.3a + CR 601.2b via CR 602.2b: with `pending_mana_ability: Some`,
+    /// the prompt is instead a mana ability's announcement of X for its `{X}`
+    /// cost leg (Wizard's Rockets). The submit only binds
+    /// `PendingManaAbility::chosen_x`; the activation then pays the
+    /// concretized leg through its own cost cursor.
     ManaGeneric { base_cost: ManaCost },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
