@@ -67,6 +67,7 @@ mod athreos_god_of_passage_targeted_opponent_unless_pay;
 mod atomic_mana_payment;
 mod attach_plural_anaphor_coverage_honesty;
 mod attach_role_selection_timing;
+mod attached_set_qualifier;
 mod attached_to_declared_target;
 mod attachment_host_reference_untargeted;
 mod attack_qualifier_stack_conditions;

@@ -21025,6 +21025,16 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if let Some(clause) = try_parse_counter_all_conjunction(text, ctx) {
         return clause;
     }
+    // CR 115.1a + CR 115.1d + CR 701.3a + CR 608.2c: "a mass object set defined
+    // by attachment to a referenced permanent or player" — "<verb> all/each
+    // <filter> attached to <referent>" and its head/compound families. Claimed
+    // BEFORE the compound splitter (whose fail-closed attachment block would
+    // otherwise see the clause) and only when the whole clause parses; the
+    // production declines a Context-site Destroy that the existing declared-slot
+    // authority owns (F2) and rolls back its tentative parse context on decline.
+    if let Some(clause) = imperative::parse_attached_set_clause(text, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
@@ -27311,6 +27321,64 @@ pub(super) fn resolve_declared_slot_anaphor<'a>(
         .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))?
         .index
         .map(|slot| (slot, rest))
+}
+
+/// CR 601.2c + CR 608.2c: the PRONOUN-ONLY sibling of
+/// [`resolve_declared_slot_anaphor`] — bind a bare, word-bounded "it"/"them" at
+/// the start of `phrase_lower` to the unique NUMBERED declared slot of the
+/// chain's registry.
+///
+/// Deliberately a separate entry point with a single caller
+/// (`imperative::parse_attached_set_referent`): widening the shared resolver
+/// would change its second consumer, the die-exile rider antecedent binder,
+/// which requires a definite noun. Here a bare pronoun is exactly the
+/// D2 family's shape ("… you gain control of all Equipment that were attached
+/// to it", Fumble / Murderous Spoils).
+///
+/// The registry is the chain-wide authority (`Context::chain_declared_slots`),
+/// NOT the Choose-head-local `declared_target_slots`: zero candidates, several
+/// candidates, an unnumbered slot, or an `Indeterminate` registry all give
+/// `None`, so a pronoun is never bound on a guess. A candidate whose own filter
+/// reads a declared slot is excluded for the same reason
+/// `resolve_declared_slot_anaphor` excludes it — referents never chain.
+pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
+    phrase_lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<(usize, &'a str)> {
+    if ctx.body_scope == crate::parser::oracle_ir::context::BodyScope::ModalMode {
+        return None;
+    }
+    let (rest, _) = nom::branch::alt((
+        |input| crate::parser::oracle_target::parse_word_bounded(input, "them"),
+        |input| crate::parser::oracle_target::parse_word_bounded(input, "it"),
+    ))
+    .parse(phrase_lower)
+    .ok()?;
+    let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+        return None;
+    };
+    // Eligibility comes first: a candidate whose own filter reads a declared
+    // slot is never an antecedent (referents never chain), so it is not
+    // evidence either way.
+    let eligible: Vec<&crate::parser::oracle_ir::context::DeclaredSlotEntry> = entries
+        .iter()
+        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))
+        .collect();
+    if eligible.is_empty() {
+        return None;
+    }
+    // An incomplete registry is not a signal: any eligible entry without a
+    // chain-wide index means the numbered subset does not name the chain's
+    // slots, so nothing is bound on a guess. Exactly one numbered candidate
+    // binds; zero or several decline.
+    let slots = eligible
+        .iter()
+        .map(|entry| entry.index)
+        .collect::<Option<Vec<usize>>>()?;
+    match slots.as_slice() {
+        [slot] => Some((*slot, rest)),
+        _ => None,
+    }
 }
 
 /// CR 115.1: does this clause announce a target of its OWN — an instance of the
