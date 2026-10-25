@@ -27552,18 +27552,18 @@ fn single_subject_additive_land_type_static_not_hijacked_by_compound_conjunct_br
     );
 }
 
-// No-regression: `parse_owned_off_battlefield_subject_filter` was extracted
-// from `parse_spells_have_keyword`'s Pattern 2 (Leyline of Anticipation class)
-// as a behavior-preserving refactor — the filter's controller and off-
-// battlefield zone scoping must be byte-for-byte the same after extraction,
-// not just the coarse `type_filters.contains(Creature)` the older test checks.
+// No-regression + issue #10242: `parse_owned_off_battlefield_subject_filter`
+// (Teferi, Mage of Zhalfir / Leyline of Anticipation Pattern 2 class) must
+// scope the Flash grant over every non-battlefield, non-stack card zone —
+// including Library so Future Sight + Teferi can cast the top creature card
+// as though it had flash.
 #[test]
 fn spells_have_keyword_pattern2_owned_off_battlefield_filter_shape_preserved() {
     use crate::types::zones::Zone;
 
     let def =
         parse_static_line("Creature cards you own that aren't on the battlefield have flash.")
-            .expect("Leyline of Anticipation-style flash grant must still parse");
+            .expect("Teferi / Leyline of Anticipation-style flash grant must still parse");
     match &def.affected {
         Some(TargetFilter::Typed(tf)) => {
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
@@ -27572,15 +27572,56 @@ fn spells_have_keyword_pattern2_owned_off_battlefield_filter_shape_preserved() {
                 tf.properties
                     .iter()
                     .any(|p| matches!(p, FilterProp::InAnyZone { zones }
-                    if zones.contains(&Zone::Hand)
+                    if zones.contains(&Zone::Library)
+                        && zones.contains(&Zone::Hand)
                         && zones.contains(&Zone::Graveyard)
                         && zones.contains(&Zone::Exile)
                         && zones.contains(&Zone::Command))),
-                "must carry the off-battlefield zone scope: {:?}",
+                "must carry the full off-battlefield zone scope incl. Library (#10242): {:?}",
                 tf.properties
             );
         }
         other => panic!("Expected Some(Typed filter), got {other:?}"),
+    }
+}
+
+/// Issue #10242 + CR 702.8a + CR 109.4: Teferi, Mage of Zhalfir — "Creature
+/// cards you own that aren't on the battlefield have flash" must include
+/// Library so an owned creature card cast from the top of the library
+/// (Future Sight) receives the Flash timing grant.
+#[test]
+fn teferi_mage_of_zhalfir_off_battlefield_flash_includes_library() {
+    use crate::types::zones::Zone;
+
+    let def = parse_owned_off_battlefield_subject_filter(
+        "Creature cards you own that aren't on the battlefield",
+    )
+    .expect("Teferi off-battlefield subject must parse");
+    match def {
+        TargetFilter::Typed(tf) => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            let zones = tf
+                .properties
+                .iter()
+                .find_map(|p| match p {
+                    FilterProp::InAnyZone { zones } => Some(zones.as_slice()),
+                    _ => None,
+                })
+                .expect("InAnyZone property required");
+            assert_eq!(
+                zones,
+                &[
+                    Zone::Library,
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    Zone::Exile,
+                    Zone::Command,
+                ],
+                "Library must be first-class in the off-battlefield population"
+            );
+        }
+        other => panic!("Expected Typed filter, got {other:?}"),
     }
 }
 

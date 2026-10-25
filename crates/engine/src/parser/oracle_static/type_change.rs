@@ -2353,8 +2353,8 @@ fn parse_chosen_color_additive_suffix<'a>(input: &'a str, pronoun: &str) -> Orac
 /// the battlefield" means every zone where a card can sit *except* the
 /// battlefield and the stack (stack objects are spells, covered by a sibling
 /// leg). Matches the zone set used by off-battlefield keyword grants
-/// (`keyword_grant` "cards you own that aren't on the battlefield") plus
-/// Library (Painter applies in all zones globally, not only "you own").
+/// (`parse_owned_off_battlefield_subject_filter` / Teferi Flash class), which
+/// likewise include Library so cast-from-library timing grants apply.
 fn off_battlefield_card_zones() -> Vec<Zone> {
     vec![
         Zone::Library,

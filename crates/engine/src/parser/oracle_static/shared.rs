@@ -5423,9 +5423,10 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
 /// battlefield have no controller, so CR 109.5 falls back to reading "you"/
 /// "your" as the object's owner instead. Resolves the leading type phrase and
 /// attaches `ControllerRef::You` (read as "owned by you" off the battlefield)
-/// plus `FilterProp::InAnyZone` over every non-battlefield, non-stack zone this
-/// class of card names (hand/graveyard/exile/command — no printed card in this
-/// shape also reaches into the hidden library zone).
+/// plus `FilterProp::InAnyZone` over every non-battlefield, non-stack zone the
+/// printed phrase covers (library/hand/graveyard/exile/command). Library is
+/// required so Teferi, Mage of Zhalfir's Flash grant reaches owned creature
+/// cards cast from the top of the library (Future Sight, etc.; issue #10242).
 ///
 /// Extracted from [`super::keyword_grant::parse_spells_have_keyword`]'s Pattern
 /// 2 (Leyline of Anticipation: "Creature cards you own that aren't on the
@@ -5469,7 +5470,13 @@ pub(crate) fn parse_owned_off_battlefield_subject_filter(subject: &str) -> Optio
         TargetFilter::Typed(mut typed) => {
             typed = typed.controller(ControllerRef::You);
             typed.properties.push(FilterProp::InAnyZone {
-                zones: vec![Zone::Hand, Zone::Graveyard, Zone::Exile, Zone::Command],
+                zones: vec![
+                    Zone::Library,
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    Zone::Exile,
+                    Zone::Command,
+                ],
             });
             Some(TargetFilter::Typed(typed))
         }
