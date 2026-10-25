@@ -44585,20 +44585,44 @@ fn parse_effect_chain_ir_body(
         // is stamped on its instruction, so its route joins the same binding
         // guard below.
         let leading_route = leading_route.or(reflexive_guard_route);
+        // CR 608.2c + CR 614.6: when a leading "instead" selector will re-parse
+        // the body as one replacement (Prohibit / Overload kicked, #10277), leave
+        // body-level suffix guards on the text so the recursive parse can lower
+        // them under the instead carrier — do not strip-then-`.or()` them away.
+        let instead_reparse_pending = condition
+            .as_ref()
+            .is_some_and(|c| c.is_instead_override())
+            && !builder.is_empty();
         // CR 603.4 + CR 608.2c: Counter threshold condition — runs unconditionally
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
         // non-optional parents (CR 603.12), so the QuantityCheck is the meaningful gate.
-        let (counter_cond, text) = strip_counter_conditional(
-            &text,
-            conditions::CounterConditionalContext::from_parse_context(ctx),
-        );
+        let (counter_cond, text) = if instead_reparse_pending {
+            (None, text)
+        } else {
+            strip_counter_conditional(
+                &text,
+                conditions::CounterConditionalContext::from_parse_context(ctx),
+            )
+        };
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
-        let (mv_cond, text) = strip_mana_value_conditional(&text);
+        let (mv_cond, text) = if instead_reparse_pending {
+            (None, text)
+        } else {
+            strip_mana_value_conditional(&text)
+        };
         // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest
         // <property> among <filter>" (Wretched Banquet class).
-        let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
-        let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
+        let (superlative_target_cond, text) = if instead_reparse_pending {
+            (None, text)
+        } else {
+            strip_superlative_target_conditional(&text)
+        };
+        let (target_supertype_cond, text) = if instead_reparse_pending {
+            (None, text)
+        } else {
+            strip_target_supertype_conditional(&text)
+        };
         // A deferred `When you do, if <guard>, ...` retains its reflexive
         // marker in `if_you_do` while the ordered specialized parsers claim the
         // guard. Ordinary reflexive connectors still block these parsers, as
@@ -44920,9 +44944,17 @@ fn parse_effect_chain_ir_body(
         // Split the stripped body recursively so "If ..., exile it, then put it
         // ..." emits both guarded zone-change effects instead of letting the
         // first imperative parser swallow the tail.
+        //
+        // CR 608.2c + CR 614.6: an "instead" override body — single- or
+        // multi-clause — is one replacement of the earlier instruction. Re-parse
+        // the body without the instead selector so its own suffix guards lower
+        // (Prohibit / Overload kicked "… if its mana value is N or less instead",
+        // #10277). Multi-clause non-instead leading conditions still use the
+        // recursive split below.
         if let Some(ref outer_condition) = condition {
             let body_chunks = split_clause_sequence(&text);
-            if body_chunks.len() > 1 {
+            let instead_body = outer_condition.is_instead_override() && !builder.is_empty();
+            if instead_body || body_chunks.len() > 1 {
                 if has_player_anaphoric_reference(&text.to_lowercase()) {
                     ctx.enclosing_declared_player = declared_player_reference(
                         builder.clauses(),
@@ -44934,9 +44966,7 @@ fn parse_effect_chain_ir_body(
                 ctx.next_declared_player_group = chain_declared_groups;
                 let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
                 chain_declared_groups = ctx.next_declared_player_group;
-                // CR 608.2c + CR 614.6: an "instead" body is one replacement of the
-                // earlier instruction, not N independently gated instructions.
-                if outer_condition.is_instead_override() && !builder.is_empty() {
+                if instead_body {
                     let def = instead_override_definition(
                         lower_effect_chain_ir(&body_ir),
                         outer_condition.clone(),

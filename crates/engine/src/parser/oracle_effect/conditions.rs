@@ -3987,12 +3987,30 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     }
 
     // Suffix position: "[effect] if its mana value is less than or equal to [quantity]."
+    // Also: "[effect] if its mana value is N or less/greater." (Prohibit / Overload kicked).
+    // CR 202.3 + CR 608.2c: present-tense "is" → use_lki: false (live mana value).
     if let Some((before, after)) = tp.rsplit_around(" if its mana value is ") {
         if let Some((comparator, value)) = parse_dynamic_mana_value_threshold(after.lower) {
             let condition = AbilityCondition::TargetMatchesFilter {
                 filter: TargetFilter::Typed(
                     TypedFilter::default().properties(vec![FilterProp::Cmc { comparator, value }]),
                 ),
+                use_lki: false,
+                subject_slot: None,
+            };
+            return (
+                Some(condition),
+                before.original.trim_end_matches('.').trim().to_string(),
+            );
+        }
+        if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
+            let condition = AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Cmc {
+                        comparator,
+                        value: QuantityExpr::Fixed { value: threshold },
+                    },
+                ])),
                 use_lki: false,
                 subject_slot: None,
             };

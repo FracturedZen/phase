@@ -26275,6 +26275,116 @@ fn conditional_sacrifice_defers_to_seeded_parent_target_available() {
 }
 
 #[test]
+fn prohibit_kicked_keeps_mana_value_inner_guard() {
+    // CR 608.2c + CR 614.6 (#10277): kicked Prohibit replaces the unkicked
+    // counter with a counter that still gates on mana value ≤ 4. The instead
+    // selector must not swallow the body's own guard (NoOp carrier shape).
+    let ability = parse_effect_chain(
+        "Counter target spell if its mana value is 2 or less. If this spell was kicked, counter that spell if its mana value is 4 or less instead.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::Counter { .. }),
+        "base effect should be Counter, got {:?}",
+        ability.effect
+    );
+    let kicked = ability.sub_ability.as_ref().expect("expected kicked override sub");
+    assert_eq!(
+        kicked.condition,
+        Some(AbilityCondition::AdditionalCostPaidInstead),
+        "kicked selector must be AdditionalCostPaidInstead, got {:?}",
+        kicked.condition
+    );
+    // Body has its own guard → instead_override_definition builds a NoOp carrier.
+    assert!(
+        matches!(&*kicked.effect, Effect::NoOp),
+        "instead selector with body guard must use NoOp carrier, got {:?}",
+        kicked.effect
+    );
+    let body = kicked
+        .sub_ability
+        .as_ref()
+        .expect("NoOp carrier must hold the guarded body");
+    assert!(
+        matches!(&*body.effect, Effect::Counter { .. }),
+        "kicked body should be Counter, got {:?}",
+        body.effect
+    );
+    match &body.condition {
+        Some(AbilityCondition::TargetMatchesFilter { filter, use_lki, .. }) => {
+            assert!(!use_lki);
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter on kicked MV guard, got {filter:?}");
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 4 }
+                    }
+                )),
+                "kicked body must gate on mana value ≤ 4, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("kicked body must keep MV ≤ 4 guard, got {other:?}"),
+    }
+}
+
+#[test]
+fn overload_kicked_keeps_mana_value_inner_guard() {
+    // CR 608.2c + CR 614.6 (#10277): Overload kicked "destroy … if MV ≤ 5 instead".
+    let ability = parse_effect_chain(
+        "Destroy target artifact if its mana value is 2 or less. If this spell was kicked, destroy that artifact if its mana value is 5 or less instead.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::Destroy { .. }),
+        "base effect should be Destroy, got {:?}",
+        ability.effect
+    );
+    let kicked = ability.sub_ability.as_ref().expect("expected kicked override sub");
+    assert_eq!(
+        kicked.condition,
+        Some(AbilityCondition::AdditionalCostPaidInstead)
+    );
+    assert!(
+        matches!(&*kicked.effect, Effect::NoOp),
+        "instead selector with body guard must use NoOp carrier, got {:?}",
+        kicked.effect
+    );
+    let body = kicked
+        .sub_ability
+        .as_ref()
+        .expect("NoOp carrier must hold the guarded body");
+    assert!(
+        matches!(&*body.effect, Effect::Destroy { .. }),
+        "kicked body should be Destroy, got {:?}",
+        body.effect
+    );
+    match &body.condition {
+        Some(AbilityCondition::TargetMatchesFilter { filter, .. }) => {
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("expected Typed filter on kicked MV guard, got {filter:?}");
+            };
+            assert!(
+                tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Fixed { value: 5 }
+                    }
+                )),
+                "kicked body must gate on mana value ≤ 5, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("kicked body must keep MV ≤ 5 guard, got {other:?}"),
+    }
+}
+
+#[test]
 fn kicker_leading_instead_produces_correct_condition() {
     // CR 608.2c: "if kicked, instead [effect]" — leading "instead" variant.
     // Must produce AdditionalCostPaidInstead, same as trailing "instead".
@@ -49585,6 +49695,35 @@ fn strip_mv_conditional_suffix_ge() {
                     p,
                     FilterProp::Cmc {
                         comparator: Comparator::GE,
+                        value: QuantityExpr::Fixed { value: 4 }
+                    }
+                )));
+            } else {
+                panic!("expected Typed filter");
+            }
+        }
+        other => panic!("expected TargetMatchesFilter, got: {other:?}"),
+    }
+}
+
+#[test]
+fn strip_mv_conditional_present_tense_is_n_or_less() {
+    // CR 202.3 + CR 608.2c: Prohibit / Overload kicked body —
+    // "… if its mana value is N or less" (present tense, fixed threshold).
+    let (cond, text) =
+        strip_mana_value_conditional("Counter that spell if its mana value is 4 or less.");
+    assert!(cond.is_some(), "should extract present-tense MV ≤ 4 condition");
+    assert_eq!(text, "Counter that spell");
+    match cond.unwrap() {
+        AbilityCondition::TargetMatchesFilter {
+            filter, use_lki, ..
+        } => {
+            assert!(!use_lki, "present-tense 'is' must use live mana value");
+            if let TargetFilter::Typed(tf) = filter {
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
                         value: QuantityExpr::Fixed { value: 4 }
                     }
                 )));
