@@ -1365,8 +1365,11 @@ pub(crate) fn concrete_parent_target_filter(
 ///   resolves every slot against the chain root first; a slot with no referent
 ///   becomes `None`, and `condition_cannot_match` refuses the install only when
 ///   no alternative of the condition can match (issue #8758, PR #8881).
-/// - `TrackedSetFiltered { .. }`: the binder does not descend into it, so a
-///   `ParentTarget` inside never degrades; unbound it under-matches, not over.
+/// - `TrackedSetFiltered { .. }`: the binder does not descend into it. Creation-
+///   time `bind_tracked_set_to_effect` already rewrites an empty-parent
+///   `ParentTarget` upgrade to plain `TrackedSet` (Ghostway #10255), so the
+///   under-match shape no longer reaches fire for that class; a non-empty
+///   parent keeps `TrackedSetFiltered { ParentTarget }` for incarnation pins.
 ///
 /// The one printed carrier of a nested reference is Rhino's Rampage,
 /// `And { ParentTarget, Typed(creature an opponent controls) }`; it declares two
@@ -1776,7 +1779,11 @@ fn snapshot_quantity_ref(
 /// 3. Preserve the parsed `origin` (Battlefield for token cleanup, Exile for
 ///    cross-clause exiled-card references). When unset, `change_zone::resolve_all`
 ///    derives scan zones from tracked-set members at firing time.
-fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
+fn bind_tracked_set_to_effect(
+    effect: &mut Effect,
+    real_id: TrackedSetId,
+    parent_targets: &[TargetRef],
+) {
     match effect {
         Effect::ChangeZoneAll {
             origin: _, target, ..
@@ -1821,7 +1828,25 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                     bound_target.rebind_tracked_set_sentinel(real_id);
                     bound_target
                 }
-                // CR 400.7 + CR 603.7c: keeping `SelfRef` inside the set pins the return to the source incarnation latched at creation, so a card re-exiled meanwhile is a new object.
+                // CR 603.7a + CR 608.2c (issue #10255): Ghostway / Lae'zel's
+                // Acrobatics-class "Exile each/all … Return those cards … next
+                // end step" is untargeted. "Those cards" names the tracked-set
+                // members themselves, not a parent target list. Wrapping bare
+                // `ParentTarget` as `TrackedSetFiltered { ParentTarget }` left
+                // an anaphor that `matches_target_filter` rejects when
+                // `target_incarnations` is empty, so the delayed return matched
+                // nothing. Empty parents → plain `TrackedSet`.
+                //
+                // CR 400.7 + CR 603.7c: a targeted flicker (Eerie Interlude)
+                // keeps `ParentTarget` inside the set so fire-time incarnation
+                // pins can reject a later zone-change successor. `SelfRef`
+                // likewise pins the return to the source incarnation latched at
+                // creation.
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                    if parent_targets.is_empty() =>
+                {
+                    TargetFilter::TrackedSet { id: real_id }
+                }
                 TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::SelfRef => TargetFilter::TrackedSetFiltered {
@@ -1850,26 +1875,34 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
     }
 }
 
-fn bind_tracked_set_to_ability_definition(ability: &mut AbilityDefinition, real_id: TrackedSetId) {
-    bind_tracked_set_to_effect(&mut ability.effect, real_id);
+fn bind_tracked_set_to_ability_definition(
+    ability: &mut AbilityDefinition,
+    real_id: TrackedSetId,
+    parent_targets: &[TargetRef],
+) {
+    bind_tracked_set_to_effect(&mut ability.effect, real_id, parent_targets);
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut *ability.effect {
-        bind_tracked_set_to_ability_definition(effect, real_id);
+        bind_tracked_set_to_ability_definition(effect, real_id, parent_targets);
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        bind_tracked_set_to_ability_definition(sub_ability, real_id);
+        bind_tracked_set_to_ability_definition(sub_ability, real_id, parent_targets);
     }
     if let Some(else_ability) = ability.else_ability.as_mut() {
-        bind_tracked_set_to_ability_definition(else_ability, real_id);
+        bind_tracked_set_to_ability_definition(else_ability, real_id, parent_targets);
     }
     for mode in &mut ability.mode_abilities {
-        bind_tracked_set_to_ability_definition(mode, real_id);
+        bind_tracked_set_to_ability_definition(mode, real_id, parent_targets);
     }
 }
 
 fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: TrackedSetId) {
-    bind_tracked_set_to_effect(&mut ability.effect, real_id);
+    // Clone before the mutable effect borrow: the empty-vs-nonempty
+    // `ParentTarget` decision in `bind_tracked_set_to_effect` reads this list
+    // (Ghostway #10255 vs Eerie Interlude #7100).
+    let parent_targets = ability.targets.clone();
+    bind_tracked_set_to_effect(&mut ability.effect, real_id, &parent_targets);
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
-        bind_tracked_set_to_ability_definition(effect, real_id);
+        bind_tracked_set_to_ability_definition(effect, real_id, &parent_targets);
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         bind_tracked_set_to_ability_chain(sub_ability, real_id);
@@ -1878,7 +1911,7 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
         bind_tracked_set_to_ability_chain(else_ability, real_id);
     }
     for mode in &mut ability.mode_abilities {
-        bind_tracked_set_to_ability_definition(mode, real_id);
+        bind_tracked_set_to_ability_definition(mode, real_id, &parent_targets);
     }
 }
 
@@ -4368,6 +4401,85 @@ mod tests {
             state.objects[&creature].zone,
             Zone::Battlefield,
             "a later incarnation must not be matched through the tracked set"
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c (issue #10255): Ghostway-class untargeted
+    /// "Exile each creature you control. Return those cards … next end step"
+    /// must bind the delayed return to a plain `TrackedSet`, not
+    /// `TrackedSetFiltered { ParentTarget }`. The latter under-matches when the
+    /// creating ability has no targets / incarnation pins, so the exiled
+    /// creatures never return.
+    #[test]
+    fn untargeted_tracked_set_delayed_return_binds_plain_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let creature = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Ghostway creature".to_string(),
+            Zone::Exile,
+        );
+        let set_id = TrackedSetId(1);
+        state.tracked_object_sets.insert(set_id, vec![creature]);
+        state.chain_tracked_set_id = Some(set_id);
+        state.next_tracked_set_id = 2;
+
+        let effect = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        // Empty targets — Ghostway announces none.
+        let create = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                effect: Box::new(effect),
+                uses_tracked_set: true,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &create, &mut events).expect("delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        assert!(
+            delayed.target_incarnations.is_empty(),
+            "untargeted flicker installs no incarnation pins"
+        );
+        assert!(
+            matches!(
+                &delayed.effect,
+                Effect::ChangeZoneAll {
+                    target: TargetFilter::TrackedSet { id },
+                    ..
+                } if *id == set_id
+            ),
+            "empty-parent ParentTarget upgrade must become plain TrackedSet, got {:?}",
+            delayed.effect
+        );
+
+        crate::game::effects::resolve_ability_chain(&mut state, &delayed, &mut events, 0)
+            .expect("delayed return resolves");
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Battlefield,
+            "Ghostway must return the exiled creature at the delayed end step"
         );
     }
 
