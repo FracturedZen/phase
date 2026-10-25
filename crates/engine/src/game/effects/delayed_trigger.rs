@@ -123,6 +123,16 @@ pub fn resolve(
     // chosen object. This ordering is mandatory: running the contextual bind
     // first would pre-empt the tracked-set rewrite and break the "those cards"
     // cards.
+    //
+    // CR 603.7a + CR 608.2c (issue #10248): Lucius the Eternal–class "exile
+    // [self] and choose target creature. When that creature leaves … return
+    // this card from exile" publishes a SelfRef exile set while the leave
+    // condition's `ParentTarget` names the announced victim. Binding that
+    // condition to the exile set would watch Lucius instead of the victim.
+    // Self-return payloads therefore skip the condition rewrite when a
+    // ParentTarget anaphor and non-empty parent targets are present; the
+    // contextual bind then pins the watch to the chosen creature. Effect
+    // binding still uses the exile set so the SelfRef return finds Lucius.
     // CR 603.7: Prefer the active nonempty resolution-chain set, then the latest
     // nonempty published set. An empty chain id (stale pre-choice publish) must
     // not shadow a later nonempty set (Storm Herald delayed exile).
@@ -151,7 +161,22 @@ pub fn resolve(
         None
     };
     if let Some(real_id) = tracked_set_id {
-        bind_tracked_set_to_condition(&mut condition, real_id);
+        // CR 603.7a + CR 608.2c (issue #10248): a SelfRef return payload's
+        // exile publication must not steal a ParentTarget leave/dies watch
+        // that names an announced target (Lucius the Eternal).
+        let self_return_payload = matches!(
+            &*effect_def.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        );
+        let skip_condition_bind = self_return_payload
+            && !ability.targets.is_empty()
+            && condition_filter_reaches_parent_target(&condition);
+        if !skip_condition_bind {
+            bind_tracked_set_to_condition(&mut condition, real_id);
+        }
     }
 
     // CR 608.2c + CR 603.7c + CR 601.2c: An anaphoric plural-set reference
@@ -1409,6 +1434,34 @@ fn parent_targets_filter(parent_targets: &[TargetRef]) -> TargetFilter {
         [] => TargetFilter::Any,
         [target] => target.clone(),
         _ => TargetFilter::Or { filters: targets },
+    }
+}
+
+
+/// CR 603.7a + CR 608.2c (issue #10248): true when a delayed leave/dies/enters
+/// condition filter still carries a `ParentTarget` anaphor (including nested
+/// under And/Or/Not). Used to keep Lucius-class self-return payloads from
+/// rebinding that anaphor to a disjoint self-exile tracked set.
+fn condition_filter_reaches_parent_target(condition: &DelayedTriggerCondition) -> bool {
+    match condition {
+        DelayedTriggerCondition::WhenDies { filter }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
+        | DelayedTriggerCondition::WhenEntersBattlefield { filter }
+        | DelayedTriggerCondition::WhenDiesOrExiled { filter } => {
+            filter_reaches_parent_target_anaphor(filter)
+        }
+        _ => false,
+    }
+}
+
+fn filter_reaches_parent_target_anaphor(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_reaches_parent_target_anaphor)
+        }
+        TargetFilter::Not { filter } => filter_reaches_parent_target_anaphor(filter),
+        _ => false,
     }
 }
 
@@ -4646,6 +4699,69 @@ mod tests {
             },
             "tracked-set condition rewrite must run BEFORE the single-target \
              contextual bind, so ParentTarget → TrackedSet passes through untouched"
+        );
+    }
+
+    /// CR 603.7a + CR 608.2c (issue #10248): Lucius the Eternal–class
+    /// "exile [self] … choose target creature. When that creature leaves the
+    /// battlefield, return this card from exile" publishes a SelfRef exile
+    /// tracked set while the leave condition's `ParentTarget` names the
+    /// announced victim. The condition must bind to the victim
+    /// (`SpecificObject`), not the exile set — otherwise Lucius watches
+    /// himself and never returns.
+    #[test]
+    fn lucius_self_exile_leave_watch_binds_chosen_victim_not_exile_set() {
+        let mut state = GameState::new_two_player(42);
+        let lucius = ObjectId(5);
+        let victim = ObjectId(10);
+        // Dies-resolution published Lucius's exile as the chain tracked set.
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![lucius]);
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+        state.next_tracked_set_id = 2;
+
+        let return_self = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(return_self),
+                uses_tracked_set: true,
+            },
+            vec![TargetRef::Object(victim)],
+            lucius,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("delayed trigger installs");
+
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::SpecificObject { id: victim },
+            },
+            "Lucius leave-watch must pin to the chosen creature, not the self-exile \
+             tracked set; got {:?}",
+            state.delayed_triggers[0].condition
         );
     }
 
