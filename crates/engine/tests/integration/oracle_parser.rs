@@ -1086,13 +1086,14 @@ fn token_grant_spells_no_longer_misroute_to_static() {
     }
 }
 
-/// Negative control: Brood Birthing's "have \"…\"" grant marker is OUTSIDE the
-/// quoted span, so masking must NOT change its parse — it still lowers to its
-/// functional `GrantAbility` static (the sacrifice-for-mana grant). This is the
-/// invariant the masking fix must preserve.
+/// Issue #9822: Brood Birthing's "They have \"…\"" grant must not claim the
+/// whole sorcery as a nonsense Continuous static (Subtype("If")). The spell
+/// ability creates three tokens with the sacrifice-for-mana grant folded onto
+/// the Token, and Otherwise creates one of those same tokens (count Fixed 1)
+/// carrying the same grant statics.
 #[test]
-fn brood_birthing_grant_static_unchanged_by_masking() {
-    use engine::types::ability::ContinuousModification;
+fn brood_birthing_if_otherwise_those_tokens_with_grant() {
+    use engine::types::ability::{ContinuousModification, Effect, QuantityExpr};
 
     let result = parse(
         "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn \
@@ -1104,22 +1105,57 @@ fn brood_birthing_grant_static_unchanged_by_masking() {
         &[],
     );
 
-    assert_eq!(
-        result.statics.len(),
-        1,
-        "Brood Birthing keeps exactly one static (the GrantAbility grant): {:#?}",
+    assert!(
+        result.statics.is_empty(),
+        "Brood Birthing must not route to a top-level static: {:#?}",
         result.statics
     );
-    let grants_ability = matches!(result.statics[0].mode, StaticMode::Continuous)
-        && result.statics[0]
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }));
+    assert_eq!(
+        result.abilities.len(),
+        1,
+        "expected one spell ability: {:#?}",
+        result.abilities
+    );
+    let spell = &result.abilities[0];
+    let Effect::Token {
+        count,
+        static_abilities,
+        ..
+    } = spell.effect.as_ref()
+    else {
+        panic!("expected Token effect, got {:#?}", spell.effect);
+    };
+    assert_eq!(count, &QuantityExpr::Fixed { value: 3 });
     assert!(
-        grants_ability,
-        "Brood Birthing's static must remain the functional GrantAbility grant, \
-         got: {:#?}",
-        result.statics[0]
+        static_abilities.iter().any(|s| {
+            s.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        }),
+        "three-token create must carry GrantAbility statics, got {:#?}",
+        static_abilities
+    );
+    let else_ab = spell
+        .else_ability
+        .as_ref()
+        .expect("Otherwise branch must be present");
+    let Effect::Token {
+        count: else_count,
+        static_abilities: else_statics,
+        ..
+    } = else_ab.effect.as_ref()
+    else {
+        panic!("Otherwise must create those tokens, got {:#?}", else_ab.effect);
+    };
+    assert_eq!(else_count, &QuantityExpr::Fixed { value: 1 });
+    assert!(
+        else_statics.iter().any(|s| {
+            s.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        }),
+        "one-token Otherwise branch must inherit GrantAbility statics, got {:#?}",
+        else_statics
     );
 }
 

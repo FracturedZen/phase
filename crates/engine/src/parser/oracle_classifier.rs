@@ -264,6 +264,21 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return true;
     }
 
+    // CR 111.1 + CR 111.3 + CR 608.2c: Instant/sorcery
+    // "If …, create … tokens. They have \"…\". Otherwise, create N of those tokens"
+    // (Brood Birthing #9822). The separate "They have" sentence matches the generic
+    // "have " arm of STATIC_CONTAINS_PATTERNS, so Priority 7 claims the whole line as
+    // a nonsense Continuous static whose affected filter is Subtype("If"). Defer to
+    // the effect-chain parser, which folds the quoted grant onto the created tokens
+    // and owns the Otherwise branch. Spell-scoped only (caller gates on `is_spell`).
+    // Require a create verb + a quoted they/it-has grant so standing permanent
+    // "creatures you control have \"…\"" statics are untouched.
+    if scan_contains(lower, "create")
+        && (scan_contains(lower, "they have \"") || scan_contains(lower, "it has \""))
+    {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }
@@ -1484,6 +1499,20 @@ mod tests {
              among cards in your graveyard."
         ));
         assert!(!should_defer_spell_to_effect("~ has flashback {2}{u}."));
+    }
+
+    /// Issue #9822: Brood Birthing — create + they/it have "…" must defer past
+    /// Priority 7's generic "have " static arm so the effect-chain owns If/Otherwise.
+    #[test]
+    fn should_defer_spell_to_effect_defers_create_they_have_quoted_grant() {
+        assert!(should_defer_spell_to_effect(
+            "if you control an eldrazi spawn, create three 0/1 colorless eldrazi spawn creature tokens. they have \"sacrifice this token: add {c}.\" otherwise, create one of those tokens."
+        ));
+        // Permanent-style "creatures you control have \"…\"" without create stays
+        // on the static path (defer false — Priority 7 may still claim it).
+        assert!(!should_defer_spell_to_effect(
+            "creatures you control have \"sacrifice this creature: add {c}.\""
+        ));
     }
 
     #[test]

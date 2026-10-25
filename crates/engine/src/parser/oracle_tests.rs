@@ -34990,3 +34990,66 @@ fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
         }
     );
 }
+
+
+/// Issue #9822: Brood Birthing — If/Otherwise create + "They have \"…\"" must
+/// parse as a spell Token (count 3) with GrantAbility statics and an else Token
+/// (count 1) that inherits those statics, not as a Subtype("If") Continuous static.
+#[test]
+fn brood_birthing_if_otherwise_those_tokens_parses_as_spell() {
+    use crate::types::ability::{ContinuousModification, Effect, QuantityExpr};
+
+    let parsed = parse_oracle_text(
+        "If you control an Eldrazi Spawn, create three 0/1 colorless Eldrazi Spawn \
+         creature tokens. They have \"Sacrifice this token: Add {C}.\" Otherwise, \
+         create one of those tokens.",
+        "Brood Birthing",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        parsed.statics.is_empty(),
+        "must not claim Priority-7 Continuous static: {:#?}",
+        parsed.statics
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:#?}", parsed.abilities);
+    let spell = &parsed.abilities[0];
+    let Effect::Token {
+        count,
+        static_abilities,
+        ..
+    } = spell.effect.as_ref()
+    else {
+        panic!("expected Token, got {:#?}", spell.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+    assert!(
+        static_abilities.iter().any(|s| {
+            s.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        }),
+        "grant must fold onto Token statics: {:#?}",
+        static_abilities
+    );
+    let else_ab = spell.else_ability.as_ref().expect("Otherwise");
+    let Effect::Token {
+        count: else_count,
+        static_abilities: else_statics,
+        ..
+    } = else_ab.effect.as_ref()
+    else {
+        panic!("Otherwise must be Token, got {:#?}", else_ab.effect);
+    };
+    assert_eq!(*else_count, QuantityExpr::Fixed { value: 1 });
+    assert!(
+        else_statics.iter().any(|s| {
+            s.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+        }),
+        "Otherwise must inherit grant statics: {:#?}",
+        else_statics
+    );
+}

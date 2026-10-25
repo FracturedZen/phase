@@ -4437,6 +4437,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     rewrite_that_type_mana_instead(&mut result);
 
     fold_token_it_has_grants_into_token_statics(&mut result);
+    // CR 111.1 + CR 608.2c (#9822 Brood Birthing): the Otherwise "create one of
+    // those tokens" branch is rewritten from the antecedent Token *before* the
+    // sibling "They have \"…\"" grant folds into that Token's statics. The same
+    // grant was also SequentialSibling-appended under `else_ability`; fold it
+    // there too so the one-token branch inherits the sacrifice-for-mana ability.
+    if let Some(else_ab) = result.else_ability.as_mut() {
+        fold_token_it_has_grants_into_token_statics(else_ab);
+    }
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a

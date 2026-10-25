@@ -3631,12 +3631,36 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
 /// a new count. We walk `defs` looking for an `Unimplemented` clause whose
 /// description matches the anaphor, and rewrite its effect as a clone of the
 /// previous def's effect with the parsed count.
+///
+/// Also rewrites an `else_ability` whose body is the same anaphor against its
+/// enclosing def's own token effect (Brood Birthing #9822: "If …, create three
+/// … tokens. … Otherwise, create one of those tokens."). That branch is
+/// already folded onto the conditional create before this pass runs, so the
+/// sibling walk alone would never see it.
 pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
+    for def in defs.iter_mut() {
+        rewrite_those_tokens_else_from_self(def);
+    }
     for i in 1..defs.len() {
         let (prev_rest, cur_rest) = defs.split_at_mut(i);
         let prev = &prev_rest[i - 1];
         let cur = &mut cur_rest[0];
         rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
+    }
+}
+
+/// CR 111.1 + CR 608.2c: rewrite `else_ability` / nested `sub_ability` "create N
+/// of those tokens" anaphors against the enclosing instruction's token effect.
+fn rewrite_those_tokens_else_from_self(def: &mut AbilityDefinition) {
+    if def.else_ability.is_some() {
+        let antecedent = def.effect.clone();
+        if let Some(else_ab) = def.else_ability.as_mut() {
+            rewrite_those_tokens_from_antecedent(&mut else_ab.effect, &antecedent);
+            rewrite_those_tokens_else_from_self(else_ab);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_those_tokens_else_from_self(sub);
     }
 }
 
