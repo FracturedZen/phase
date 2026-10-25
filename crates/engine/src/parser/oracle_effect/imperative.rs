@@ -262,6 +262,10 @@ fn parse_library_owner_phrase<'a>(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
         ),
         ("target player's library", TargetFilter::Player),
+        // CR 508.5 + CR 401.1 (#8526): the player being attacked by the source
+        // (Coral Fighters). `TargetFilter::DefendingPlayer` is already reachable
+        // for hand/look surfaces; the library-owner table was the missing arm.
+        ("defending player's library", TargetFilter::DefendingPlayer),
         // CR 401.1: each player's deck becomes their library, so "each player's
         // library" names ONE library per player — the per-player scope sentinel.
         ("each player's library", TargetFilter::ScopedPlayer),
@@ -29953,6 +29957,15 @@ mod tests {
                 "look at two cards from the top of target opponent's library",
                 target_opponent,
             ),
+            // CR 508.5 (#8526): Coral Fighters — both dig word orders.
+            (
+                "look at the top card of defending player's library",
+                TargetFilter::DefendingPlayer,
+            ),
+            (
+                "look at one card from the top of defending player's library",
+                TargetFilter::DefendingPlayer,
+            ),
         ] {
             assert_eq!(
                 dig_owner_of(text),
@@ -29988,11 +30001,12 @@ mod tests {
         );
 
         for text in [
-            // Owners with no `TargetFilter` today (Neck Tangle, Inzerva, Coral
-            // Fighters). Honestly unparsed beats confidently controller-bound.
+            // Owners with no library-owner `TargetFilter` today (Neck Tangle,
+            // Inzerva). Honestly unparsed beats confidently controller-bound.
+            // Coral Fighters ("defending player's library") is now bound — see
+            // dig_binds_the_library_owner_the_clause_names (#8526).
             "look at the top card of the hydra's library",
             "look at the top two cards of each other player's library",
-            "look at the top card of defending player's library",
             // Not a library at all (Stairs to Infinity's planar deck).
             "look at the top card of your planar deck",
             // COUNT-LEADING word order, unrecognized owner. This shape reaches
@@ -30003,7 +30017,6 @@ mod tests {
             // negative row above uses the top-N order and so could not see it.
             "look at two cards from the top of an opponent's library",
             "look at two cards from the top of the hydra's library",
-            "look at one card from the top of defending player's library",
         ] {
             assert_eq!(
                 dig_owner_of(text),
@@ -30058,6 +30071,7 @@ mod tests {
             "that player's library",
             "target opponent's library",
             "target player's library",
+            "defending player's library",
             "each player's library",
         ] {
             let shared = parse_library_owner_phrase(owner, &ctx)
