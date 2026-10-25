@@ -10460,25 +10460,48 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
     ))
 }
 
-/// Parse "that player controls more [type] than you" → QuantityComparison.
+/// Parse "`<player>` controls more|fewer [type] than you" → QuantityComparison.
 ///
-/// CR 603.2b + CR 603.4 + CR 102.1: Phase triggers such as Keeper of the Accord
-/// ("At the beginning of each opponent's end step, if that player controls more
-/// creatures than you, ...") compare the active player's battlefield to the
-/// source controller's. `ControllerRef::ScopedPlayer` binds to the event player
-/// at both detection and resolution (`resolve_quantity_for_trigger_check`).
+/// CR 603.2b + CR 603.4 + CR 102.1 + CR 608.2c: cross-player ObjectCount
+/// comparisons against the source controller. Anchors:
+/// - Keeper of the Accord / Archaeomancer's Map: "that player controls more …"
+/// - Waking the Trolls (issue #9601): "they control fewer lands than you"
+/// - Tithe: "target opponent controls more lands than you"
+///
+/// Anaphoric "that player" / "they" bind as `ControllerRef::ScopedPlayer` so
+/// relative-player / fan-out / target antecedents resolve at check time.
+/// Direct "target opponent|player" name the targeted player slot. Pair with
+/// `difference_expr` so "… equal to the difference" binds the unsigned gap.
 fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = (
-        controller_phrase_among(&[ControllerPhrase::THAT_PLAYER_CONTROLS]),
-        tag(" more "),
-    )
-        .parse(input)?;
+    let (rest, controller) = alt((
+        value(
+            ControllerRef::ScopedPlayer,
+            controller_phrase_among(&[
+                ControllerPhrase::THAT_PLAYER_CONTROLS,
+                ControllerPhrase::THEY_CONTROL,
+            ]),
+        ),
+        value(
+            ControllerRef::TargetOpponent,
+            controller_phrase_among(&[ControllerPhrase::TARGET_OPPONENT_CONTROLS]),
+        ),
+        value(
+            ControllerRef::TargetPlayer,
+            controller_phrase_among(&[ControllerPhrase::TARGET_PLAYER_CONTROLS]),
+        ),
+    ))
+    .parse(input)?;
+    let (rest, comparator) = alt((
+        value(Comparator::GT, tag(" more ")),
+        value(Comparator::LT, tag(" fewer ")),
+    ))
+    .parse(rest)?;
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
     let (rest, _) = tag(" than you").parse(rest)?;
 
     let (filter, _) = parse_type_phrase_folding(type_text.trim());
-    let scoped_filter = match filter {
-        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(ControllerRef::ScopedPlayer)),
+    let lhs_filter = match filter {
+        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(controller)),
         other => other,
     };
     let you_filter = match parse_type_phrase_folding(type_text.trim()) {
@@ -10491,10 +10514,10 @@ fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, S
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: scoped_filter,
+                    filter: lhs_filter,
                 },
             },
-            comparator: Comparator::GT,
+            comparator,
             rhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount { filter: you_filter },
             },
@@ -12359,10 +12382,11 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::ScopedPlayer))
         );
         for declined in [
-            "they control",
             "you control",
             "controlled by that player",
             "the chosen player controls",
+            "defending player controls",
+            "an opponent controls",
         ] {
             assert!(
                 parse_that_player_controls_more_comparison(&format!(
@@ -12370,6 +12394,69 @@ mod tests {
                 ))
                 .is_err(),
                 "{declined:?}"
+            );
+        }
+    }
+
+    /// CR 608.2c + issue #9601: "they control fewer lands than you" (Waking the
+    /// Trolls) and "target opponent controls more lands than you" (Tithe) must
+    /// emit ObjectCount QuantityComparison — not fall through with condition null.
+    #[test]
+    fn they_and_target_opponent_controls_fewer_more_lands_than_you() {
+        let cases = [
+            (
+                "they control fewer lands than you",
+                ControllerRef::ScopedPlayer,
+                Comparator::LT,
+            ),
+            (
+                "that player controls fewer lands than you",
+                ControllerRef::ScopedPlayer,
+                Comparator::LT,
+            ),
+            (
+                "target opponent controls more lands than you",
+                ControllerRef::TargetOpponent,
+                Comparator::GT,
+            ),
+            (
+                "target player controls more lands than you",
+                ControllerRef::TargetPlayer,
+                Comparator::GT,
+            ),
+        ];
+        for (text, controller, comparator) in cases {
+            let (rest, condition) = parse_that_player_controls_more_comparison(text)
+                .unwrap_or_else(|e| panic!("{text:?}: {e:?}"));
+            assert_eq!(rest, "", "{text:?}");
+            let StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(lhs),
+                        },
+                    },
+                comparator: got_cmp,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(rhs),
+                        },
+                    },
+            } = condition
+            else {
+                panic!("{text:?}: {condition:?}");
+            };
+            assert_eq!(got_cmp, comparator, "{text:?}");
+            assert_eq!(lhs.controller, Some(controller), "{text:?}");
+            assert_eq!(rhs.controller, Some(ControllerRef::You), "{text:?}");
+            assert!(
+                lhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)),
+                "{text:?}: {lhs:?}"
+            );
+            assert!(
+                rhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)),
+                "{text:?}: {rhs:?}"
             );
         }
     }
@@ -19260,6 +19347,58 @@ mod tests {
                 assert_eq!(rhs.controller, Some(ControllerRef::You));
             }
             other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c + issue #9601: intervening-if land-count comparisons against
+    /// "you" must survive `parse_inner_condition` for they / target opponent.
+    #[test]
+    fn test_they_control_fewer_lands_and_target_opponent_more_lands_than_you() {
+        let (rest, c) = parse_inner_condition("they control fewer lands than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(lhs),
+                            },
+                    },
+                comparator: Comparator::LT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(rhs),
+                            },
+                    },
+            } => {
+                assert_eq!(lhs.controller, Some(ControllerRef::ScopedPlayer));
+                assert_eq!(rhs.controller, Some(ControllerRef::You));
+                assert!(lhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)));
+            }
+            other => panic!("expected fewer-lands comparison, got {other:?}"),
+        }
+
+        let (rest, c) =
+            parse_inner_condition("target opponent controls more lands than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(lhs),
+                            },
+                    },
+                comparator: Comparator::GT,
+                ..
+            } => {
+                assert_eq!(lhs.controller, Some(ControllerRef::TargetOpponent));
+            }
+            other => panic!("expected target-opponent more-lands, got {other:?}"),
         }
     }
 

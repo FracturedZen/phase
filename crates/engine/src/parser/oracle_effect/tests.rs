@@ -14160,6 +14160,101 @@ fn draw_cards_equal_to_cross_player_hand_difference() {
     }
 }
 
+/// CR 608.2c + CR 111.2 + issue #9601: Waking the Trolls chapter III —
+/// "If they control fewer lands than you, create a number of … tokens equal to
+/// the difference." Condition must be ObjectCount LT; token count Difference
+/// (unsigned gap via quantity.rs).
+#[test]
+fn create_tokens_equal_to_fewer_lands_difference() {
+    let def = parse_effect_chain(
+        "If they control fewer lands than you, create a number of 4/4 green Troll Warrior creature tokens with trample equal to the difference.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::ScopedPlayer)
+                    ),
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        }),
+        "condition must be lands(ScopedPlayer) LT lands(You), got {:?}",
+        def.condition
+    );
+    match &*def.effect {
+        Effect::Token {
+            count: QuantityExpr::Difference { left, right },
+            ..
+        } => {
+            assert_eq!(
+                **left,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land().controller(ControllerRef::ScopedPlayer)
+                        ),
+                    },
+                }
+            );
+            assert_eq!(
+                **right,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land().controller(ControllerRef::You)
+                        ),
+                    },
+                }
+            );
+        }
+        other => panic!("expected Token with Difference count, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + issue #9601: Tithe-style gate — "If target opponent controls more
+/// lands than you, …" must attach QuantityCheck(TargetOpponent lands GT You).
+#[test]
+fn target_opponent_controls_more_lands_gates_effect() {
+    let def = parse_effect_chain(
+        "If target opponent controls more lands than you, draw a card.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::TargetOpponent)
+                    ),
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::You)
+                    ),
+                },
+            },
+        }),
+        "got {:?}",
+        def.condition
+    );
+    assert!(matches!(*def.effect, Effect::Draw { .. }), "{:?}", def.effect);
+}
+
 #[test]
 fn effect_for_each_object_copy_token_uses_source_filter_not_repeat() {
     let def = parse_effect_chain(
