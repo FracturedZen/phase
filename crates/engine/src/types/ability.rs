@@ -14731,6 +14731,10 @@ pub const REMOVE_COUNTER_COST_ALL: u32 = u32::MAX - 1;
 pub const REMOVE_COUNTER_COST_ANY_NUMBER: u32 = u32::MAX - 2;
 /// Sentinel for literal `X` in exile costs that use the compact numeric count.
 pub const EXILE_COST_X: u32 = u32::MAX;
+/// Sentinel for "sacrifice all …" costs (Soulblast, Kaervek's Spite). Distinct
+/// from the `u32::MAX` any-number / X encoding used by sacrifice costs so
+/// payment bounds can require every eligible permanent (CR 701.21a + CR 601.2h).
+pub const SACRIFICE_COST_ALL: u32 = u32::MAX - 1;
 
 pub fn is_x_remove_counter_cost_count(count: u32) -> bool {
     count == REMOVE_COUNTER_COST_X

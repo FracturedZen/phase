@@ -751,6 +751,9 @@ pub(crate) fn begin_variable_speed_payment(
 pub fn sacrifice_cost_bounds(count: u32, eligible_len: usize) -> (usize, usize) {
     if count == u32::MAX {
         (0, eligible_len)
+    } else if count == crate::types::ability::SACRIFICE_COST_ALL {
+        // CR 701.21a + CR 601.2h: "sacrifice all …" pays every eligible permanent.
+        (eligible_len, eligible_len)
     } else {
         let exact = count as usize;
         (exact, exact)

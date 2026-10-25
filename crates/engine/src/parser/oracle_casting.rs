@@ -163,10 +163,13 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         }
     }
 
-    // Mandatory single cost: "sacrifice a creature", "discard a card", "pay 3 life", etc.
-    // Delegates to parse_single_cost which handles all standard cost patterns.
-    let cost = super::oracle_cost::parse_single_cost(body_raw);
-    if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+    // Mandatory cost body: "sacrifice a creature", "discard a card", "pay 3 life",
+    // and compounds like "sacrifice all permanents you control and discard your
+    // hand" (Kaervek's Spite — CR 601.2h). Prefer `parse_oracle_cost` so comma /
+    // "and" split into Composite rather than silently dropping the second leg
+    // (the old `parse_single_cost` path kept only the sacrifice).
+    let cost = super::oracle_cost::parse_oracle_cost(body_raw);
+    if !cost.contains_unimplemented() {
         return Some(AdditionalCost::Required(cost));
     }
 
@@ -1025,7 +1028,7 @@ mod tests {
     use crate::types::ability::{
         AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
         Comparator, ControllerRef, CountScope, Effect, FilterProp, ParsedCondition, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        QuantityExpr, QuantityRef, SacrificeCost, TargetFilter, TypeFilter, SACRIFICE_COST_ALL,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -1802,6 +1805,72 @@ Trample";
             Some(AdditionalCost::Required(AbilityCost::Sacrifice(ref sac)))
                 if sac.requirement.fixed_count() == Some(1) => {}
             other => panic!("Expected Required(Sacrifice), got {:?}", other),
+        }
+    }
+
+    /// CR 701.21a + CR 601.2h (#10231): Soulblast — "sacrifice all creatures you
+    /// control" is every eligible creature, not a count of 1.
+    #[test]
+    fn parse_additional_cost_sacrifice_all_creatures_soulblast() {
+        let lower =
+            "as an additional cost to cast this spell, sacrifice all creatures you control.";
+        let raw =
+            "As an additional cost to cast this spell, sacrifice all creatures you control.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice(SacrificeCost {
+                requirement,
+                target: TargetFilter::Typed(ref tf),
+                ..
+            }))) => {
+                assert_eq!(
+                    requirement.fixed_count(),
+                    Some(SACRIFICE_COST_ALL),
+                    "Soulblast must require every eligible creature"
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "filter must be creatures: {tf:?}"
+                );
+            }
+            other => panic!("Expected Required(Sacrifice ALL creatures), got {other:?}"),
+        }
+    }
+
+    /// CR 701.21a + CR 601.2h (#10231): Kaervek's Spite — both the sacrifice-all
+    /// permanent leg and the discard-hand leg must survive as a Composite.
+    #[test]
+    fn parse_additional_cost_sacrifice_all_and_discard_hand_kaerveks_spite() {
+        let lower = "as an additional cost to cast this spell, sacrifice all permanents you control and discard your hand.";
+        let raw = "As an additional cost to cast this spell, sacrifice all permanents you control and discard your hand.";
+        let result = parse_additional_cost_line(lower, raw);
+        let Some(AdditionalCost::Required(AbilityCost::Composite { costs })) = result else {
+            panic!("Expected Required(Composite), got {result:?}");
+        };
+        assert_eq!(costs.len(), 2, "expected sacrifice + discard, got {costs:?}");
+        match &costs[0] {
+            AbilityCost::Sacrifice(SacrificeCost {
+                requirement,
+                target: TargetFilter::Typed(tf),
+                ..
+            }) => {
+                assert_eq!(requirement.fixed_count(), Some(SACRIFICE_COST_ALL));
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Permanent),
+                    "filter must be permanents: {tf:?}"
+                );
+            }
+            other => panic!("first leg must be Sacrifice ALL permanents, got {other:?}"),
+        }
+        match &costs[1] {
+            AbilityCost::Discard {
+                count:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize { .. },
+                    },
+                ..
+            } => {}
+            other => panic!("second leg must be discard your hand, got {other:?}"),
         }
     }
 

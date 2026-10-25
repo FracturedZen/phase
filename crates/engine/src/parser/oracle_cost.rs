@@ -32,6 +32,7 @@ use crate::types::ability::{
     ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
     QuantityExpr, QuantityRef, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
     EXILE_COST_X, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
+    SACRIFICE_COST_ALL,
 };
 use crate::types::counter::parse_counter_match;
 use crate::types::zones::Zone;
@@ -868,6 +869,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
             if remainder.trim().is_empty() {
                 return AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX));
             }
+        }
+        // CR 701.21a + CR 601.2h: "sacrifice all [filter]" — every eligible
+        // permanent is paid (Soulblast, Kaervek's Spite, Tomb of Urami). Distinct
+        // from the u32::MAX any-number / X encoding so payment bounds require the
+        // full eligible pool rather than 0..=N.
+        if let Some(((), rest_after_all)) = nom_on_lower(rest, &rest_lower, |i| {
+            value((), tag("all ")).parse(i)
+        }) {
+            let filter_text = rest_after_all.trim().trim_end_matches('.');
+            let Some(filter) = parse_sacrifice_cost_filter(filter_text) else {
+                return AbilityCost::Unimplemented {
+                    description: text.to_string(),
+                };
+            };
+            return AbilityCost::Sacrifice(SacrificeCost::count(filter, SACRIFICE_COST_ALL));
         }
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
@@ -2021,12 +2037,10 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// card" (Dusk Mangler) and "sacrifice all permanents you control and discard
 /// your hand" (Kaervek's Spite) are a second COST, not a narrower object; a
 /// leading "or" is an alternative whose loss is a narrowing, which fails safe.
-/// This exemption is load-bearing, not cosmetic: `parse_additional_cost_line`
-/// answers `None` — NO ADDITIONAL COST AT ALL — as soon as a fragment is
-/// `Unimplemented`, so declining these makes the spell castable for FREE.
-/// Under-paying a second cost is a real defect, but it lives in the cost
-/// COMPOSITION seam, not in this filter, and the honest repair there is a
-/// `Required(Unimplemented)` at that call site.
+/// This exemption keeps `parse_single_cost` from declining the sacrifice leg when
+/// the compound body is handed to it alone (e.g. EXEMPTION 2 unit tests). The
+/// additional-cost call site prefers `parse_oracle_cost`, which splits the "and"
+/// / comma into a Composite so both legs are paid (CR 601.2h).
 fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> bool {
     let tail = tail.trim();
     if tail.is_empty() {
@@ -2659,9 +2673,9 @@ mod tests {
     ///   * a `TypedFilter::default()` filter — the grammar built NOTHING, so
     ///     nothing was lost FROM a filter (Radiant Lotus, Baba Lysaga).
     ///   * a tail that opens a new clause — a second COST, not a narrower object
-    ///     (Dusk Mangler, Kaervek's Spite). `parse_additional_cost_line` answers
-    ///     `None` — no additional cost at all — the moment a fragment is
-    ///     `Unimplemented`, so declining these makes the spell FREE.
+    ///     (Dusk Mangler, Kaervek's Spite). `parse_single_cost` keeps the
+    ///     sacrifice leg; `parse_additional_cost_line` prefers `parse_oracle_cost`
+    ///     so the compound becomes a Composite of both legs (CR 601.2h).
     ///
     /// Revert-failing: drop the `sacrifice_filter_lost_a_restriction` call and
     /// Transmutation Font's case folds back to a bare `Typed{[Artifact], [Token]}`
@@ -2723,27 +2737,41 @@ mod tests {
         }
 
         // EXEMPTION 2 — the tail opens a NEW CLAUSE, so it is a second cost and
-        // not a narrower object. `parse_additional_cost_line` hands
-        // `parse_single_cost` (NOT `parse_oracle_cost`, which would split the
-        // comma itself) exactly these two fragments — Dusk Mangler's "or"-split
-        // left leg and Kaervek's Spite's whole body — and drops the WHOLE
-        // additional cost the moment one comes back `Unimplemented`, which would
-        // make each spell castable for FREE.
-        for (fragment, expected_type) in [
-            ("sacrifice a creature, discard a card", TypeFilter::Creature),
+        // not a narrower object. `parse_single_cost` keeps the sacrifice leg
+        // (filter + count) rather than declining to Unimplemented when the
+        // compound body is handed to it alone. `parse_additional_cost_line`
+        // prefers `parse_oracle_cost`, which splits these into Composite so both
+        // legs are paid (see `parse_additional_cost_sacrifice_all_*` tests).
+        for (fragment, expected_type, expected_count) in [
+            (
+                "sacrifice a creature, discard a card",
+                TypeFilter::Creature,
+                1u32,
+            ),
             (
                 "sacrifice all permanents you control and discard your hand",
                 TypeFilter::Permanent,
+                SACRIFICE_COST_ALL,
             ),
         ] {
             let cost = parse_single_cost(fragment);
-            let AbilityCost::Sacrifice(SacrificeCost { target, .. }) = &cost else {
+            let AbilityCost::Sacrifice(SacrificeCost {
+                target,
+                requirement,
+                ..
+            }) = &cost
+            else {
                 panic!("{fragment:?} must keep its Sacrifice cost, got {cost:?}");
             };
             let TargetFilter::Typed(tf) = target else {
                 panic!("expected a typed filter for {fragment:?}, got {target:?}");
             };
             assert_eq!(tf.type_filters, vec![expected_type], "{tf:?}");
+            assert_eq!(
+                requirement.fixed_count(),
+                Some(expected_count),
+                "{fragment:?} count"
+            );
         }
 
         // The FOLD's remainder is held to a STRICTER rule than the clause-opener
@@ -3859,6 +3887,31 @@ mod tests {
                 ));
             }
             other => panic!("Expected Sacrifice any number nonland, got {:?}", other),
+        }
+    }
+
+    /// CR 701.21a (#10231): "sacrifice all …" uses SACRIFICE_COST_ALL, distinct
+    /// from the u32::MAX any-number / X encoding.
+    #[test]
+    fn cost_sacrifice_all_creatures_you_control() {
+        match parse_oracle_cost("Sacrifice all creatures you control") {
+            AbilityCost::Sacrifice(cost) => {
+                assert_eq!(
+                    cost.requirement,
+                    crate::types::ability::SacrificeRequirement::Count {
+                        count: SACRIFICE_COST_ALL
+                    }
+                );
+                let TargetFilter::Typed(tf) = &cost.target else {
+                    panic!("expected typed filter, got {:?}", cost.target);
+                };
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature filter, got {:?}",
+                    tf.type_filters
+                );
+            }
+            other => panic!("Expected Sacrifice ALL creatures, got {other:?}"),
         }
     }
 

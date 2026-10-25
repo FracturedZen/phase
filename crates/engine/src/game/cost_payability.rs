@@ -680,7 +680,14 @@ fn object_leg_demand_and_candidates(
             };
             let demand = match cost.requirement.fixed_count() {
                 // CR 107.3a: the X sentinel is announced later.
-                Some(count) if count != u32::MAX => ObjectLegDemand::Exactly(count as usize),
+                // CR 701.21a: SACRIFICE_COST_ALL tracks the live eligible pool,
+                // not a fixed N, so joint-demand math leaves it Unmodeled.
+                Some(count)
+                    if count != u32::MAX
+                        && count != crate::types::ability::SACRIFICE_COST_ALL =>
+                {
+                    ObjectLegDemand::Exactly(count as usize)
+                }
                 _ => ObjectLegDemand::Unmodeled,
             };
             (demand, candidates)

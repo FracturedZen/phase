@@ -2711,9 +2711,13 @@ fn can_pay_resolution(
                 ability.context.granting_object,
                 &cost.target,
             );
-            cost.requirement
-                .fixed_count()
-                .is_some_and(|count| eligible.len() >= count as usize)
+            // Route through sacrifice_cost_bounds so SACRIFICE_COST_ALL /
+            // u32::MAX sentinels are not compared as literal minima.
+            cost.requirement.fixed_count().is_some_and(|count| {
+                let (min_count, _) =
+                    super::casting::sacrifice_cost_bounds(count, eligible.len());
+                eligible.len() >= min_count
+            })
         }
         // CR 117 + CR 118.3: Composite is payable iff every sub-cost is payable
         // AND its chosen hand-discard legs are jointly payable (CR 601.2h: one
