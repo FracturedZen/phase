@@ -3679,7 +3679,7 @@ fn trigger_only_twice_each_turn_is_max_times_per_turn() {
     );
     assert!(def.execute.is_some(), "effect body must still parse");
     // Frequency sentence must not remain as an unimplemented sibling.
-    let mut cur = def.execute.as_ref();
+    let mut cur = def.execute.as_ref().map(|a| a.as_ref());
     while let Some(ability) = cur {
         assert!(
             !matches!(
@@ -3692,7 +3692,7 @@ fn trigger_only_twice_each_turn_is_max_times_per_turn() {
             "constraint sentence leaked into effect chain: {:?}",
             ability.effect
         );
-        cur = ability.sub_ability.as_deref();
+        cur = ability.sub_ability.as_ref().map(|a| a.as_ref());
     }
 }
 
