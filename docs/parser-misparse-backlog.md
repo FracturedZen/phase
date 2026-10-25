@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4537
-- **Total card appearances across root causes:** 4570 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4534
+- **Total card appearances across root causes:** 4567 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -33,7 +33,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 16 | Keyword payload / multiplicity / mis-tokenization | 82 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
 | 17 | Copy 'except' / additional-modification clause dropped | 81 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
-| 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
+| 20 | Damage subject/recipient set incomplete | 67 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 50 | add-engine-effect: select the correct Effect/ability variant for the clause class |
@@ -45,7 +45,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2416/4570 ≈ 53% of all misparse appearances; the top 10 cover 3406/4570 ≈ 74.5%. Fix these first.
+> The top **5** root causes cover 2416/4567 ≈ 53% of all misparse appearances; the top 10 cover 3406/4567 ≈ 74.5%. Fix these first.
 
 ## Full card lists per root cause
 
@@ -4578,7 +4578,7 @@ are outside the detector's class.
 
 </details>
 
-### 20. Damage subject/recipient set incomplete  (70 cards)
+### 20. Damage subject/recipient set incomplete  (67 cards)
 
 **Signature.** A DealDamage/DamageDone clause drops a second source/recipient, the 'and each creature/planeswalker they control' sweep, a Battle target, or a 'shares a color' radiance expansion.
 
@@ -4604,11 +4604,8 @@ are outside the detector's class.
 - Calamitous Cave-In
 - Cerebral Eruption
 - Chandra Nalaar
-- Chandra's Flame Wave
 - Chandra's Fury
-- Chandra, Bold Pyromancer
 - Chandra, Fire of Kaladesh
-- Chandra, Flame's Fury
 - Chandra, Pyrogenius
 - Cleansing Beam
 - Collective Voyage

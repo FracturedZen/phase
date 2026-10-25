@@ -22925,26 +22925,42 @@ enum PossessiveRelation {
 /// the phrase unchanged, which is the correct reading for an object conjunct that
 /// names no controller at all.
 fn parse_anaphoric_possessive_suffix(phrase: &str) -> Option<(&str, PossessiveRelation)> {
+    // CR 608.2c: anaphoric possessives whose antecedent is the player conjunct
+    // of this same compound damage subject. "they control" (Goblin Chainwhirler),
+    // "that player controls" (Chandra's Flame Wave / Chandra, Flame's Fury),
+    // "those players control" (Rip to Pieces), and "they protect" (Joyful
+    // Stormsculptor) all close the object conjunct. "that opponent controls"
+    // is the opponent-worded sibling of "that player controls".
     let mut suffix = alt((
         pair(
             recognize(many_till(
                 anychar,
                 peek(preceded(
                     tag(" "),
-                    controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                    controller_phrase_among(&[
+                        ControllerPhrase::THEY_CONTROL,
+                        ControllerPhrase::THAT_PLAYER_CONTROLS,
+                    ]),
                 )),
             )),
             value(
                 PossessiveRelation::Controls,
                 preceded(
                     tag(" "),
-                    controller_phrase_among(&[ControllerPhrase::THEY_CONTROL]),
+                    controller_phrase_among(&[
+                        ControllerPhrase::THEY_CONTROL,
+                        ControllerPhrase::THAT_PLAYER_CONTROLS,
+                    ]),
                 ),
             ),
         ),
         pair(
             take_until(" those players control"),
             value(PossessiveRelation::Controls, tag(" those players control")),
+        ),
+        pair(
+            take_until(" that opponent controls"),
+            value(PossessiveRelation::Controls, tag(" that opponent controls")),
         ),
         pair(
             take_until(" they protect"),
@@ -23118,14 +23134,34 @@ fn try_parse_compound_player_object_damage(
     // can only be a damage RECIPIENT here if " and each " follows it, which rules
     // out the continuation clause "you gain 2 life" and the "you" inside
     // "your opponents control". `peek` leaves the connector for the tag below.
-    let (after_player, player_filter) = alt((
-        preceded(
-            tag::<_, _, OracleError<'_>>("each "),
-            parse_damage_player_scope,
+    // Player conjunct openers this grammar admits:
+    // - "each opponent/player/…" (Goblin Chainwhirler class) via parse_damage_player_scope
+    // - bare "you" before " and each " (you + each creature you control)
+    // - "target player" / "target opponent" before " and each " (Chandra's Flame
+    //   Wave / The Great Work class — issue #9588). Both lower to
+    //   PlayerFilter::TargetPlayer; legality (any player vs opponent-only) is
+    //   carried by the companion TargetFilter::Player / Opponent slot that
+    //   ControllerRef::{TargetPlayer,TargetOpponent} on the object half surfaces.
+    //   No PlayerFilter::TargetOpponent sibling (types/ability.rs).
+    let (after_player, (player_filter, target_controller)) = alt((
+        map(
+            preceded(
+                tag::<_, _, OracleError<'_>>("each "),
+                parse_damage_player_scope,
+            ),
+            |pf| (pf, None),
         ),
         value(
-            PlayerFilter::Controller,
+            (PlayerFilter::Controller, None),
             terminated(tag("you"), peek(tag(" and each "))),
+        ),
+        value(
+            (PlayerFilter::TargetPlayer, Some(ControllerRef::TargetPlayer)),
+            terminated(tag("target player"), peek(tag(" and each "))),
+        ),
+        value(
+            (PlayerFilter::TargetPlayer, Some(ControllerRef::TargetOpponent)),
+            terminated(tag("target opponent"), peek(tag(" and each "))),
         ),
     ))
     .parse(after_amount)
@@ -23228,17 +23264,23 @@ fn try_parse_compound_player_object_damage(
         // CR 102.2 + CR 102.3: an "each opponent" conjunct binds the anaphor to
         //   the opponents. `PlayerFilter::All` restricts nothing, because every
         //   player controls their own permanents, so the union is unrestricted.
-        let controller = match player_filter {
-            PlayerFilter::Opponent => Some(&ControllerRef::Opponent),
-            PlayerFilter::All => None,
-            // The bare "you" opener: an object half of the controller's own
-            // permanents spells its possessive out ("you control"), which
-            // `parse_target` consumes itself, so no anaphoric arm fires here.
-            PlayerFilter::Controller => None,
-            // Unreachable by construction — the opener `alt` above produces only
-            // the three variants matched here. Decline rather than guess a
-            // binding if that ever stops being true.
-            _ => return None,
+        // CR 115.1 + CR 109.4: a "target player/opponent" conjunct binds the
+        //   anaphor to the declared player target (`ControllerRef::TargetPlayer`
+        //   or `TargetOpponent`) so "each creature that player controls" and
+        //   "each creature they control" scope to that same announced player.
+        let controller = if let Some(ref ctrl) = target_controller {
+            Some(ctrl)
+        } else {
+            match player_filter {
+                PlayerFilter::Opponent => Some(&ControllerRef::Opponent),
+                PlayerFilter::All => None,
+                // The bare "you" opener: an object half of the controller's own
+                // permanents spells its possessive out ("you control"), which
+                // `parse_target` consumes itself, so no anaphoric arm fires here.
+                PlayerFilter::Controller => None,
+                // Unreachable by construction for the non-target openers.
+                _ => return None,
+            }
         };
         apply_anaphoric_possessive(&mut object_filter, relation, controller);
     }

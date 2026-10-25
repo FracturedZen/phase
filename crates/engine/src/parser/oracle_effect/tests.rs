@@ -71279,6 +71279,77 @@ fn compound_player_object_declines_player_shaped_object_conjunct() {
     );
 }
 
+
+// ── Issue #9588: target player/opponent + each creature they/that player control ─
+//
+// Chandra's Flame Wave / Chandra, Flame's Fury / The Great Work class: one amount
+// deals to a declared player target AND every matching permanent that player
+// controls, as one simultaneous DamageAll (CR 608.2f + CR 609.7).
+
+#[test]
+fn compound_player_object_target_player_that_player_controls() {
+    // Chandra's Flame Wave / Chandra, Flame's Fury verbatim shape.
+    let clause = compound_player_first("target player and each creature that player controls")
+        .expect("target player + that player controls must parse as unified DamageAll");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::TargetPlayer));
+    assert_eq!(
+        typed_of(target).controller,
+        Some(ControllerRef::TargetPlayer),
+        "anaphor must bind to the declared player target"
+    );
+    assert!(typed_of(target).type_filters.contains(&TypeFilter::Creature));
+}
+
+#[test]
+fn compound_player_object_target_player_they_control_or_leaves() {
+    // Chandra, Bold Pyromancer (-7): creature and planeswalker they control.
+    let clause = compound_player_first(
+        "target player and each creature and planeswalker they control",
+    )
+    .expect("target player + they control Or-leaves must parse");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::TargetPlayer));
+    match target {
+        TargetFilter::Or { filters } => {
+            assert_eq!(filters.len(), 2);
+            for f in filters {
+                assert_eq!(
+                    typed_of(f).controller,
+                    Some(ControllerRef::TargetPlayer),
+                    "EVERY Or leaf must carry TargetPlayer binding",
+                );
+            }
+        }
+        other => panic!("expected Or filter, got: {other:?}"),
+    }
+}
+
+#[test]
+fn compound_player_object_target_opponent_they_control() {
+    // The Great Work chapter I.
+    let clause = compound_player_first("target opponent and each creature they control")
+        .expect("target opponent + they control must parse");
+    let (target, player_filter) = expect_damage_all(&clause);
+    assert_eq!(*player_filter, Some(PlayerFilter::TargetPlayer));
+    assert_eq!(
+        typed_of(target).controller,
+        Some(ControllerRef::TargetOpponent),
+        "target opponent anaphor binds ControllerRef::TargetOpponent for legality"
+    );
+}
+
+#[test]
+fn compound_player_object_declines_target_player_without_connector() {
+    // Without " and each ", this is ordinary DealDamage to target player — the
+    // compound gate must decline so the remainder splitter / single-target path
+    // owns it.
+    assert!(
+        compound_player_first("target player").is_none(),
+        "bare target player is not a compound subject"
+    );
+}
+
 // ── Issue #8380 Unit 3: the amount-form axis ─────────────────────────────
 
 #[test]

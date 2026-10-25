@@ -2108,7 +2108,25 @@ pub fn resolve_all(
 
     // CR 120.3: Collect matching player IDs when the effect also targets players.
     // The player set is part of the same damage event as the object set.
+    //
+    // CR 115.1 + CR 601.2c: `PlayerFilter::TargetPlayer` reads the declared
+    // player target (companion slot from `ControllerRef::TargetPlayer` /
+    // `TargetOpponent` on the object half — Chandra's Flame Wave class). The
+    // generic `collect_matching_players` helper is ability-unaware and
+    // deliberately returns nobody for that variant; resolve it here against
+    // the ability's announced targets instead.
     let matching_players: Vec<PlayerId> = match player_filter {
+        Some(PlayerFilter::TargetPlayer) => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                .into_iter()
+                .filter(|&pid| {
+                    state
+                        .players
+                        .iter()
+                        .any(|p| p.id == pid && !p.is_eliminated)
+                })
+                .collect()
+        }
         Some(pf) => collect_matching_players(
             state,
             pf,
@@ -7577,6 +7595,135 @@ mod tests {
         assert_eq!(
             effect_resolved_count, 1,
             "mixed DamageAll must produce exactly one EffectResolved event",
+        );
+    }
+
+    /// Issue #9588 — Chandra's Flame Wave / The Great Work class:
+    /// `DamageAll { player_filter: TargetPlayer, target: Typed{controller:
+    /// TargetPlayer} }` must deal to the announced player target AND every
+    /// matching permanent that player controls, and must leave the controller's
+    /// own permanents (and any non-announced player's) untouched.
+    #[test]
+    fn damage_all_target_player_hits_announced_player_and_their_creatures() {
+        use crate::types::ability::{ControllerRef, PlayerFilter, TypeFilter, TypedFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Flame Wave".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let own_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Own Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&own_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Mirror parser output for "deals 2 damage to target player and each
+        // creature that player controls" after the companion player slot is
+        // announced (ability.targets = [Player(1)]).
+        let mut ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::TargetPlayer),
+                damage_source: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.push_chosen_target(TargetRef::Player(PlayerId(1)));
+
+        let life_before_opp = state.players[1].life;
+        let life_before_self = state.players[0].life;
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events)
+            .expect("TargetPlayer DamageAll resolves");
+
+        assert_eq!(
+            state.players[1].life,
+            life_before_opp - 2,
+            "announced target player must take the damage"
+        );
+        assert_eq!(
+            state.players[0].life, life_before_self,
+            "controller must not take TargetPlayer damage"
+        );
+        assert_eq!(state.objects[&opp_creature].damage_marked, 2);
+        assert_eq!(
+            state.objects[&own_creature].damage_marked, 0,
+            "controller's creature must not match TargetPlayer-scoped filter"
+        );
+
+        // Discrimination: without the announced player, the TargetPlayer arm
+        // must deal to nobody (not fall through to "all players").
+        let mut no_target = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+                player_filter: Some(PlayerFilter::TargetPlayer),
+                damage_source: None,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        // Reset markings so the empty-target run is observable.
+        state.objects.get_mut(&opp_creature).unwrap().damage_marked = 0;
+        state.players[1].life = life_before_opp;
+        let mut events2 = Vec::new();
+        resolve_all(&mut state, &no_target, &mut events2)
+            .expect("empty-target DamageAll still resolves (fizzle on players)");
+        assert_eq!(
+            state.players[1].life, life_before_opp,
+            "with no announced player, TargetPlayer must hit nobody"
+        );
+        assert_eq!(
+            state.objects[&opp_creature].damage_marked, 0,
+            "with no announced player, TargetPlayer-scoped creatures match nobody"
         );
     }
 
