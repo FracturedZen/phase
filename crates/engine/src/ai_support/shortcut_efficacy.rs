@@ -85,7 +85,7 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ControllerRef, Effect, FilterProp, PlayerFilter,
-    SearchDestinationSplit, TargetFilter, TypedFilter,
+    SearchDestinationSplit, TargetFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::game_state::GameState;
@@ -1805,7 +1805,8 @@ mod tests {
         assert_eq!(
             target_player,
             &Some(TargetFilter::Typed(
-                TypedFilter::default().controller(ControllerRef::ParentTargetController)
+                crate::types::ability::TypedFilter::default()
+                    .controller(ControllerRef::ParentTargetController)
             )),
             "issue #10225: Mimeofacture must bind the permanent's controller as library owner"
         );
