@@ -2011,6 +2011,101 @@ fn molten_psyche_full_oracle_text_has_scoped_shuffle_and_recipient_damage() {
     ));
 }
 
+/// CR 608.2c + CR 109.4 + CR 509.1b: Concussive Bolt Metalcraft — creatures
+/// controlled by that player or by that planeswalker's controller can't block
+/// this turn. The passive combined controller phrase must bind
+/// `ParentTargetController` (not truncate to the that-player anaphor).
+#[test]
+fn concussive_bolt_metalcraft_cant_block_binds_parent_target_controller() {
+    use crate::types::statics::StaticMode;
+    let parsed = parse_oracle_text(
+        "Concussive Bolt deals 4 damage to target player or planeswalker.\n\
+         Metalcraft — If you control three or more artifacts, creatures controlled by that player or by that planeswalker's controller can't block this turn.",
+        "Concussive Bolt",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "Concussive Bolt must parse cleanly: {:?}",
+        parsed.parse_warnings
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Concussive Bolt must produce a spell ability");
+    assert!(
+        matches!(&*ability.effect, Effect::DealDamage { .. }),
+        "root must be DealDamage, got {:#?}",
+        ability.effect
+    );
+
+    fn find_cant_block(ability: &AbilityDefinition) -> Option<&AbilityDefinition> {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*ability.effect
+        {
+            if static_abilities
+                .iter()
+                .any(|s| s.mode == StaticMode::CantBlock)
+            {
+                return Some(ability);
+            }
+        }
+        ability
+            .sub_ability
+            .as_deref()
+            .and_then(find_cant_block)
+            .or_else(|| ability.else_ability.as_deref().and_then(find_cant_block))
+    }
+
+    let cant = parsed
+        .abilities
+        .iter()
+        .find_map(find_cant_block)
+        .unwrap_or_else(|| {
+            panic!(
+                "Metalcraft rider must lower to CantBlock GenericEffect: {:#?}",
+                parsed.abilities
+            )
+        });
+    assert!(
+        cant.condition.is_some(),
+        "Metalcraft rider must stay conditional on 3+ artifacts"
+    );
+    let Effect::GenericEffect {
+        static_abilities,
+        target,
+        ..
+    } = &*cant.effect
+    else {
+        unreachable!()
+    };
+    let def = static_abilities
+        .iter()
+        .find(|s| s.mode == StaticMode::CantBlock)
+        .expect("CantBlock static");
+
+    // Controller may sit on the static's affected Typed filter, or on the
+    // effect's target when affected is ParentTarget.
+    let controller = match def.affected.as_ref() {
+        Some(TargetFilter::Typed(tf)) => tf.controller.clone(),
+        Some(TargetFilter::ParentTarget) => match target {
+            Some(TargetFilter::Typed(tf)) => tf.controller.clone(),
+            _ => None,
+        },
+        other => panic!("unexpected CantBlock affected: {other:?}"),
+    };
+    assert_eq!(
+        controller,
+        Some(ControllerRef::ParentTargetController),
+        "controller must be ParentTargetController (was truncated to that-player anaphor); \
+         affected={:?} target={target:?}",
+        def.affected
+    );
+}
+
 /// CR 510.1a + CR 613.11: Plagon, Lord of the Beach — the singular one-shot
 /// EFFECT form "Target creature you control assigns combat damage equal to its
 /// toughness rather than its power this turn". The effect pipeline deconjugates

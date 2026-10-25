@@ -20544,6 +20544,36 @@ mod tests {
         );
     }
 
+    /// Concussive Bolt class: "creatures controlled by that player or by that
+    /// planeswalker's controller" must pin ControllerRef::ParentTargetController
+    /// so a planeswalker target's controller is bound (CR 109.4 + CR 608.2c).
+    #[test]
+    fn creatures_controlled_by_player_or_planeswalker_controller() {
+        for text in [
+            "creatures controlled by that player or by that planeswalker's controller",
+            "creatures controlled by that player or by that planeswalker’s controller",
+            "creature controlled by that opponent or by that planeswalker's controller",
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert!(
+                rest.trim().is_empty() || rest.trim_start().starts_with('.'),
+                "{text}: remainder {rest:?}"
+            );
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("{text}: expected Typed, got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "{text}: {tf:?}"
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ParentTargetController),
+                "{text}: controller must survive (was truncated to that-player anaphor)"
+            );
+        }
+    }
+
     #[test]
     fn permanents_that_are_one_or_more_colors_full_target() {
         let (filter, rest) = parse_target("all permanents that are one or more colors");

@@ -400,6 +400,25 @@ pub(crate) fn parse_controller_phrase(input: &str) -> OracleResult<'_, Controlle
                 },
                 tag("you don't control"),
             ),
+            // CR 608.2c + CR 109.4: "controlled by that player|opponent or by
+            // that planeswalker's controller" — passive sibling of the active
+            // "that player or that planeswalker's controller controls" (#9589).
+            // Concussive Bolt Metalcraft. Must precede bare "controlled by that
+            // player" so the longer referent is not truncated.
+            value(
+                ControllerPhrase {
+                    subject: ControllerSubject::Direct(ControllerRef::ParentTargetController),
+                    form: ControllerForm::Passive,
+                    tense: ControllerTense::Present,
+                },
+                (
+                    tag("controlled by "),
+                    alt((tag("that player"), tag("that opponent"))),
+                    tag(" or by that planeswalker"),
+                    alt((tag("'s"), tag("\u{2019}s"))),
+                    tag(" controller"),
+                ),
+            ),
             value(
                 ControllerPhrase {
                     subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
@@ -531,13 +550,16 @@ pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool 
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
         | ControllerRef::EnchantedPlayer
-        | ControllerRef::ActivePlayer => true,
+        | ControllerRef::ActivePlayer
+        // CR 608.2c + CR 109.4: yielded by "controlled by that player|opponent
+        // or by that planeswalker's controller" (Concussive Bolt / passive
+        // sibling of #9589).
+        | ControllerRef::ParentTargetController => true,
         // Whether a source's "choose a player" populates the chosen player is
         // not established for the cards that would read it here.
         ControllerRef::SourceChosenPlayer => false,
         // The grammar never yields these as a direct subject.
         ControllerRef::ScopedPlayer
-        | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::ChosenPlayer { .. }
@@ -1533,6 +1555,50 @@ mod tests {
     /// The mixed-case projection admits the same phrases as the lowercase one
     /// in any casing, and returns the remainder in the input's original case.
     #[test]
+    /// Concussive Bolt: passive "controlled by that player|opponent or by that
+    /// planeswalker's controller" binds ParentTargetController (CR 608.2c +
+    /// CR 109.4) — must not truncate to bare "controlled by that player".
+    #[test]
+    fn controlled_by_player_or_planeswalker_controller_binds_parent_target_controller() {
+        for text in [
+            "controlled by that player or by that planeswalker's controller",
+            "controlled by that player or by that planeswalker’s controller",
+            "controlled by that opponent or by that planeswalker's controller",
+        ] {
+            let (rest, phrase) = parse_controller_phrase(text)
+                .unwrap_or_else(|e| panic!("must parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                phrase,
+                ControllerPhrase {
+                    subject: ControllerSubject::Direct(ControllerRef::ParentTargetController),
+                    form: ControllerForm::Passive,
+                    tense: ControllerTense::Present,
+                },
+                "{text}"
+            );
+            assert!(
+                admits_type_phrase_controller(&ControllerRef::ParentTargetController),
+                "type-phrase reader must admit the combined passive referent"
+            );
+        }
+        // Bare "controlled by that player" must still parse as the anaphor.
+        let (rest, phrase) = parse_controller_phrase("controlled by that player").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            phrase.subject,
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer)
+        );
+        assert_eq!(phrase.form, ControllerForm::Passive);
+        // Reversed order is a different sentence — fail closed.
+        assert!(
+            parse_controller_phrase(
+                "controlled by that planeswalker's controller or by that player"
+            )
+            .is_err()
+        );
+    }
+
     fn controller_phrase_among_mixed_case_bridges_original_case() {
         let mut they_control =
             controller_phrase_among_mixed_case(&[ControllerPhrase::THEY_CONTROL]);
