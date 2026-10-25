@@ -25553,37 +25553,56 @@ fn put_one_two_or_three_target_creature_cards_is_bounded_multi_target() {
     assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
 }
 
-/// CR 601.2c + CR 115.1a: "Put two target <permanents> on top of their owners'
-/// libraries" (Rebuking Ceremony, Plow Under) announces exactly two targets.
-/// SHAPE; the runtime proof for Rebuking Ceremony is
-/// `put_target_count_entry_counters.rs`. The destination assertion is only a
-/// reach guard that the clause parsed to a library move (the separate
-/// "libraries" plural routing defect is not asserted here).
+/// CR 601.2c + CR 115.1a + CR 400.3 + CR 401.4: "Put two target <permanents>
+/// on top of their owners' libraries" (Rebuking Ceremony, Plow Under)
+/// announces exactly two targets AND places each on top of its owner's
+/// library (`PutAtLibraryPosition{Top}`), not a positionless `ChangeZone` to
+/// Library. The plural "libraries" must reach the same positional route as
+/// the singular "library" (issue #10110).
 ///
-/// Paired control on the same entry points: a resource count on a target
-/// ("Put two +1/+1 counters on target creature") is not an announced target
-/// count and must stay without a `MultiTargetSpec`.
+/// Paired controls:
+/// - singular "library" still produces `PutAtLibraryPosition{Top}`
+/// - "on the bottom of their owners' libraries" produces Bottom
+/// - a resource count on a target ("Put two +1/+1 counters on target
+///   creature") is not an announced target count
 #[test]
 fn put_two_target_permanents_is_exact_multi_target() {
+    use crate::types::ability::LibraryPosition;
     let two = MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 });
     for text in [
         "Put two target artifacts on top of their owners' libraries.",
         "Put two target lands on top of their owners' libraries.",
+        "Put two target lands on top of their owners' library.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
             matches!(
                 def.effect.as_ref(),
-                Effect::ChangeZone {
-                    destination: Zone::Library,
+                Effect::PutAtLibraryPosition {
+                    position: LibraryPosition::Top,
                     ..
                 }
             ),
-            "{text:?}: reach guard: expected a library ChangeZone, got {:?}",
+            "{text:?}: expected PutAtLibraryPosition{{Top}}, got {:?}",
             def.effect
         );
         assert_eq!(def.multi_target, Some(two.clone()), "{text:?}");
     }
+
+    let bottom = "Put two target artifacts on the bottom of their owners' libraries.";
+    let def = parse_effect_chain(bottom, AbilityKind::Spell);
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::PutAtLibraryPosition {
+                position: LibraryPosition::Bottom,
+                ..
+            }
+        ),
+        "{bottom:?}: expected PutAtLibraryPosition{{Bottom}}, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, Some(two.clone()), "{bottom:?}");
 
     let counters = "Put two +1/+1 counters on target creature.";
     let def = parse_effect_chain(counters, AbilityKind::Spell);

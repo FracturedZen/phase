@@ -15831,7 +15831,7 @@ fn try_parse_owner_of_target_shuffle(
 
     // Must contain both "shuffle" and "library" to be a shuffle-into-library pattern
     if !nom_primitives::scan_contains(tp.lower, "shuffle")
-        || !nom_primitives::scan_contains(tp.lower, "library")
+        || !nom_primitives::scan_contains_library(tp.lower)
     {
         return None;
     }

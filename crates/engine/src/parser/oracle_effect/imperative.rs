@@ -8909,7 +8909,7 @@ pub(super) fn parse_put_ast(
     // Fixed-count forms with an origin zone ("from your graveyard") remain library
     // reposition effects; mass "all"/"each" forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on top of")
-        && nom_primitives::scan_contains(lower, "library")
+        && nom_primitives::scan_contains_library(lower)
         && !has_mass_zone_origin
         && !is_this_way_partition
     {
@@ -8926,7 +8926,7 @@ pub(super) fn parse_put_ast(
     // origin-zone forms remain library reposition effects; mass "all"/"each"
     // forms move a whole source zone.
     if nom_primitives::scan_contains(lower, "on the bottom of")
-        && nom_primitives::scan_contains(lower, "library")
+        && nom_primitives::scan_contains_library(lower)
         && !has_mass_zone_origin
         && !is_this_way_partition
     {
@@ -9764,7 +9764,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     if tag::<_, _, OracleError<'_>>("shuffle")
         .parse(lower)
         .is_err()
-        || !nom_primitives::scan_contains(lower, "library")
+        || !nom_primitives::scan_contains_library(lower)
     {
         return None;
     }
@@ -9949,7 +9949,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         nom_on_lower(text, lower, |input| value((), tag("shuffle ")).parse(input))
     {
         if nom_primitives::scan_contains(lower, "into")
-            && nom_primitives::scan_contains(lower, "library")
+            && nom_primitives::scan_contains_library(lower)
             && nom_primitives::scan_contains(lower, "from")
         {
             // CR 400.6: a leading "all "/"each " quantifier ("shuffle all

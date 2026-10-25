@@ -1344,6 +1344,16 @@ pub fn scan_contains(text: &str, phrase: &str) -> bool {
     false
 }
 
+/// CR 400.3: true when the text names a library zone in singular or plural
+/// ("library" / "libraries"). Oracle uses both for owner-library placement
+/// ("on top of their owners' libraries" — Plow Under, Rebuking Ceremony;
+/// "on the bottom of their owners' libraries" — Terminus-class mass returns).
+/// `scan_contains(..., "library")` alone misses the plural because "libraries"
+/// is not a word-boundary prefix of "library" (and vice versa).
+pub fn scan_contains_library(text: &str) -> bool {
+    scan_contains(text, "library") || scan_contains(text, "libraries")
+}
+
 /// Mask every double-quoted span (the quotes and their contents) with a single
 /// ASCII space, so line classifiers see the spell's own grammar and not the text
 /// of a granted/printed ability inside quotes (a created token's "with \"…\"" text

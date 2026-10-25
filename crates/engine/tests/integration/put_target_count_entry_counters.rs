@@ -13,7 +13,7 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -21,6 +21,7 @@ use engine::types::zones::Zone;
 const ABERRANT_RETURN: &str = "Put one, two, or three target creature cards from graveyards onto the battlefield under your control. Each of them enters with an additional -1/-1 counter on it.";
 
 const REBUKING_CEREMONY: &str = "Put two target artifacts on top of their owners' libraries.";
+const PLOW_UNDER: &str = "Put two target lands on top of their owners' libraries.";
 
 /// P0's board for an Aberrant Return cast: `p0_graveyard` creature cards in
 /// P0's graveyard and `p1_graveyard` creature cards in P1's graveyard (all
@@ -142,13 +143,15 @@ fn aberrant_return_single_target_is_legal() {
 /// Reverting the count recovery leaves one target slot, so the second artifact
 /// stays on the battlefield.
 ///
-/// The position within the library is deliberately not asserted: the plural
-/// "libraries" does not reach the positional-placement route (a separate
-/// pre-existing defect tracked in the parser misparse backlog).
+/// CR 401.4 + issue #10110: each card is placed on TOP of its owner's library
+/// (library[0]). Seeded under-cards prove the plural "libraries" reaches
+/// `PutAtLibraryPosition{Top}` rather than a positionless ChangeZone.
 #[test]
 fn rebuking_ceremony_targets_two_artifacts() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    let p1_under = scenario.add_card_to_library_top(P1, "P1 Under");
+    let p0_under = scenario.add_card_to_library_top(P0, "P0 Under");
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Rebuking Ceremony", false, REBUKING_CEREMONY)
         .with_mana_cost(ManaCost::generic(0))
@@ -181,6 +184,61 @@ fn rebuking_ceremony_targets_two_artifacts() {
             .contains(&mine),
         "my artifact goes to my library"
     );
+    // CR 401.4: each is on TOP of its owner's library (library[0]).
+    assert_eq!(
+        outcome.state().players[P1.0 as usize].library[0],
+        theirs,
+        "opposing artifact must be on top of its owner's library"
+    );
+    assert_eq!(
+        outcome.state().players[P0.0 as usize].library[0],
+        mine,
+        "friendly artifact must be on top of its owner's library"
+    );
+    // Seeded under-cards stay below the put targets.
+    assert!(
+        outcome.state().players[P1.0 as usize]
+            .library
+            .contains(&p1_under),
+        "P1 under-card remains in library"
+    );
+    assert!(
+        outcome.state().players[P0.0 as usize]
+            .library
+            .contains(&p0_under),
+        "P0 under-card remains in library"
+    );
     // Exactly two targets: the third artifact is untouched.
     outcome.assert_zone(&[bystander], Zone::Battlefield);
+}
+
+/// Issue #10110 sibling: Plow Under uses the same plural "owners' libraries"
+/// top placement for lands.
+#[test]
+fn plow_under_puts_two_lands_on_top_of_owners_libraries() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let _p1_under = scenario.add_card_to_library_top(P1, "P1 Under");
+    let _p0_under = scenario.add_card_to_library_top(P0, "P0 Under");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Plow Under", false, PLOW_UNDER)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let theirs = scenario.add_basic_land(P1, ManaColor::Blue);
+    let mine = scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[theirs, mine]).resolve();
+
+    outcome.assert_zone(&[theirs, mine], Zone::Library);
+    assert_eq!(
+        outcome.state().players[P1.0 as usize].library[0],
+        theirs,
+        "Plow Under: opposing land on top of its owner's library"
+    );
+    assert_eq!(
+        outcome.state().players[P0.0 as usize].library[0],
+        mine,
+        "Plow Under: own land on top of its owner's library"
+    );
 }
