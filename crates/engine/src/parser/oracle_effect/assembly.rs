@@ -4675,7 +4675,7 @@ fn reattach_create_instead_past_last_created_grant(node: &mut AbilityDefinition)
         instead.else_ability = Some(Box::new(grant));
     } else {
         let existing_else = instead.else_ability.take().expect("checked above");
-        append_to_deepest_sub_ability(&mut grant, Some(Box::new(existing_else)));
+        append_to_deepest_sub_ability(&mut grant, Some(existing_else));
         instead.else_ability = Some(Box::new(grant));
     }
     node.sub_ability = Some(Box::new(instead));
