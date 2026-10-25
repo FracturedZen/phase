@@ -879,10 +879,15 @@ fn parse_token_description_with_context(
     bind_bare_token_x_pt_to_cost_x(&mut power);
     bind_bare_token_x_pt_to_cost_x(&mut toughness);
 
-    // CR 608.2c: a "for each … this way" / "for each opponent dealt damage"
-    // rider names the token count itself.
+    // CR 608.2c + CR 107.1: a "for each … this way" / "for each opponent dealt
+    // damage" / "for each card of the chosen type revealed this way" rider is
+    // the per-unit count that multiplies the printed fixed token count ("create
+    // two … for each"). `replace_fixed_quantity` preserves Fixed(N>1) as
+    // Multiply{N, for_each} so Fertile Imagination creates 2×N Saprolings
+    // (#9844); Fixed(1) / "a token for each" still collapses to the bare rider
+    // (Malcolm, Dread Summons).
     if let Some(rider_count) = rider_count {
-        count = rider_count;
+        count = replace_fixed_quantity(count, rider_count);
     }
 
     if power.is_none() || toughness.is_none() {
@@ -934,12 +939,14 @@ fn parse_token_description_with_context(
     })
 }
 
-/// CR 608.2c + CR 120.1 + CR 603.2c: split a trailing token-count rider off a
-/// create-token body — "for each opponent dealt damage" (Malcolm) or "for each
-/// <thing> … this way" (the preceding instruction's tracked set). The rider's
-/// quantity IS the token count, so it is read ahead of the count position and
-/// the body before "for each" is the token descriptor. Any other "for each"
-/// stays in the body for the count position's for-each binder.
+/// CR 608.2c + CR 120.1 + CR 603.2c + CR 107.1: split a trailing token-count
+/// rider off a create-token body — "for each opponent dealt damage" (Malcolm)
+/// or "for each <thing> … this way" (the preceding instruction's tracked set).
+/// The rider is the per-unit count; the printed fixed count in the body
+/// ("create two … for each") multiplies it via `replace_fixed_quantity`. Read
+/// ahead of the count position so the body before "for each" is the token
+/// descriptor. Any other "for each" stays in the body for the count position's
+/// for-each binder.
 fn split_token_for_each_rider(text: &str) -> (&str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     let Ok((clause, before)) = terminated(
@@ -2178,6 +2185,35 @@ mod tests {
                 TargetFilter::Typed(typed) if typed.type_filters == vec![TypeFilter::Creature]
             ),
             "count must restrict to creature cards milled, got {filter:?}"
+        );
+    }
+
+    /// Issue #9844 Fertile Imagination: "Create two 1/1 … tokens for each card
+    /// of the chosen type revealed this way." The printed Fixed(2) must survive
+    /// as Multiply{2, for_each} — overwriting with the bare rider creates one
+    /// Saproling per revealed card instead of two.
+    #[test]
+    fn fertile_imagination_two_for_each_preserves_fixed_multiplier() {
+        let txt = "Create two 1/1 green Saproling creature tokens for each card of the chosen type revealed this way.";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected Token effect");
+        let Effect::Token { name, count, .. } = effect else {
+            panic!("expected Effect::Token, got {effect:?}");
+        };
+        assert_eq!(name, "Saproling");
+        let QuantityExpr::Multiply { factor, inner } = &count else {
+            panic!("expected Multiply wrapping the for-each rider, got {count:?}");
+        };
+        assert_eq!(*factor, 2, "printed 'two' must become Multiply factor 2");
+        assert!(
+            matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize { .. }
+                        | QuantityRef::TrackedSetSize
+                }
+            ),
+            "inner must be the revealed-this-way for-each rider, got {inner:?}"
         );
     }
 
