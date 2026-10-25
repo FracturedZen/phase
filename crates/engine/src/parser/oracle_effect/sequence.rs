@@ -1977,10 +1977,23 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // invasion counter" is mis-read as the token COUNT and the "+1/+1 counter"
     // pump is dropped entirely. Split when the continuation begins with an
     // imperative game-action verb; anaphoric-subject continuations ("It becomes
-    // a 2/2 …", "The token is goaded", "That creature gains …") begin with a
-    // pronoun/determiner, NOT a verb, and stay attached so the token-creation
-    // path handles them inline.
+    // a 2/2 …", "That creature gains …") begin with a pronoun/determiner, NOT a
+    // verb, and stay attached so the token-creation path handles them inline.
+    // (Goad designations are NOT that class — see the dedicated split below.)
     if starts_imperative_action_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
+    // CR 701.15a + CR 701.15b (issue #9607): "The token(s) (is|are) goaded
+    // [duration]" after a token's granted-ability quote is a sibling designation
+    // on the created tokens (Nettling Nuisance). Keeping it attached used to be
+    // intentional so an older uppercase-letter fallback would not over-split, but
+    // the token parser never peels this trailing sentence from a with-"…" clause —
+    // so the goad was silently dropped while coverage reported supported. Split
+    // here so the existing `GoadLastCreated` continuation path can bind
+    // `LastCreated`, matching the period-separated plural form (Life of the Party /
+    // The War Games / #3000).
+    if try_parse_tokens_goaded_continuation(trimmed_lower.as_str()).is_some() {
         return true;
     }
 
@@ -2019,8 +2032,8 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // causative "may have …" sentence directed at the affected object's
     // controller ("…life." That creature's controller may have this artifact
     // deal 1 damage to it." — Requiem Monolith). Split only on that narrow
-    // causative form; arbitrary capitalized continuations ("The token is
-    // goaded", "It becomes a 2/2 …") must stay attached to the quote.
+    // causative form; other capitalized anaphors ("It becomes a 2/2 …") stay
+    // attached to the quote. Goad designations split via the dedicated arm above.
     nom_primitives::scan_at_word_boundaries(trimmed_lower.as_str(), |i| {
         tag::<_, _, OracleError<'_>>("may have ").parse(i)
     })
@@ -2029,8 +2042,8 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
 
 /// True iff `remainder_lower` begins a fresh IMPERATIVE sibling sentence — a game-
 /// action verb such as "put "/"exile "/"create "/"tap " — as opposed to an
-/// anaphoric-subject continuation ("It becomes …", "The token is goaded", "That
-/// creature gains …") that the token-creation path keeps attached to the quote.
+/// anaphoric-subject continuation ("It becomes …", "That creature gains …") that
+/// the token-creation path keeps attached to the quote.
 ///
 /// Reuses the shared clause-starter verb table (`starts_clause_text_lower`) but
 /// first excludes the pronoun/determiner/subject starters it also recognizes for
@@ -2074,9 +2087,9 @@ fn starts_typed_group_continuous_continuation(remainder_lower: &str) -> bool {
 /// that `starts_clause_text_lower` recognizes as fresh instructions — "You gain
 /// …", "Each opponent …", "All creatures …" — are NOT token anaphors and must be
 /// allowed to split, so they are deliberately absent here (issue #5844 review).
-/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
-/// "The token is goaded" already fails the authority check and stays attached
-/// without an explicit guard.
+/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter.
+/// Goad designations ("The token is goaded …") split via the dedicated arm in
+/// `quote_closes_sentence_before_sequence` (#9607) rather than this anaphor guard.
 fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
     alt((
         tag::<_, _, OracleError<'_>>("it "),
@@ -11445,13 +11458,33 @@ mod tests {
     }
 
     #[test]
+    fn quoted_grant_splits_before_token_goaded_continuation() {
+        // CR 701.15a + CR 701.15b (issue #9607): Nettling Nuisance — after a
+        // token's granted-ability quote, "The token is goaded …" is a sibling
+        // designation on the created token and must split so `GoadLastCreated`
+        // can bind. Keeping it attached silently dropped the goad.
+        let chunks = clause_texts(
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded for the rest of the game.",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\"",
+                "The token is goaded for the rest of the game",
+            ],
+            "goad designation must split off the quoted grant: {chunks:?}"
+        );
+    }
+
+    #[test]
     fn quoted_grant_keeps_nonrecognized_capitalized_continuation() {
         // CR 608.2c: a granted quote followed by a capitalized continuation that
-        // is NOT a "may have" causative sentence ("The token is goaded …",
-        // Nettling Nuisance-style) must stay a single chunk — the prior
-        // uppercase-letter fallback over-split these.
+        // is NOT a recognized sibling form (may-have / imperative / typed-group /
+        // goad / self-cost-reduction) must stay a single chunk — the prior
+        // uppercase-letter fallback over-split these. Use a non-goad "The …"
+        // remainder that no dedicated arm claims.
         let chunks = clause_texts(
-            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The battlefield shakes.",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
@@ -12820,6 +12853,44 @@ mod tests {
                 duration: Some(Duration::Permanent),
             })
         );
+    }
+
+    /// CR 701.15b (issue #9607): singular "The token is goaded …" after a
+    /// with-"…" grant must chain as GoadLastCreated — Nettling Nuisance.
+    #[test]
+    fn create_token_with_quote_then_goad_singular_has_no_effect_the_gap() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "that player creates a 4/2 red Pirate creature token with \"This token can't block.\" The token is goaded for the rest of the game.",
+            AbilityKind::Spell,
+        );
+        let sub = def.sub_ability.as_ref().expect("goad sub_ability");
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost: _,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::Permanent));
+                assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded
+                    }
+                )));
+            }
+            Effect::Unimplemented { name, .. } => {
+                panic!("expected GenericEffect goad sub, got Unimplemented({name})")
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+        match def.effect.as_ref() {
+            Effect::Token { .. } => {}
+            other => panic!("expected Token head, got {other:?}"),
+        }
     }
 
     /// CR 701.15b: absorbed continuation grants permanent goad on LastCreated.

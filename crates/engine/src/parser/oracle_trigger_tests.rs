@@ -4298,6 +4298,43 @@ fn trigger_life_of_the_party_etb_goads_created_tokens() {
     }
 }
 
+/// CR 603.2 + CR 701.15b (issue #9607): Nettling Nuisance — singular
+/// "The token is goaded for the rest of the game" after a with-"…" grant must
+/// rewrite to a permanent GenericEffect on LastCreated (same class as #3000's
+/// plural form).
+#[test]
+fn trigger_nettling_nuisance_goads_created_token() {
+    let def = parse_trigger_line(
+        "Whenever one or more Faeries you control deal combat damage to a player, that player creates a 4/2 red Pirate creature token with \"This token can't block.\" The token is goaded for the rest of the game.",
+        "Nettling Nuisance",
+    );
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Token { .. }),
+        "expected Token primary, got {:?}",
+        execute.effect
+    );
+    let sub = execute.sub_ability.as_ref().expect("goad sub_ability");
+    match sub.effect.as_ref() {
+        Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            end_cost: _,
+        } => {
+            assert_eq!(*target, Some(TargetFilter::LastCreated));
+            assert_eq!(*duration, Some(Duration::Permanent));
+            assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Goaded
+                }
+            )));
+        }
+        other => panic!("expected GenericEffect goad sub, got {other:?}"),
+    }
+}
+
 #[test]
 fn zone_change_token_predicate_parses_present_and_past_negation_forms() {
     for (text, expected_prop) in [
