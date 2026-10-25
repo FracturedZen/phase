@@ -1304,6 +1304,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     ))
     .or(alt((
         parse_target_power_ref,
+        // CR 208.2 + CR 608.2c (#10222): demonstrative / anaphoric object P/T
+        // ("that land's power", "the power of that permanent"). After
+        // `parse_event_context_refs` so CostPaidObject creature/spell forms win.
+        parse_object_pt_ref,
         parse_target_life_ref,
         parse_basic_land_type_count,
         // Bare suffix form — reachable when a parent combinator has already
@@ -6379,6 +6383,61 @@ fn parse_card_type_qualifier(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 208.2 + CR 608.2c: object-scoped power / toughness via the shared
+/// possessive / prepositional object-scope grammar.
+///
+/// Mirrors [`parse_object_mana_value_ref`]: the object anaphor is composed from
+/// [`parse_object_possessive_scope`] / [`parse_object_prepositional_scope`] so
+/// every demonstrative type those tables cover ("that land", "that permanent",
+/// …) gets a P/T reading without a per-type string table. Earthshape (#10222)
+/// "power less than or equal to that land's power" is the load-bearing case —
+/// without this arm `parse_pt_comparison` drops the relative clause and the
+/// hexproof/indestructible grant applies to every creature you control.
+///
+/// Placed *after* [`parse_event_context_refs`] in `parse_quantity_ref` so the
+/// hardcoded CostPaidObject readings ("that creature's power", "that spell's
+/// power") keep their CR 608.2k trigger-condition binding; only forms those
+/// arms do not claim (land / permanent / artifact / …) reach this combinator.
+fn parse_object_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // Of-form: "[the] power|toughness of <object>"
+    if let Ok((after_the, _)) = opt(tag::<_, _, OracleError<'_>>("the ")).parse(input) {
+        if let Ok((after_prop, is_power)) = alt((
+            value(true, tag::<_, _, OracleError<'_>>("power")),
+            value(false, tag("toughness")),
+        ))
+        .parse(after_the)
+        {
+            if let Ok((after_of, _)) = tag(" of ").parse(after_prop) {
+                if let Ok((rest, scope)) = parse_object_prepositional_scope(after_of) {
+                    return Ok((
+                        rest,
+                        if is_power {
+                            QuantityRef::Power { scope }
+                        } else {
+                            QuantityRef::Toughness { scope }
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    // Possessive: "<object>'s power|toughness"
+    let (rest, scope) = parse_object_possessive_scope(input)?;
+    let (rest, is_power) = alt((
+        value(true, tag(" power")),
+        value(false, tag(" toughness")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        if is_power {
+            QuantityRef::Power { scope }
+        } else {
+            QuantityRef::Toughness { scope }
+        },
+    ))
+}
+
 fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
         value(ObjectScope::Recipient, tag("its")),
@@ -6416,6 +6475,13 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
         ),
         value(ObjectScope::Target, tag("that creature's")),
         value(ObjectScope::Target, tag("that permanent's")),
+        // CR 208.2 + CR 608.2c: Earthshape (#10222) — "that land's power" after
+        // Earthbend names the targeted land. Same Target binding as "that
+        // permanent's"; land/artifact/enchantment complete the common permanent-
+        // type demonstratives used as P/T / mana-value possessives.
+        value(ObjectScope::Target, tag("that land's")),
+        value(ObjectScope::Target, tag("that artifact's")),
+        value(ObjectScope::Target, tag("that enchantment's")),
         value(ObjectScope::Target, tag("that planeswalker's")),
         value(ObjectScope::Source, tag("~'s")),
         value(ObjectScope::Source, tag("this creature's")),
@@ -6455,6 +6521,11 @@ fn parse_object_prepositional_scope(input: &str) -> OracleResult<'_, ObjectScope
         ),
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
+        // CR 208.2 + CR 608.2c: of-form siblings of the possessive land/artifact/
+        // enchantment arms ("the power of that land" — Earthshape class #10222).
+        value(ObjectScope::Target, tag("that land")),
+        value(ObjectScope::Target, tag("that artifact")),
+        value(ObjectScope::Target, tag("that enchantment")),
         value(ObjectScope::Target, tag("that planeswalker")),
         value(
             ObjectScope::Target,
@@ -12018,6 +12089,66 @@ mod tests {
     fn test_parse_for_each_card_drawn_this_way() {
         let (rest, q) = parse_for_each_clause_ref("card drawn this way").unwrap();
         assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 208.2 + CR 608.2c (issue #10222): Earthshape-class "that land's power"
+    /// / "that permanent's power" bind through the shared object-scope grammar to
+    /// `ObjectScope::Target` (the Earthbend / prior-instruction target), and the
+    /// of-form siblings match the same referent. Must not disturb the CostPaidObject
+    /// reading of "that creature's power".
+    #[test]
+    fn parse_quantity_ref_demonstrative_land_permanent_pt() {
+        for (phrase, expected) in [
+            (
+                "that land's power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that land's toughness",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that permanent's power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "that artifact's power",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "the power of that land",
+                QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            ),
+            (
+                "the toughness of that permanent",
+                QuantityRef::Toughness {
+                    scope: ObjectScope::Target,
+                },
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, expected, "phrase {phrase:?}");
+            assert_eq!(rest, "", "phrase {phrase:?} must fully consume");
+        }
+        // Negative: creature form stays on the CostPaidObject event-context arm.
+        let (rest, q) = parse_quantity_ref("that creature's power").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+        );
         assert_eq!(rest, "");
     }
 

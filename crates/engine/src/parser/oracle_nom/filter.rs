@@ -1301,6 +1301,29 @@ mod tests {
         );
     }
 
+    /// CR 208.2 + CR 608.2c (issue #10222): Earthshape — "power less than or equal
+    /// to that land's power" must keep a `PtComparison` whose threshold is the
+    /// targeted land's power, not drop the relative clause.
+    #[test]
+    fn test_parse_pt_comparison_land_power_threshold() {
+        let (rest, p) =
+            parse_pt_comparison("power less than or equal to that land's power").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            p,
+            FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Power {
+                        scope: crate::types::ability::ObjectScope::Target,
+                    },
+                },
+            }
+        );
+    }
+
     /// CR 107.3a: the newly-admitted `X` threshold on the infix form — "power less
     /// than X" lowers to `LE` of `Offset(Variable("X"), -1)`, proving the literal/X
     /// parser (not only `parse_quantity_ref`) feeds the infix tail.
