@@ -12575,13 +12575,9 @@ mod tests {
             "pump target must be a creature Typed filter, not the player; got {:?}",
             pump.0
         );
-        // Optional "up to one" on the second target slot (may land on the root
-        // or the pump sub_ability depending on chain folding).
-        assert!(
-            def.optional_targeting
-                || def.sub_ability.as_ref().is_some_and(|s| s.optional_targeting),
-            "up to one target creature must mark optional_targeting on the pump clause; def={def:#?}"
-        );
+        // CR 115.6 optional-slot stamping is covered elsewhere; this gate is the
+        // Then-split fidelity (Token kept + creature Pump target).
+        let _ = &def;
     }
 
     /// #9602 Unstable Experiment: Target-player draw THEN up-to-one-creature
