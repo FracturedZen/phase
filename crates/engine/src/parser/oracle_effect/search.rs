@@ -4344,6 +4344,48 @@ mod tests {
         )));
     }
 
+
+    /// CR 201.2a (#10143): Curse of Misfortunes — "a Curse card that doesn't
+    /// have the same name as a Curse attached to enchanted player" must keep
+    /// `SharesQuality { Name, DoesNotShare, … }` (literal Curse subtype heads,
+    /// not `~`-collapsed Any).
+    #[test]
+    fn parse_search_filter_different_name_from_curse_attached_to_enchanted_player() {
+        let filter = parse_search_filter(
+            "Curse card that doesn't have the same name as a Curse attached to enchanted player",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            filter.type_filters.iter().any(
+                |type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Curse")
+            ),
+            "expected Curse subtype on search filter, got {filter:?}"
+        );
+        assert!(
+            filter.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::DoesNotShare,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        ..
+                    }) if type_filters.iter().any(|type_filter| matches!(
+                        type_filter,
+                        TypeFilter::Subtype(subtype) if subtype == "Curse"
+                    ))
+                )
+            )),
+            "expected SharesQuality{{Name, DoesNotShare, Curse …}}, got {filter:?}"
+        );
+    }
+
     #[test]
     fn search_any_number_of_dragon_creature_cards_sets_up_to_and_filter() {
         // CR 107.1c: Sarkhan, Dragonsoul [-9]: "Search your library for any number

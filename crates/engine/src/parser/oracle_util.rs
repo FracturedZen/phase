@@ -1977,13 +1977,14 @@ fn precedes_type_addition_clause(haystack: &str, end: usize) -> bool {
 /// condition on Gideon of the Trials' emblem) can read the subtype.
 /// Per-occurrence sibling of `precedes_type_addition_clause`.
 ///
-/// Scoped to true CR 205.2a core-type words: the informational "card"/"spell"
-/// suffixes are deliberately excluded, because "a <Subtype> card" phrases
-/// (Curse of Misfortunes' "a Curse card that doesn't have the same name as
-/// …") ride search-filter suffix grammar that today parses only through the
-/// `~`-normalized short name; keeping them normalizing preserves that
-/// behavior. Extend to "card"/"spell" only together with search-filter
-/// support for literal subtype words.
+/// CR 205.2a + CR 205.3j + CR 201.2a (#10143): a subtype-word short name
+/// ("Curse" on Curse of Misfortunes, "Gideon" on Gideon of the Trials) that
+/// heads a type phrase must stay literal. That includes true core-type
+/// followers ("Gideon planeswalker") AND the informational "card"/"spell"
+/// suffixes / "attached" attachment relation that head search-filter and
+/// name-relation references ("a Curse card that doesn't have the same name
+/// as a Curse attached to enchanted player"). Normalizing those to `~`
+/// collapses the search filter to Any and drops `SharesQuality`.
 /// `end` is the byte index just past the matched word.
 fn precedes_core_type_word(haystack: &str, end: usize) -> bool {
     let next_word = haystack[end..]
@@ -1999,7 +2000,7 @@ fn precedes_core_type_word(haystack: &str, end: usize) -> bool {
         next_word.strip_suffix('s').unwrap_or(""),
     ]
     .iter()
-    .any(|word| is_core_type_name(word) && !matches!(*word, "card" | "spell"))
+    .any(|word| matches!(*word, "attached") || is_core_type_name(word))
 }
 
 fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
@@ -3025,9 +3026,10 @@ pub fn normalize_card_name_refs_reporting(
             // short name is a creature subtype AND the text adds that subtype to
             // the card itself (copy / type-change context, e.g. Wall of Stolen
             // Identity: "enter as a copy … except it's a Wall in addition to its
-            // other types"). A blanket subtype suppression wrongly leaves the
-            // short name literal for cards like Curse of Misfortunes, exposing a
-            // search-filter suffix to the target-fallback path. Use the
+            // other types"). Subtype short names used as type-phrase heads
+            // ("a Curse card", #10143) are preserved by
+            // `precedes_core_type_word` inside the case-sensitive replacer
+            // below — not by a blanket subtype skip here. Use the
             // word-boundary scanner for anchor dispatch, never raw contains().
             let subtype_in_type_change_context = is_subtype_word(&lower_short)
                 && [
@@ -3503,22 +3505,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_of_short_name_curse_of_misfortunes_keeps_card_suffix_normalizing() {
-        // CR 205.3j + CR 201.3a: Curse of Misfortunes — the sensitive sibling
-        // the of-branch guard comment names. The `precedes_core_type_word`
-        // probe is scoped to true CR 205.2a core-type words, so the
-        // informational "card" suffix does NOT suppress replacement: both
-        // occurrences keep today's `~` normalization (the search-filter
-        // suffix grammar parses through the normalized short name; keeping
-        // this pinned prevents a coverage flip on this card).
+    fn normalize_of_short_name_curse_of_misfortunes_keeps_subtype_type_phrase_literal() {
+        // CR 205.3j + CR 201.2a (#10143): Curse of Misfortunes — the subtype
+        // short name heads a search-filter type phrase ("a Curse card") and a
+        // name-relation reference ("a Curse attached to enchanted player").
+        // Both must stay literal so `SharesQuality { Name, DoesNotShare, … }`
+        // survives; normalizing them to `~` collapses the filter to Any.
         let text = "At the beginning of your upkeep, you may search your library for a Curse card that doesn't have the same name as a Curse attached to enchanted player, put it onto the battlefield attached to that player, then shuffle.";
         let normalized = normalize_card_name_refs(text, "Curse of Misfortunes");
-        // Both occurrences keep today's `~` normalization ("card" is an
-        // informational suffix, not a CR 205.2a core type) — asserted against the
-        // full normalized text so a coverage flip on this card cannot slip past.
         assert_eq!(
             normalized,
-            "At the beginning of your upkeep, you may search your library for a ~ card that doesn't have the same name as a ~ attached to enchanted player, put it onto the battlefield attached to that player, then shuffle."
+            "At the beginning of your upkeep, you may search your library for a Curse card that doesn't have the same name as a Curse attached to enchanted player, put it onto the battlefield attached to that player, then shuffle."
         );
     }
 
@@ -4282,20 +4279,24 @@ mod tests {
     }
 
     #[test]
-    fn normalize_of_short_name_normalizes_subtype_outside_type_change() {
-        // CR 201.3a: Curse of Misfortunes — the "of"-derived short name "Curse"
-        // is a subtype word, but the text does NOT add that subtype to the card
-        // (no copy / "in addition to its other types" anchor). It is a plain
-        // self-reference and must normalize to ~ so the trailing search filter
-        // parses, rather than falling through to the target-fallback path.
+    fn normalize_of_short_name_keeps_subtype_type_phrase_head_literal() {
+        // CR 201.3a + CR 201.2a (#10143): Curse of Misfortunes — the "of"-derived
+        // short name "Curse" is a subtype word that heads a search-filter type
+        // phrase ("a Curse card"). It must stay literal so the search filter
+        // retains the subtype (and any trailing name-relation clause); the old
+        // "~ card" collapse dropped SharesQuality on the full Curse oracle.
         let result = normalize_card_name_refs(
             "At the beginning of your upkeep, you may search your library for a Curse card, \
              put it onto the battlefield attached to enchanted player, then shuffle.",
             "Curse of Misfortunes",
         );
         assert!(
-            result.contains('~'), // allow-noncombinator: test assertion, not parsing dispatch
-            "subtype short name outside a type-change context must normalize, got: {result}"
+            result.contains("a Curse card"), // allow-noncombinator: test assertion, not parsing dispatch
+            "subtype short name heading a type phrase must stay literal, got: {result}"
+        );
+        assert!(
+            !result.contains('~'), // allow-noncombinator: test assertion, not parsing dispatch
+            "no self-ref tilde expected when Curse is only a type-phrase head, got: {result}"
         );
     }
 

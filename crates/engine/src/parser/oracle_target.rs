@@ -9197,6 +9197,19 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         return Some((vec![prop], leading_ws + consumed));
     }
 
+    // CR 201.2a (#10143): "that doesn't have the same name as …" / "that
+    // shares a name with …" — name-relation relative clause. Reuse the
+    // search/trigger authority so choose-target shapes (Yenna, Redtooth
+    // Regent; The Apprentice's Folly) and search filters (Curse of
+    // Misfortunes) encode one `FilterProp::SharesQuality { quality: Name,
+    // relation, reference }` form instead of dropping the clause.
+    if let Ok((rest, prop)) =
+        super::oracle_effect::parse_search_name_reference_suffix(trimmed)
+    {
+        let consumed = trimmed.len() - rest.len();
+        return Some((vec![prop], leading_ws + consumed));
+    }
+
     let (after_that, _) = tag::<_, _, OracleError<'_>>("that ").parse(trimmed).ok()?;
     let that_len = leading_ws + "that ".len();
 
@@ -20015,6 +20028,85 @@ mod tests {
             vec![FilterProp::Not {
                 prop: Box::new(FilterProp::AttackedThisTurn { defender: None })
             }]
+        );
+    }
+
+    /// CR 201.2a (#10143): Yenna, Redtooth Regent — "target enchantment you
+    /// control that doesn't have the same name as another permanent you control"
+    /// must carry `SharesQuality { Name, DoesNotShare, another permanent you
+    /// control }` on the choose-target filter (not drop the clause).
+    #[test]
+    fn that_doesnt_have_same_name_as_another_permanent_you_control() {
+        let (filter, rest) = parse_target(
+            "target enchantment you control that doesn't have the same name as another permanent you control",
+        );
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Enchantment));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::DoesNotShare,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        properties,
+                    }) if type_filters.contains(&TypeFilter::Permanent)
+                        && properties.iter().any(|p| matches!(p, FilterProp::Another))
+                )
+            )),
+            "expected SharesQuality{{Name, DoesNotShare, another permanent you control}}, got {tf:?}"
+        );
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
+        );
+    }
+
+    /// CR 201.2a (#10143): The Apprentice's Folly — "target nontoken creature
+    /// you control that doesn't have the same name as a token you control".
+    #[test]
+    fn that_doesnt_have_same_name_as_a_token_you_control() {
+        let (filter, rest) = parse_target(
+            "target nontoken creature you control that doesn't have the same name as a token you control",
+        );
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(
+            tf.properties.contains(&FilterProp::NonToken),
+            "expected nontoken restriction, got {tf:?}"
+        );
+        assert!(
+            tf.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::DoesNotShare,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        properties,
+                        ..
+                    }) if properties.iter().any(|p| matches!(p, FilterProp::Token))
+                )
+            )),
+            "expected SharesQuality{{Name, DoesNotShare, token you control}}, got {tf:?}"
+        );
+        assert!(
+            rest.trim().is_empty(),
+            "expected empty remainder, got: {rest:?}"
         );
     }
 
