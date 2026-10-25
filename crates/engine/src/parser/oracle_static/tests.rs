@@ -33402,6 +33402,24 @@ fn protection_chosen_color_plain_unchanged() {
     );
 }
 
+/// F9 / CR 607.2d — Sanctuary Blade: "Equipped creature has protection from
+/// the last chosen color" must lower to Protection(ChosenColor), not the
+/// silent CardType("the last chosen color") fallthrough.
+#[test]
+fn protection_last_chosen_color_sanctuary_blade() {
+    use crate::types::keywords::{Keyword, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Equipped creature has protection from the last chosen color.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+        }),
+        "expected Protection(ChosenColor) for Sanctuary Blade phrasing, got {mods:?}"
+    );
+}
+
 /// No-regression: Glory's duration form "protection from the chosen color until
 /// end of turn" — the duration is stripped, no truncation, still ChosenColor.
 #[test]

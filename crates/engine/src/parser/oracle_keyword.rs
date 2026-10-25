@@ -4155,6 +4155,19 @@ mod tests {
         assert_eq!(kw, Keyword::Protection(ProtectionTarget::ChosenColor));
     }
 
+    /// F9 / CR 607.2d: "protection from the last chosen color" (Sanctuary Blade)
+    /// and "protection from that color" must land on ChosenColor — previously
+    /// fell through to CardType and granted nothing.
+    #[test]
+    fn parse_granted_keyword_fragment_protection_from_last_chosen_and_that_color() {
+        use crate::types::keywords::ProtectionTarget;
+
+        let last = parse_granted_keyword_fragment("protection from the last chosen color").unwrap();
+        assert_eq!(last, Keyword::Protection(ProtectionTarget::ChosenColor));
+        let that = parse_granted_keyword_fragment("protection from that color").unwrap();
+        assert_eq!(that, Keyword::Protection(ProtectionTarget::ChosenColor));
+    }
+
     #[test]
     fn parse_granted_keyword_fragment_protection_from_each_of_your_opponents() {
         use crate::types::ability::ControllerRef;

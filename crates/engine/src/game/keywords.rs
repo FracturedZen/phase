@@ -653,8 +653,12 @@ pub fn source_matches_protection_target(
         ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
         ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
         ProtectionTarget::Multicolored => source_colors.len() > 1,
+        // CR 607.2d + CR 608.2d: "the (last) chosen color" reads the current
+        // answer so a re-choice (Sanctuary Blade) updates the grant live
+        // (CR 611.3a). `chosen_color()` is oldest-since-entry and would keep
+        // the first answer after a re-choice.
         ProtectionTarget::ChosenColor => protected
-            .chosen_color()
+            .current_chosen_color()
             .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
@@ -743,11 +747,14 @@ pub fn resolve_granted_protection(
     you: PlayerId,
 ) -> Vec<ProtectionTarget> {
     match quality {
-        // CR 702.16 + CR 105.4: the color chosen on the granting source.
+        // CR 702.16 + CR 105.4 + CR 607.2d: the color chosen on the granting
+        // source — current answer (`current_chosen_color`) so "the last chosen
+        // color" (Sanctuary Blade) tracks a re-choice. Single-choice cards
+        // (Floating Shield) have first == last, so the split is a no-op there.
         ProtectionTarget::ChosenColor => state
             .objects
             .get(&source_id)
-            .and_then(|source| source.chosen_color())
+            .and_then(|source| source.current_chosen_color())
             .map(ProtectionTarget::Color)
             .into_iter()
             .collect(),

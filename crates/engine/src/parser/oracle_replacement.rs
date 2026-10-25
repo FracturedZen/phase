@@ -10565,18 +10565,19 @@ fn parse_damage_source_subject(subject: &str) -> Option<TargetFilter> {
         tail = rest.trim();
     }
 
-    // CR 607.2d: "of the chosen type/color" reads the choice made by the linked
-    // "choose a …" ability printed on the same object (Charm School, Prismatic
-    // Ward), which the runtime reads off the shield's host. "The last chosen
-    // color" (Chromatic Armor) is linked the same way, but its later re-choice comes
-    // from an activated ability whose persistence on the host is unverified, so it
-    // is not recognized here and the line fails closed.
+    // CR 607.2d: "of the chosen type/color" / "of the last chosen color" reads
+    // the choice made by the linked "choose a …" ability printed on the same
+    // object (Charm School, Prismatic Ward, Chromatic Armor), which the runtime
+    // reads off the shield's host via `current_chosen_color` (prevention path).
+    // "The last chosen color" is CR 607.2d's re-choice phrasing — same linked
+    // attribute as "the chosen color" (F9 / #9856).
     if let Ok((rest, prop)) = alt((
         value(
             FilterProp::IsChosenCreatureType,
             tag::<_, _, OracleError<'_>>("of the chosen type"),
         ),
         value(FilterProp::IsChosenColor, tag("of the chosen color")),
+        value(FilterProp::IsChosenColor, tag("of the last chosen color")),
     ))
     .parse(tail)
     {
@@ -16502,10 +16503,12 @@ mod tests {
                 "prevent all combat damage that would be dealt to ~ by creatures blocking it.",
                 DamageSourceScope::Unrecognized,
             ),
-            // "The last chosen color" (Chromatic Armor): re-choice persistence is unverified, so it fails closed.
+            // F9 / #9856 — "The last chosen color" (Chromatic Armor) is CR 607.2d
+            // linked the same way as "the chosen color"; prevention reads the
+            // current answer via `current_chosen_color`.
             (
                 "prevent all damage that would be dealt to enchanted creature by sources of the last chosen color.",
-                DamageSourceScope::Unrecognized,
+                typed(vec![], vec![FilterProp::IsChosenColor]),
             ),
             // The adjacent anchor keeps its reading, including the ellipsis (Fog Bank).
             (
