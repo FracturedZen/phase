@@ -32622,6 +32622,63 @@ fn parse_gift_was_promised_condition() {
     );
 }
 
+
+/// CR 601.2c + CR 608.2c (issue #10205): Heated Argument nests the optional
+/// GY-exile under the 6-damage DealDamage, then gates the 2-damage rider on
+/// OptionalEffectPerformed. The rider still emits ParentTargetController; at
+/// resolution `parent_target_controller` prefers `chain_root_targets` (the
+/// spell's creature) over the intervening GY card so "that creature's
+/// controller" is the opponent, not the caster.
+#[test]
+fn heated_argument_optional_damage_keeps_parent_target_controller_under_if_you_do() {
+    let text = "Heated Argument deals 6 damage to target creature. You may exile a card from your graveyard. If you do, Heated Argument also deals 2 damage to that creature's controller.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(*def.effect, Effect::DealDamage { .. }),
+        "root must be DealDamage, got {:?}",
+        def.effect
+    );
+    let exile = def.sub_ability.as_ref().expect("optional exile sub");
+    assert!(
+        exile.optional,
+        "GY exile must be optional"
+    );
+    assert!(
+        matches!(
+            *exile.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ),
+        "optional step must exile, got {:?}",
+        exile.effect
+    );
+    let rider = exile
+        .sub_ability
+        .as_ref()
+        .expect("if-you-do damage rider under exile");
+    assert!(
+        rider
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed),
+        "rider must gate on OptionalEffectPerformed, got {:?}",
+        rider.condition
+    );
+    assert!(
+        matches!(
+            *rider.effect,
+            Effect::DealDamage {
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        ),
+        "rider must target ParentTargetController (runtime prefers chain_root), got {:?}",
+        rider.effect
+    );
+}
+
 #[test]
 fn parse_nonbasic_land_damage_condition_targets_land_controller() {
     let def = parse_effect_chain(

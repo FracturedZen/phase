@@ -888,7 +888,37 @@ pub(crate) fn incarnation_controller(
 /// chosen target. Returns the player target directly, or the controller of an
 /// object target (CR 109.4 — controller of an object), in target-list order.
 /// Returns `None` if the ability has no targets.
+///
+/// CR 601.2c + CR 608.2c (issue #10205): When this instruction is gated on
+/// "If you do" ([`AbilityCondition::is_optional_effect_performed`]) and the
+/// chain-root spell's declared object targets were latched at cast
+/// ([`SpellContext::chain_root_targets`]), prefer those over the ability's
+/// immediate `targets`. An intervening optional resolution-time choice
+/// (Heated Argument's "You may exile a card from your graveyard") overwrites
+/// the nested ability's `targets` with the chosen GY card, so reading
+/// `ability.targets` would yield that card's controller (the caster) instead
+/// of the creature named by "that creature's controller". This is the
+/// player-level projection of [`ObjectScope::ChainRootTarget`].
 pub fn parent_target_controller(ability: &ResolvedAbility, state: &GameState) -> Option<PlayerId> {
+    if ability
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_optional_effect_performed)
+        && !ability.context.chain_root_targets.is_empty()
+    {
+        if let Some(player) = ability
+            .context
+            .chain_root_targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => last_known_permanent_controller(state, *id),
+                TargetRef::Player(pid) => Some(*pid),
+            })
+        {
+            return Some(player);
+        }
+    }
+
     if let Some(player) = ability.targets.iter().find_map(|t| match t {
         // CR 608.2h (issue #1582): If the parent target has left the
         // battlefield — e.g. a token Recoil bounced to hand, which then ceases
@@ -25785,6 +25815,67 @@ mod tests {
             parent_target_owner(&ability, &state),
             Some(PlayerId(1)),
             "effect_context_object must supply the parent owner when targets are empty"
+        );
+    }
+
+    /// CR 601.2c + CR 608.2c (issue #10205): Heated Argument — optional "If you
+    /// do" DealDamage to ParentTargetController must prefer the chain-root
+    /// creature's controller over an intervening resolution-chosen GY card.
+    #[test]
+    fn parent_target_controller_prefers_chain_root_under_optional_effect_performed() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opposing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let gy_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Caster GY Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = make_simple_ability(vec![TargetRef::Object(gy_card)], ObjectId(0));
+        ability.condition = Some(AbilityCondition::effect_performed());
+        ability.context.chain_root_targets = vec![TargetRef::Object(creature)];
+
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(1)),
+            "OptionalEffectPerformed + chain_root must yield the creature's controller, not the GY card's"
+        );
+    }
+
+    /// Without the OptionalEffectPerformed gate, intervening targets still win
+    /// (Recoil-class "that permanent's controller" after a bounce keeps the
+    /// immediate parent target).
+    #[test]
+    fn parent_target_controller_ignores_chain_root_without_optional_effect_gate() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opposing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let gy_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Caster GY Card".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = make_simple_ability(vec![TargetRef::Object(gy_card)], ObjectId(0));
+        ability.context.chain_root_targets = vec![TargetRef::Object(creature)];
+
+        assert_eq!(
+            parent_target_controller(&ability, &state),
+            Some(PlayerId(0)),
+            "without OptionalEffectPerformed, immediate targets still bind"
         );
     }
 
