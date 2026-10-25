@@ -2991,6 +2991,14 @@ pub fn normalize_card_name_refs_reporting(
     // words that appear in Oracle text (e.g., "Out of Time" → short name
     // "Out" would replace "out" in "phase out"). Skip the short-name
     // strategy when the prefix is a single common English word.
+    //
+    // CR 201.5c + issue #9767: a single-word "of" short name that is also a
+    // rules noun/verb/keyword must not rewrite ordinary Oracle text. Mirror the
+    // first-word fallback's `is_verb_word` / `is_keyword_word` / type guards
+    // (PR #1934), and match single-word short names case-sensitively like the
+    // comma branch — so "Life of Toshiro Umezawa" keeps "You gain 2 life",
+    // "Glyph of Delusion" keeps "glyph counters", and sentence-initial
+    // "Return …" on "Return of the Nightstalkers" survives as the imperative.
     if !result.contains('~') {
         if let Some(of_pos) = effective_name.find(" of ") {
             let short_name = &effective_name[..of_pos];
@@ -3020,6 +3028,13 @@ pub fn normalize_card_name_refs_reporting(
                         | "off"
                         | "next"
                 );
+            // Ordered cheapest-first, matching the first-word fallback below.
+            let is_rules_word_short_name = !short_name.contains(' ')
+                && (is_core_type_name(&lower_short)
+                    || is_non_subtype_subject_name(&lower_short)
+                    || is_supertype_word(&lower_short)
+                    || super::oracle_nom::primitives::is_keyword_word(&lower_short)
+                    || super::oracle_nom::primitives::is_verb_word(&lower_short));
             // CR 201.3a: a card's "of"-derived short name normalizes to `~`
             // (interchangeable name reference). Suppress this ONLY when the
             // short name is a creature subtype AND the text adds that subtype to
@@ -3041,6 +3056,7 @@ pub fn normalize_card_name_refs_reporting(
                 .any(|anchor| nom_primitives::scan_contains(&result.to_ascii_lowercase(), anchor));
             if short_name.len() >= 3
                 && !is_common_english_word
+                && !is_rules_word_short_name
                 && !subtype_in_type_change_context
                 && !of_short_name_collides_with_possessive_zone_phrase(&result, short_name)
             {
@@ -3052,12 +3068,19 @@ pub fn normalize_card_name_refs_reporting(
                 // the per-occurrence preserving replacer — the same replacer
                 // (and case-sensitivity precedent) the single-word subtype
                 // name branch above already uses.
+                //
+                // CR 201.5c: single-word short names are case-sensitive (comma
+                // branch precedent) so a capitalized short name does not rewrite
+                // a lowercase rules noun ("life", "glyph", "choice"). Multi-word
+                // short names stay case-insensitive like multi-word full names.
                 result = if is_subtype_word(&lower_short) {
                     replace_all_words_case_sensitive_preserving_subtype_status_refs(
                         &result, short_name, "~",
                     )
-                } else {
+                } else if short_name.contains(' ') {
                     replace_all_words(&result, short_name, "~")
+                } else {
+                    replace_all_words_case_sensitive(&result, short_name, "~")
                 };
             }
         }
@@ -4132,6 +4155,54 @@ mod tests {
                 "Library of Leng"
             ),
             "If an effect causes you to discard a card, discard it, but you may put it on top of your library instead of into your graveyard."
+        );
+    }
+
+    // CR 201.5c + issue #9767: single-word "of" short names that are rules
+    // nouns/verbs/keywords must not rewrite ordinary Oracle text.
+    #[test]
+    fn normalize_of_short_name_preserves_rules_noun_life() {
+        // "Life of Toshiro Umezawa" short name "Life" must not rewrite
+        // "You gain 2 life." → "You gain 2 ~."
+        assert_eq!(
+            normalize_card_name_refs("You gain 2 life.", "Life of Toshiro Umezawa"),
+            "You gain 2 life."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_preserves_imperative_verb_return() {
+        // "Return of the Nightstalkers" short name "Return" is an imperative
+        // verb (PR #1934 class); keep the sentence-initial instruction intact.
+        assert_eq!(
+            normalize_card_name_refs(
+                "Return all Nightstalker permanent cards from your graveyard to the battlefield. Then destroy all Swamps you control.",
+                "Return of the Nightstalkers",
+            ),
+            "Return all Nightstalker permanent cards from your graveyard to the battlefield. Then destroy all Swamps you control."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_preserves_counter_name_glyph() {
+        // "Glyph of Delusion" short name "Glyph" must not rewrite lowercase
+        // "glyph counters" (case-sensitive single-word discipline).
+        assert_eq!(
+            normalize_card_name_refs(
+                "Put X glyph counters on target creature. The creature gains \"This creature doesn't untap during your untap step if it has a glyph counter on it\".",
+                "Glyph of Delusion",
+            ),
+            "Put X glyph counters on target creature. The creature gains \"This creature doesn't untap during your untap step if it has a glyph counter on it\"."
+        );
+    }
+
+    #[test]
+    fn normalize_of_short_name_preserves_keyword_fear() {
+        // "Fear of Fear Itself" short name "Fear" is keyword CR 702.36; reject
+        // the of-short strategy so "gain fear" is not rewritten to "gain ~".
+        assert_eq!(
+            normalize_card_name_refs("Creatures you control gain fear.", "Fear of Fear Itself"),
+            "Creatures you control gain fear."
         );
     }
 
