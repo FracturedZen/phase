@@ -348,6 +348,20 @@ fn singular_controller_subject(input: &str) -> OracleResult<'_, ControllerSubjec
                 ),
             )),
         ),
+        // CR 608.2c + CR 109.4: "that player|opponent or that planeswalker's
+        // controller" — the player half is its own controller; the planeswalker
+        // half reads the targeted permanent's controller. Must precede bare
+        // "that player" so the longer referent is not truncated.
+        // (Chandra's Fury / Searing Blaze / Soul of Shandalar / #9589).
+        value(
+            ControllerSubject::Direct(ControllerRef::ParentTargetController),
+            (
+                alt((tag("that player"), tag("that opponent"))),
+                tag(" or that planeswalker"),
+                alt((tag("'s"), tag("\u{2019}s"))),
+                tag(" controller"),
+            ),
+        ),
         value(
             ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
             tag("that player"),
@@ -531,13 +545,15 @@ pub(crate) fn admits_type_phrase_controller(controller: &ControllerRef) -> bool 
         | ControllerRef::TargetOpponent
         | ControllerRef::DefendingPlayer
         | ControllerRef::EnchantedPlayer
-        | ControllerRef::ActivePlayer => true,
+        | ControllerRef::ActivePlayer
+        // CR 608.2c + CR 109.4: yielded by "that player|opponent or that
+        // planeswalker's controller" (Chandra's Fury class / #9589).
+        | ControllerRef::ParentTargetController => true,
         // Whether a source's "choose a player" populates the chosen player is
         // not established for the cards that would read it here.
         ControllerRef::SourceChosenPlayer => false,
         // The grammar never yields these as a direct subject.
         ControllerRef::ScopedPlayer
-        | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::ChosenPlayer { .. }
@@ -1487,6 +1503,47 @@ mod tests {
         ] {
             assert!(parse(text).is_err(), "{text}");
         }
+    }
+
+
+    #[test]
+    fn player_or_planeswalker_controller_controls_binds_parent_target_controller() {
+        for text in [
+            "that player or that planeswalker's controller controls",
+            "that player or that planeswalker\u{2019}s controller controls",
+            "that opponent or that planeswalker's controller controls",
+        ] {
+            let (rest, phrase) = parse_controller_phrase(text)
+                .unwrap_or_else(|e| panic!("must parse {text:?}: {e:?}"));
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(
+                phrase,
+                ControllerPhrase {
+                    subject: ControllerSubject::Direct(ControllerRef::ParentTargetController),
+                    form: ControllerForm::Singular,
+                    tense: ControllerTense::Present,
+                },
+                "{text}"
+            );
+            assert!(
+                admits_type_phrase_controller(&ControllerRef::ParentTargetController),
+                "type-phrase reader must admit the combined referent"
+            );
+        }
+        // Bare "that player controls" must still parse as the anaphor (not truncated).
+        let (rest, phrase) = parse_controller_phrase("that player controls").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            phrase.subject,
+            ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer)
+        );
+        // Reversed order is a different sentence — fail closed.
+        assert!(
+            parse_controller_phrase(
+                "that planeswalker's controller or that player controls"
+            )
+            .is_err()
+        );
     }
 
     use super::*;

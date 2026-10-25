@@ -687,10 +687,15 @@ fn admits_quantity_controller(controller: &ControllerRef, form: ControllerForm) 
             ControllerForm::Plural => true,
             ControllerForm::Singular | ControllerForm::Negated | ControllerForm::Passive => false,
         },
+        // CR 608.2c + CR 109.4: "creatures that player|opponent or that
+        // planeswalker's controller controls" (Goblin Lyre class / #9589).
+        ControllerRef::ParentTargetController => match form {
+            ControllerForm::Singular => true,
+            ControllerForm::Plural | ControllerForm::Negated | ControllerForm::Passive => false,
+        },
         ControllerRef::ScopedPlayer
         | ControllerRef::TargetPlayer
         | ControllerRef::TargetOpponent
-        | ControllerRef::ParentTargetController
         | ControllerRef::EventTargetController
         | ControllerRef::ParentTargetOwner
         | ControllerRef::DefendingPlayer

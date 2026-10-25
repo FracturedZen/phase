@@ -20544,6 +20544,38 @@ mod tests {
         );
     }
 
+    /// #9589: "creature that player|opponent or that planeswalker's controller
+    /// controls" must pin ControllerRef::ParentTargetController — a player is
+    /// their own controller, a planeswalker yields its controller (CR 109.4).
+    #[test]
+    fn creature_that_player_or_planeswalker_controller_controls() {
+        for text in [
+            "creature that player or that planeswalker's controller controls",
+            "creature that player or that planeswalker\u{2019}s controller controls",
+            "up to one target creature that opponent or that planeswalker's controller controls",
+            "each creature that player or that planeswalker's controller controls",
+        ] {
+            let (filter, rest) = parse_target(text);
+            assert!(
+                rest.trim().is_empty() || rest.trim_start().starts_with('.'),
+                "{text}: remainder {rest:?}"
+            );
+            let TargetFilter::Typed(tf) = filter else {
+                panic!("{text}: expected Typed, got {filter:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "{text}: {tf:?}"
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ParentTargetController),
+                "{text}: controller must survive (was null before #9589)"
+            );
+        }
+    }
+
+
     #[test]
     fn permanents_that_are_one_or_more_colors_full_target() {
         let (filter, rest) = parse_target("all permanents that are one or more colors");
