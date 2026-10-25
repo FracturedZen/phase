@@ -1104,6 +1104,29 @@ fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: Abilit
     // root is the next printed instruction, not a within-clause continuation.
     let mut next = next;
     next.sub_link = SubAbilityLink::SequentialSibling;
+
+    // CR 608.2c + CR 614.6: a following printed line after a multi-clause
+    // "If …, instead …" override (Spirit Water Revival / Finale of Revelation
+    // "Exile ~") must run whether or not the override applies. Appending only
+    // at the deepest body leaf buries the line under Continuations that the
+    // not-swap path never walks. Mirror the DieExile dual-append in
+    // `oracle_effect/assembly.rs`: keep the swap-path deepest append, and also
+    // park a copy on the override's `else_ability` so the not-swap branch
+    // reaches it.
+    if let Some(override_node) = find_instead_override_mut(ability) {
+        append_to_deepest_ability_def(override_node, next.clone());
+        match override_node.else_ability.as_mut() {
+            Some(else_chain) => append_to_deepest_ability_def(else_chain, next),
+            None => override_node.else_ability = Some(Box::new(next)),
+        }
+        return;
+    }
+
+    append_to_deepest_ability_def(ability, next);
+}
+
+/// CR 608.2c: walk to the leaf of a sub-ability spine and attach `next` there.
+fn append_to_deepest_ability_def(ability: &mut AbilityDefinition, next: AbilityDefinition) {
     let mut node = ability;
     while node.sub_ability.is_some() {
         node = node
@@ -1112,6 +1135,24 @@ fn append_to_ability_def_sub_chain(ability: &mut AbilityDefinition, next: Abilit
             .expect("sub_ability checked above");
     }
     node.sub_ability = Some(Box::new(next));
+}
+
+/// CR 608.2c: the first "instead" override on a spell-ability spine, if any.
+fn find_instead_override_mut(
+    ability: &mut AbilityDefinition,
+) -> Option<&mut AbilityDefinition> {
+    let mut cursor = Some(ability);
+    while let Some(node) = cursor {
+        if node
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_instead_override)
+        {
+            return Some(node);
+        }
+        cursor = node.sub_ability.as_deref_mut();
+    }
+    None
 }
 
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected

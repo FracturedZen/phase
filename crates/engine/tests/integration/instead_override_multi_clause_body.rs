@@ -347,7 +347,7 @@ fn cleanup_discard_prompts(runner: &mut GameRunner) -> usize {
 
 /// P0 casts Spirit Water Revival with six other cards in hand, three in the
 /// graveyard and twenty in the library.
-fn cast_revival(waterbend: bool) -> (GameRunner, Run) {
+fn cast_revival(waterbend: bool) -> (GameRunner, Run, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
@@ -373,26 +373,39 @@ fn cast_revival(waterbend: bool) -> (GameRunner, Run) {
     };
     let events = cast.resolve().events().to_vec();
     let run = drive(&mut runner, events, first_n);
-    (runner, run)
+    (runner, run, spell)
 }
 
 #[test]
 fn paid_spirit_water_revival_shuffles_draws_seven_and_lifts_the_hand_limit() {
-    let (mut runner, run) = cast_revival(true);
+    let (mut runner, run, spell) = cast_revival(true);
     let hand = |runner: &GameRunner| runner.state().players[0].hand.len();
     assert_eq!(hand(&runner), 13);
     assert!(runner.state().players[0].graveyard.is_empty());
     assert_eq!(run.shuffled(), vec![P0]);
     assert_eq!(cleanup_discard_prompts(&mut runner), 0);
     assert_eq!(hand(&runner), 13);
+    // CR 608.2c: "Exile Spirit Water Revival." runs after the instead body.
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Exile,
+        "paid Spirit Water Revival must exile itself"
+    );
 }
 
 #[test]
 fn unpaid_spirit_water_revival_draws_two_and_keeps_the_hand_limit() {
-    let (mut runner, run) = cast_revival(false);
+    let (mut runner, run, spell) = cast_revival(false);
     assert_eq!(runner.state().players[0].hand.len(), 8);
     assert!(run.shuffled().is_empty());
     assert_eq!(cleanup_discard_prompts(&mut runner), 1);
+    // CR 608.2c (#10224): the self-exile line is independent of the instead
+    // override, so it still runs when the waterbend cost was not paid.
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Exile,
+        "unpaid Spirit Water Revival must exile itself, not fall to the graveyard"
+    );
 }
 
 /// After a Shock at P1, P0 casts Rix Maadi Reveler choosing `decision` at the

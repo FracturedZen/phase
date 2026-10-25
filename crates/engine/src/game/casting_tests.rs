@@ -58020,6 +58020,115 @@ fn combined_spell_ability_def_tags_top_level_spell_tails_sequential_sibling() {
         "top-level spell instructions must resolve as independent siblings"
     );
 }
+/// CR 608.2c (#10224): when a multi-clause "instead" override already owns a
+/// Continuation body, the next top-level spell line must also land on the
+/// override's `else_ability` so the not-swap path still reaches it (Spirit
+/// Water Revival / Finale of Revelation self-exile).
+#[test]
+fn combined_spell_ability_def_dual_appends_after_instead_override() {
+    use crate::types::ability::AbilityCondition;
+
+    let mut state = setup_game_at_main_phase();
+    let spell = create_object(
+        &mut state,
+        CardId(97_024),
+        PlayerId(0),
+        "Instead Then Exile".to_string(),
+        Zone::Hand,
+    );
+    let obj = state.objects.get_mut(&spell).unwrap();
+    obj.card_types.core_types.push(CoreType::Sorcery);
+    obj.base_card_types = obj.card_types.clone();
+
+    // "Draw two. If kicked, instead draw seven." then a following "Gain 1 life."
+    // stand-in for Spirit Water Revival's self-exile line.
+    let mut instead = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 7 },
+            target: TargetFilter::Controller,
+        },
+    )
+    .condition(AbilityCondition::AdditionalCostPaidInstead);
+    // Multi-clause body: a Continuation under the instead head.
+    instead.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    )));
+    let mut draw = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        },
+    );
+    draw.sub_ability = Some(Box::new(instead));
+
+    Arc::make_mut(&mut obj.abilities).push(draw);
+    Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    ));
+
+    let combined = combined_spell_ability_def(state.objects.get(&spell).unwrap())
+        .expect("spell abilities should combine");
+    let instead = combined
+        .sub_ability
+        .as_deref()
+        .expect("instead override is the first sub");
+    assert!(
+        instead
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_instead_override),
+        "expected instead override on the spine, got {:?}",
+        instead.condition
+    );
+    let else_tail = instead
+        .else_ability
+        .as_deref()
+        .expect("not-swap path must carry the following printed line");
+    assert!(
+        matches!(
+            else_tail.effect.as_ref(),
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "else_ability should be the following printed line, got {:?}",
+        else_tail.effect
+    );
+    assert_eq!(
+        else_tail.sub_link,
+        crate::types::ability::SubAbilityLink::SequentialSibling
+    );
+
+    // Swap path: the same line is also at the deepest leaf under the body.
+    let mut cursor = instead.sub_ability.as_deref();
+    let mut deepest = instead;
+    while let Some(node) = cursor {
+        deepest = node;
+        cursor = node.sub_ability.as_deref();
+    }
+    assert!(
+        matches!(
+            deepest.effect.as_ref(),
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "swap-path deepest leaf should be the following printed line, got {:?}",
+        deepest.effect
+    );
+}
 
 /// S25-B3 claims 1 + 2 (runtime cast+resolve): Stolen Uniform's front half
 /// binds each anaphor to its precise declared target slot. "Gain control of
