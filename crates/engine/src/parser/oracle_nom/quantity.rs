@@ -6403,11 +6403,13 @@ fn parse_object_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     if let Ok((after_the, _)) = opt(tag::<_, _, OracleError<'_>>("the ")).parse(input) {
         if let Ok((after_prop, is_power)) = alt((
             value(true, tag::<_, _, OracleError<'_>>("power")),
-            value(false, tag("toughness")),
+            value(false, tag::<_, _, OracleError<'_>>("toughness")),
         ))
         .parse(after_the)
         {
-            if let Ok((after_of, _)) = tag(" of ").parse(after_prop) {
+            if let Ok((after_of, _)) =
+                tag::<_, _, OracleError<'_>>(" of ").parse(after_prop)
+            {
                 if let Ok((rest, scope)) = parse_object_prepositional_scope(after_of) {
                     return Ok((
                         rest,
@@ -6424,7 +6426,7 @@ fn parse_object_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     // Possessive: "<object>'s power|toughness"
     let (rest, scope) = parse_object_possessive_scope(input)?;
     let (rest, is_power) = alt((
-        value(true, tag(" power")),
+        value(true, tag::<_, _, OracleError<'_>>(" power")),
         value(false, tag(" toughness")),
     ))
     .parse(rest)?;
