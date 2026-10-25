@@ -3663,6 +3663,64 @@ fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
     assert!(def.execute.is_some());
 }
 
+/// CR 603.2h + CR 603.4 (issue #9694): "This ability triggers only twice each
+/// turn" must become `MaxTimesPerTurn { max: 2 }` and must be stripped from the
+/// effect body so it does not lower as `unrecognized_clause_head`. Covers the
+/// Nadu, Winged Wisdom granted-trigger class (twice / cardinal N times).
+#[test]
+fn trigger_only_twice_each_turn_is_max_times_per_turn() {
+    let def = parse_trigger_line(
+        "Whenever this creature becomes the target of a spell or ability, reveal the top card of your library.              If it's a land card, put it onto the battlefield. Otherwise, put it into your hand.              This ability triggers only twice each turn.",
+        "Nadu, Winged Wisdom",
+    );
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::MaxTimesPerTurn { max: 2 }),
+    );
+    assert!(def.execute.is_some(), "effect body must still parse");
+    // Frequency sentence must not remain as an unimplemented sibling.
+    let mut cur = def.execute.as_ref();
+    while let Some(ability) = cur {
+        assert!(
+            !matches!(
+                ability.effect.as_ref(),
+                Effect::Unimplemented {
+                    name,
+                    ..
+                } if name == "unrecognized_clause_head"
+            ),
+            "constraint sentence leaked into effect chain: {:?}",
+            ability.effect
+        );
+        cur = ability.sub_ability.as_deref();
+    }
+}
+
+/// CR 603.2h + CR 603.4: cardinal "N times each turn" form of the same class
+/// (Urza Assembles the Titans–style wording and future "three times" prints).
+#[test]
+fn trigger_only_three_times_each_turn_is_max_times_per_turn() {
+    let def = parse_trigger_line(
+        "Whenever you cast a historic spell, create a 1/1 colorless Construct artifact creature token.              This ability triggers only three times each turn.",
+        "Test Card",
+    );
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::MaxTimesPerTurn { max: 3 }),
+    );
+}
+
+/// Contrast: "triggers only once each turn" remains the dedicated OncePerTurn
+/// variant, not MaxTimesPerTurn { max: 1 }.
+#[test]
+fn trigger_only_once_each_turn_stays_once_per_turn_not_max_times() {
+    let def = parse_trigger_line(
+        "Whenever a card leaves your graveyard, draw a card. This ability triggers only once each turn.",
+        "Kishla Skimmer",
+    );
+    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+}
+
 /// CR 603.4 + CR 113.6b: Nether Spirit's intervening-if
 /// ("if this card is the only creature card in your graveyard") must be hoisted
 /// into `def.condition`. The `{SourceInZone, Graveyard}` conjunct then drives

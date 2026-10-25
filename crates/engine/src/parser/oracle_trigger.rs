@@ -4218,11 +4218,55 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
             }
         }
     }
+    // CR 603.2h + CR 603.4: "This ability triggers only twice/N times each turn"
+    // (Nadu, Winged Wisdom #9694). "once" stays OncePerTurn above; adverbial
+    // twice/thrice and cardinal "N times" lower to MaxTimesPerTurn.
+    if let Some(max) = parse_triggers_only_n_times_each_turn(lower) {
+        return Some(TriggerConstraint::MaxTimesPerTurn { max });
+    }
     if let Some((_, constraint, _)) = scan_preceded(lower, parse_nth_spell_this_turn_intervening_if)
     {
         return Some(constraint);
     }
     None
+}
+
+/// CR 603.2h + CR 603.4: count axis of "triggers only twice/N times each turn"
+/// and the "do this only …" synonym. Input is already lowercase.
+fn parse_triggers_only_n_times_each_turn(lower: &str) -> Option<u32> {
+    for prefix in [
+        "this ability triggers only ",
+        "triggers only ",
+        "do this only ",
+    ] {
+        if let Some(rest) = strip_after(lower, prefix) {
+            if let Ok((after_count, n)) = parse_frequency_count_each_turn(rest) {
+                let after = after_count.trim_start();
+                if tag::<_, _, OracleError<'_>>("each turn")
+                    .parse(after)
+                    .is_ok()
+                {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse `twice` / `thrice` / `<number> time(s)` immediately before an
+/// `each turn` window. Cardinal `one`/`1` is admitted for completeness; the
+/// dedicated "once each turn" arm above still wins for printed "once".
+fn parse_frequency_count_each_turn(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(2u32, tag("twice")),
+        value(3u32, tag("thrice")),
+        terminated(
+            nom_primitives::parse_number,
+            alt((tag(" times"), tag(" time"))),
+        ),
+    ))
+    .parse(input)
 }
 
 fn parse_nth_spell_this_turn_intervening_if(input: &str) -> OracleResult<'_, TriggerConstraint> {
@@ -4548,6 +4592,30 @@ fn strip_constraint_sentences(text: &str) -> String {
                 end_pos
             };
             result = format!("{}{}", &result[..start], &result[end_pos..]);
+        }
+    }
+    // CR 603.2h + CR 603.4 (#9694): strip "triggers only twice/N times each turn"
+    // so the frequency sentence does not become unrecognized_clause_head.
+    let lower = result.to_lowercase();
+    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
+        alt((
+            tag::<_, _, OracleError<'_>>("this ability triggers only "),
+            tag("triggers only "),
+            tag("do this only "),
+        ))
+        .parse(i)
+    }) {
+        let start = prefix_text.len();
+        if let Ok((after_count, _n)) = parse_frequency_count_each_turn(matched_start) {
+            let after = after_count.trim_start();
+            if let Ok((after_turn, _)) = tag::<_, _, OracleError<'_>>("each turn").parse(after) {
+                let consumed = matched_start.len() - after_turn.len();
+                let mut end_pos = start + consumed;
+                if after_turn.starts_with('.') {
+                    end_pos += 1;
+                }
+                result = format!("{}{}", &result[..start], &result[end_pos..]);
+            }
         }
     }
     let result = result.trim().to_string();
