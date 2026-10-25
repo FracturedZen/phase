@@ -1064,6 +1064,46 @@ mod test_den_bugbear {
         );
     }
 
+    /// CR 613.1f (#9214): `with <keyword> and "<ability>"` must keep the
+    /// keyword. Cutting at the quote used to leave a dangling ` and`, so
+    /// `map_token_keyword("menace and")` failed and Hive of the Eye Tyrant /
+    /// Druid Class / Veiled Apparition / Iron Man Armor lost the keyword.
+    #[test]
+    fn animation_single_keyword_survives_quoted_ability_conjunction() {
+        use crate::types::keywords::Keyword;
+        let cases = [
+            (
+                r#"a 3/3 black Beholder creature with menace and "Whenever this creature attacks, exile target card from a graveyard.""#,
+                Keyword::Menace,
+            ),
+            (
+                r#"a creature with haste and "This creature's power and toughness are each equal to the number of lands you control.""#,
+                Keyword::Haste,
+            ),
+            (
+                r#"a 3/3 Illusion creature with flying and "At the beginning of your upkeep, sacrifice this creature unless you pay {1}{U}.""#,
+                Keyword::Flying,
+            ),
+            (
+                r#"a 0/0 Construct Hero artifact creature with flying and "This creature gets +1/+1 for each artifact you control""#,
+                Keyword::Flying,
+            ),
+        ];
+        for (text, expected) in cases {
+            let (_, keywords) = split_animation_keyword_clause(text);
+            assert!(
+                keywords.contains(&expected),
+                "expected {expected:?} from {text:?}, got {keywords:?}"
+            );
+        }
+        // Comma-list control (Argothian Uprooting class) must still keep both.
+        let (_, keywords) = split_animation_keyword_clause(
+            r#"a 0/0 plant creature with reach, haste, and "Whenever this creature…""#,
+        );
+        assert!(keywords.contains(&Keyword::Reach), "{keywords:?}");
+        assert!(keywords.contains(&Keyword::Haste), "{keywords:?}");
+    }
+
     #[test]
     fn test_animation_with_quoted_trigger() {
         let text = r#"a 3/2 red Goblin creature with "Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking." It's still a land"#;

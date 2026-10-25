@@ -1760,7 +1760,24 @@ pub(crate) fn parse_complete_token_keyword_list(raw_clause: &str) -> Option<Vec<
     fragments.into_iter().map(map_token_keyword).collect()
 }
 
+/// Peel a dangling list conjunction left after a quote/period cut
+/// (`menace and` / `reach, haste, and`). Animation `with <kw> and "…"` and
+/// base-P/T trailing keywords both cut at `"`, leaving the separator with
+/// nothing after it; without this peel `map_token_keyword` drops the fused
+/// fragment and the permanent never gains the keyword (#9214, CR 613.1f).
+fn strip_trailing_list_conjunction(text: &str) -> &str {
+    let text = text.trim().trim_end_matches(['.', ',']);
+    let text = text
+        .strip_suffix(", and")
+        .or_else(|| text.strip_suffix(" and"))
+        .unwrap_or(text);
+    text.trim_end_matches(',').trim()
+}
+
 pub(super) fn split_token_keyword_list(text: &str) -> Vec<&str> {
+    // Accept a trailing separator with nothing after it (Hive of the Eye
+    // Tyrant: `with menace and "Whenever…"` → raw `menace and`).
+    let text = strip_trailing_list_conjunction(text);
     text.split(", and ")
         .flat_map(|chunk| chunk.split(" and "))
         .flat_map(|sub| sub.split(", "))
@@ -3297,6 +3314,23 @@ mod tests {
     fn keyword_clause_keeps_numbered_keyword_before_quoted_static() {
         let kws = parse_token_keyword_clause(r#"with toxic 1 and "This token can't block.""#);
         assert_eq!(kws, vec![Keyword::Toxic(1)]);
+    }
+
+    /// #9214: after a quote cut, the raw keyword phrase is `menace and` /
+    /// `reach, haste, and`. The shared splitter must peel the dangling
+    /// conjunction so animation and token paths keep the real keywords.
+    #[test]
+    fn split_token_keyword_list_peels_trailing_conjunction() {
+        assert_eq!(split_token_keyword_list("menace and"), vec!["menace"]);
+        assert_eq!(
+            split_token_keyword_list("reach, haste, and"),
+            vec!["reach", "haste"]
+        );
+        // Ordinary mid-list conjunctions are unchanged.
+        assert_eq!(
+            split_token_keyword_list("flying and haste"),
+            vec!["flying", "haste"]
+        );
     }
 
     #[test]
