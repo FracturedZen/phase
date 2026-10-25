@@ -26,7 +26,7 @@ use super::super::oracle_quantity::{
     parse_cda_quantity_with_context, parse_event_context_quantity,
 };
 use super::super::oracle_target::parse_type_phrase_folding;
-use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use super::super::oracle_util::{parse_count_multiplier, parse_mana_production, parse_number, TextPair};
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
@@ -1057,14 +1057,36 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExp
     }
 }
 
-/// Parse a count prefix for mana amounts: "that much", "that many", "X", or
-/// an English/digit number.
+/// Parse a count prefix for mana amounts: "twice that much", "that much",
+/// "that many", "X", or an English/digit number.
+///
+/// CR 608.2h + CR 106.4: "twice that much {G}" (Fangorn, Tree Shepherd) and
+/// "N times that much {C}" wrap the demonstrative amount in
+/// `QuantityExpr::Multiply`, reusing the shared `parse_count_multiplier`
+/// authority already used by CDA / effect-count positions.
 ///
 /// Uses nom combinators for the "X"/"x" prefix matching, falling back to
 /// `oracle_util::parse_number` for English words and digits.
 pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
+
+    // CR 608.2h + CR 107.1: multiplicative prefix over any inner mana-count
+    // form ("twice that much", "two times X", …). Recurses so the same
+    // multiplier authority wraps every leaf this function already knows.
+    if let Some((factor, after_mult)) =
+        nom_on_lower(trimmed, &lower, |i| parse_count_multiplier(i))
+    {
+        if let Some((inner, rest)) = parse_mana_count_prefix(after_mult) {
+            return Some((
+                QuantityExpr::Multiply {
+                    factor,
+                    inner: Box::new(inner),
+                },
+                rest,
+            ));
+        }
+    }
 
     if let Some((qty, rest)) = nom_on_lower(
         trimmed,
@@ -4343,6 +4365,70 @@ mod tests {
                 );
             }
             other => panic!("expected Effect::Mana, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2h + CR 106.4 + #10269: Fangorn, Tree Shepherd — "add twice that
+    /// much {G}" multiplies the attack-batch `EventContextAmount` by 2. Without
+    /// the multiplier arm in `parse_mana_count_prefix` the clause collapses to
+    /// `Effect::Unimplemented { name: "unparsed_quantity" }`.
+    #[test]
+    fn parse_add_twice_that_much_colored_mana() {
+        let effect = try_parse_add_mana_effect("add twice that much {G}")
+            .expect("'add twice that much {G}' must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count,
+                    ref color_options,
+                    contribution: ManaContribution::Base,
+                },
+                ..
+            } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    "'twice that much' must be Multiply(2, EventContextAmount), got {count:?}"
+                );
+                assert_eq!(
+                    color_options,
+                    &vec![ManaColor::Green],
+                    "pip must stay Green"
+                );
+            }
+            other => panic!("expected Effect::Mana AnyOneColor, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2h + CR 106.4: "two times that much {C}" is the same multiplier
+    /// authority over a colorless count-prefixed form (companion to
+    /// `parse_add_twice_that_much_colored_mana`).
+    #[test]
+    fn parse_add_n_times_that_much_colorless() {
+        let effect = try_parse_add_mana_effect("add two times that much {C}")
+            .expect("'add two times that much {C}' must parse");
+        match effect {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }),
+                    },
+                    "'two times that much' must be Multiply(2, EventContextAmount), got {count:?}"
+                );
+            }
+            other => panic!("expected Effect::Mana Colorless, got {other:?}"),
         }
     }
 

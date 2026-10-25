@@ -11988,6 +11988,36 @@ fn effect_add_that_much_colored_mana_uses_event_context_amount() {
 }
 
 #[test]
+/// CR 608.2h + CR 106.4 + #10269: "Add twice that much {G}" multiplies the
+/// event-context amount (Fangorn attack-batch count).
+fn effect_add_twice_that_much_colored_mana() {
+    let e = parse_effect("Add twice that much {G}");
+    assert!(
+        matches!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        ref inner,
+                    },
+                    ref color_options,
+                    contribution: ManaContribution::Base,
+                },
+                ..
+            } if color_options == &vec![ManaColor::Green]
+                && matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                )
+        ),
+        "expected Multiply(2, EventContextAmount) green mana, got {e:?}"
+    );
+}
+
+#[test]
 fn effect_double_number_of_counters_on_self() {
     let e = parse_effect("Double the number of +1/+1 counters on ~");
     assert!(matches!(

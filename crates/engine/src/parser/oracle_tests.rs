@@ -26456,6 +26456,57 @@ fn equip_once_per_turn_constraint_strips_from_cost() {
 }
 
 #[test]
+
+#[test]
+/// CR 508.3d + CR 608.2h + CR 106.4 + #10269: Fangorn, Tree Shepherd —
+/// "Whenever one or more Treefolk you control attack, add twice that much {G}"
+/// must lower to Mana with Multiply(2, EventContextAmount), not
+/// Unimplemented unparsed_quantity.
+fn fangorn_tree_shepherd_twice_that_much_green() {
+    let result = parse(
+        "Treefolk you control have vigilance.\n\
+         Whenever one or more Treefolk you control attack, add twice that much {G}.\n\
+         You don't lose unspent green mana as steps and phases end.",
+        "Fangorn, Tree Shepherd",
+        &[],
+        &["Legendary", "Creature"],
+        &["Treefolk"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&result),
+        "Fangorn must parse with no Unimplemented effects: {result:#?}"
+    );
+    let mana_effect = result
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_ref())
+        .find(|e| matches!(e, Effect::Mana { .. }))
+        .expect("Fangorn attack trigger must produce a Mana effect");
+    assert!(
+        matches!(
+            mana_effect,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        ref inner,
+                    },
+                    ref color_options,
+                    ..
+                },
+                ..
+            } if color_options == &vec![ManaColor::Green]
+                && matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                )
+        ),
+        "expected Multiply(2, EventContextAmount) {{G}}, got {mana_effect:?}"
+    );
+}
+
 fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
     let result = parse(
             "Equipped creature gets +3/+3 and has ward {1}.\n\
