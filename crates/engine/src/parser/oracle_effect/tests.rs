@@ -37773,6 +37773,122 @@ fn parse_teferis_protection_end_to_end() {
     );
 }
 
+/// Issue #10223 + CR 702.16j + CR 119.7 + CR 702.26: Teferi's Reproach —
+/// Choose target opponent; until that player's next turn they gain protection
+/// + life-lock; all nonland permanents they control phase out. The PhaseOut
+/// controller must bind the Choose declaration (DeclaredPlayer), not You.
+#[test]
+fn parse_teferis_reproach_end_to_end() {
+    let result = crate::parser::parse_oracle_text(
+        "Choose target opponent. Until that player's next turn, they gain protection from everything and their life total can't change. All nonland permanents they control phase out.\nExile Teferi's Reproach.",
+        "Teferi's Reproach",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+
+    assert!(
+        result.abilities.len() >= 2,
+        "expected Choose-chain + self-exile, got {}: {:?}",
+        result.abilities.len(),
+        result
+            .abilities
+            .iter()
+            .map(|a| format!("{:?}", a.effect))
+            .collect::<Vec<_>>()
+    );
+
+    let first = &result.abilities[0];
+    assert!(
+        matches!(
+            &*first.effect,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(tf)
+            } if tf.controller == Some(ControllerRef::Opponent)
+        ),
+        "expected TargetOnly(Opponent), got {:?}",
+        first.effect
+    );
+
+    let protection = first
+        .sub_ability
+        .as_ref()
+        .expect("Choose should chain to protection");
+    assert_eq!(
+        protection.duration,
+        Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Target,
+        }),
+        "protection duration must be UntilNextTurnOf(Target)"
+    );
+    let Effect::GenericEffect {
+        static_abilities: protection_statics,
+        ..
+    } = &*protection.effect
+    else {
+        panic!("expected protection GenericEffect, got {:?}", protection.effect);
+    };
+    assert!(
+        protection_statics.iter().any(|s| {
+            s.affected == Some(TargetFilter::ParentTargetController)
+                && s.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: crate::types::keywords::Keyword::Protection(_)
+                    }
+                ))
+        }),
+        "expected ParentTargetController protection-from-everything, got {protection_statics:?}"
+    );
+
+    let life_lock = protection
+        .sub_ability
+        .as_ref()
+        .expect("protection should chain to life-lock");
+    let Effect::GenericEffect {
+        static_abilities: lock_statics,
+        ..
+    } = &*life_lock.effect
+    else {
+        panic!("expected life-lock GenericEffect, got {:?}", life_lock.effect);
+    };
+    let lock_modes: Vec<_> = lock_statics.iter().map(|s| s.mode.clone()).collect();
+    assert!(
+        lock_modes.contains(&StaticMode::CantGainLife)
+            && lock_modes.contains(&StaticMode::CantLoseLife),
+        "life-lock missing CantGain/LoseLife: {lock_modes:?}"
+    );
+
+    let phase_out = life_lock
+        .sub_ability
+        .as_ref()
+        .expect("life-lock should chain to phase-out");
+    match &*phase_out.effect {
+        Effect::PhaseOut { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Permanent)),
+                    "phase-out should include Permanent: {tf:?}"
+                );
+                assert!(
+                    tf.type_filters.iter().any(|t| matches!(
+                        t,
+                        TypeFilter::Non(inner) if **inner == TypeFilter::Land
+                    )),
+                    "phase-out should exclude lands: {tf:?}"
+                );
+                assert!(
+                    matches!(tf.controller, Some(ControllerRef::DeclaredPlayer { .. })),
+                    "phase-out 'they control' must bind DeclaredPlayer from Choose, got {:?}",
+                    tf.controller
+                );
+            }
+            other => panic!("expected Typed phase-out target, got {other:?}"),
+        },
+        other => panic!("expected PhaseOut, got {other:?}"),
+    }
+}
+
 /// Issue #514 + CR 608.2c: Liliana's Triumph's secondary clause
 /// ("each opponent also discards a card") must lower to a real
 /// `Effect::Discard` with `player_scope: Opponent` — not `Unimplemented`.

@@ -877,6 +877,28 @@ mod tests {
         assert_eq!(rest, ".");
     }
 
+    /// CR 109.4 + CR 608.2c (#10223): Teferi's Reproach — "until that player's
+    /// next turn" after Choose target opponent binds Target, not Controller.
+    #[test]
+    fn test_parse_duration_that_players_next_turn() {
+        let (rest, d) = parse_duration("until that player's next turn.").unwrap();
+        assert_eq!(
+            d,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Target,
+            }
+        );
+        assert_eq!(rest, ".");
+        let (rest, d) = parse_duration("until that player\u{2019}s next turn,").unwrap();
+        assert_eq!(
+            d,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Target,
+            }
+        );
+        assert_eq!(rest, ",");
+    }
+
     #[test]
     fn test_parse_duration_this_turn() {
         let (rest, d) = parse_duration("this turn.").unwrap();

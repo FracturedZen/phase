@@ -6886,7 +6886,15 @@ fn try_parse_life_lock_clause(text: &str) -> Option<ParsedEffectClause> {
     )
         .parse(lower.as_str())
         .ok()?;
-    let scope_filter = life_lock_scope_from_possessor(possessor.trim());
+    let possessor = possessor.trim();
+    // Defense in depth for #10223: a compound whose earlier conjunct is NOT
+    // itself a life-lock ("they gain protection … and their life total can't
+    // change") must not match here — the bare-and splitter owns the cut. A
+    // possessor that still contains " and " means the splitter missed.
+    if nom_primitives::scan_contains(possessor, " and ") {
+        return None;
+    }
+    let scope_filter = life_lock_scope_from_possessor(possessor);
     Some(build_life_lock_clause(scope_filter))
 }
 
@@ -6906,6 +6914,18 @@ fn life_lock_scope_from_possessor(possessor_lower: &str) -> TargetFilter {
     }
     if nom_primitives::scan_contains(possessor_lower, "your") {
         return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
+    }
+    // CR 109.4 + CR 608.2c: "their" / "that player's" after "Choose target
+    // opponent" (Teferi's Reproach) — the first player target. Prefer
+    // TargetOpponent so a Choose-target-opponent antecedent stays opponent-
+    // scoped; TargetPlayer covers "Choose target player" antecedents via the
+    // same Target* family at resolution.
+    if possessor_lower == "their"
+        || possessor_lower.starts_with("that player")
+    {
+        return TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::TargetOpponent),
+        );
     }
     // "Players'" / "each player's" / unrecognized → all players.
     TargetFilter::Typed(TypedFilter::default())

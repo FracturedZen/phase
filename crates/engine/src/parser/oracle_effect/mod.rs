@@ -28039,6 +28039,40 @@ fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     chain_prior_player_declaration(clauses).is_some()
 }
 
+/// CR 608.2c + CR 611.2a: a `GenericEffect` that only grants continuous
+/// player-scoped statics (life-lock, "they gain protection from everything")
+/// and carries no effect-level `target` slot. It neither announces a new
+/// player nor introduces an object referent — the walk may read through it
+/// to the earlier `Choose target opponent` declaration (Teferi's Reproach
+/// #10223: PhaseOut "they control" after protection + life-lock).
+fn generic_effect_is_player_continuous_transparent(effect: &Effect) -> bool {
+    let Effect::GenericEffect {
+        target: None,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        return false;
+    };
+    !static_abilities.is_empty()
+        && static_abilities.iter().all(|sd| {
+            sd.affected.as_ref().is_some_and(filter_is_player_continuous_scope)
+        })
+}
+
+/// Player-scope filters a transparent continuous grant may name without
+/// becoming a new declaration or object referent for the chain walk.
+fn filter_is_player_continuous_scope(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+            | TargetFilter::Controller
+            | TargetFilter::Player
+            | TargetFilter::DeclaredPlayer { .. }
+    ) || filter.denotes_player_target()
+}
+
 /// The nearest earlier clause that announces a player, reached only through
 /// clauses that read the same referent, name the controller ("you"), or announce an
 /// object of their own: none of them names another player (CR 608.2c). Each
@@ -28076,6 +28110,7 @@ fn chain_prior_player_declaration(clauses: &[ClauseIr]) -> Option<&ClauseIr> {
                     | TargetFilter::Controller
             )
         ) || has_typed_target_widened(&prev.parsed.effect)
+            || generic_effect_is_player_continuous_transparent(&prev.parsed.effect)
         {
             continue;
         }

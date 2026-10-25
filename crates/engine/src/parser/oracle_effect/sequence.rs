@@ -3607,6 +3607,19 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you untap ")),
         value((), tag("that player ")),
     )))
+    // CR 119.7 + CR 608.2c + CR 611.2a: life-lock possessives are
+    // subject-predicate clauses (Teferi's Reproach: "…and their life total
+    // can't change"). Without these arms the bare-and splitter leaves
+    // "they gain protection … and their life total can't change" as ONE
+    // chunk; `try_parse_life_lock_clause`'s `take_until(" life total")`
+    // then swallows the protection conjunct (#10223). Own `.or(alt())` so
+    // the preceding 21-arm tuple stays under nom's Choice limit.
+    .or(alt((
+        value((), tag("their life total")),
+        value((), tag("your life total")),
+        value((), tag("that player's life total")),
+        value((), tag("that player\u{2019}s life total")),
+    )))
     .or(alt((
         // CR 608.2k: "it [conjugated-verb]" is always subject + predicate, never a
         // noun phrase. "doesn't"/"can't"/"cannot" are restriction predicates; "gains"/
