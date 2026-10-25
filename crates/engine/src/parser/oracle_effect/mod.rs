@@ -51029,6 +51029,77 @@ fn for_each_target_player_controls_search_that_players_library_keeps_caster_sear
     assert_eq!(target_player.controller, None);
 }
 
+/// CR 608.2c + CR 701.23a (issue #10225): Mimeofacture — "Choose target permanent
+/// an opponent controls. Search that player's library …" binds the permanent's
+/// controller while the caster remains the searcher (Typed wrapper).
+#[test]
+fn mimeofacture_search_that_players_library_binds_parent_target_controller() {
+    let def = parse_effect_chain(
+        "Choose target permanent an opponent controls. Search that player's library for a card with the same name and put it onto the battlefield under your control. Then that player shuffles.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::TargetOnly { .. }),
+        "top-level should be TargetOnly, got {:?}",
+        def.effect
+    );
+    let search = def
+        .sub_ability
+        .as_deref()
+        .expect("should chain SearchLibrary");
+    let Effect::SearchLibrary { target_player, .. } = search.effect.as_ref() else {
+        panic!("expected SearchLibrary, got {:?}", search.effect);
+    };
+    assert_eq!(
+        *target_player,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::ParentTargetController)
+        )),
+        "SearchLibrary must name the permanent's controller as library owner"
+    );
+}
+
+/// CR 608.2c + CR 701.23a (issue #10225): Haunting Echoes — after exiling from
+/// target player's graveyard, "search that player's library" keeps the named
+/// player's library (not the caster's).
+#[test]
+fn haunting_echoes_search_that_players_library_binds_named_player() {
+    let def = parse_effect_chain(
+        "Exile all cards from target player's graveyard other than basic land cards. For each card exiled this way, search that player's library for all cards with the same name as that card and exile them. Then that player shuffles.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::ChangeZoneAll { .. }),
+        "top-level should be ChangeZoneAll, got {:?}",
+        def.effect
+    );
+    let search = def
+        .sub_ability
+        .as_deref()
+        .expect("should chain SearchLibrary");
+    let Effect::SearchLibrary { target_player, .. } = search.effect.as_ref() else {
+        panic!("expected SearchLibrary, got {:?}", search.effect);
+    };
+    assert!(
+        target_player.is_some(),
+        "SearchLibrary must bind the named player's library, got None: {search:#?}"
+    );
+    // Accept ParentTarget / DeclaredPlayer (zone-owner announce) or
+    // Typed{ParentTargetController|TargetPlayer} (object-relative / Owned).
+    // Bare None (caster's library) is the bug this regression guards against.
+    let ok = match target_player {
+        Some(TargetFilter::ParentTarget) | Some(TargetFilter::DeclaredPlayer { .. }) => true,
+        Some(TargetFilter::Typed(tf)) => matches!(
+            tf.controller,
+            Some(ControllerRef::ParentTargetController)
+                | Some(ControllerRef::TargetPlayer)
+                | None
+        ),
+        _ => false,
+    };
+    assert!(ok, "unexpected target_player binding: {target_player:?}");
+}
+
 /// CR 508.1c + CR 611.2c: building-block test for the "only X can attack during
 /// that combat phase" subject parser. Covers every enforceable subject class and
 /// the strict-fail boundary (unrecognized clause → `None`, stays Unimplemented).

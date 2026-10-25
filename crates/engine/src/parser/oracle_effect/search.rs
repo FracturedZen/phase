@@ -648,6 +648,14 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
     use nom::sequence::preceded;
 
     let has_declared_player = ctx.declared_player_scope.is_some();
+    // CR 608.2c + CR 701.23a (issue #10225): after a prior typed object target
+    // (Mimeofacture's permanent, Haunting Echoes' GY exile), "that player" names
+    // the object's controller. Typed{ParentTargetController} keeps the caster as
+    // searcher (`searcher_is_library_owner` is false for Typed) — unlike bare
+    // ParentTargetController, which is Assassin's Trophy ("its controller may
+    // search their library").
+    let prior_object_controller = !has_declared_player
+        && matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget));
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -675,6 +683,15 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
                 value(
                     TargetFilter::ParentTarget,
                     verify(tag("that player's "), |_: &str| has_declared_player),
+                ),
+                // CR 608.2c + CR 701.23a (issue #10225): object-relative "that
+                // player's library" — caster searches the prior target's
+                // controller's library (Mimeofacture, Haunting Echoes).
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ParentTargetController),
+                    ),
+                    verify(tag("that player's "), |_: &str| prior_object_controller),
                 ),
             )),
         )
@@ -3252,6 +3269,46 @@ mod tests {
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 15 });
+        assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
+    }
+
+    /// CR 608.2c + CR 701.23a (issue #10225): Mimeofacture-class — after a prior
+    /// typed object target, "search that player's library" binds the object's
+    /// controller while keeping the caster as searcher (Typed wrapper).
+    #[test]
+    fn search_that_players_library_after_prior_object_binds_parent_target_controller() {
+        let mut ctx = ParseContext {
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for a card with the same name as that permanent",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.target_player,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ParentTargetController)
+            ))
+        );
+    }
+
+    /// Declared-player binding outranks the object-controller arm: when both a
+    /// declared player and a prior typed object exist, "that player" is the
+    /// declared player (ParentTarget), not Typed{ParentTargetController}.
+    #[test]
+    fn search_that_players_library_declared_player_outranks_prior_object() {
+        let mut ctx = ParseContext {
+            declared_player_scope: Some(ControllerRef::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            }),
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for a card with the same name as that permanent",
+            &mut ctx,
+        );
         assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
     }
 

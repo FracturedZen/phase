@@ -85,7 +85,7 @@
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ControllerRef, Effect, FilterProp, PlayerFilter,
-    SearchDestinationSplit, TargetFilter,
+    SearchDestinationSplit, TargetFilter, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::game_state::GameState;
@@ -281,21 +281,20 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
     match effect {
         // Absent `target_player` is an engine parser convention for "the
         // actor's own library". It is a true description of engine behaviour
-        // and it is NOT the safety warrant for this arm, because it is NOT
-        // reliable: Mimeofacture[0] and Jace, Architect of Thought[2] name a
-        // foreign library yet carry `target_player: None`. No aggregate count is claimed
+        // and it is NOT the safety warrant for this arm alone, because some
+        // foreign-library shapes historically arrived without a binding
+        // (see issue #10225; Mimeofacture now carries
+        // `Typed{ParentTargetController}`). No aggregate count is claimed
         // here: "how many abilities name a foreign library" has no
         // scope-independent answer, and an unscoped census is worse than none.
         //
         // What makes the arm safe is the ABSORBING ability-level fold in
-        // `ability_window_reach`: a foreign-library ability carries some
-        // sibling effect or cost that folds to `MayInterfere` regardless of
-        // what `target_player` says. `Mimeofacture[0]` is the in-suite
-        // witness for that fold — see
-        // `a_foreign_library_search_is_confined_alone_then_absorbed`. Bribery[0]
-        // and Praetor's Grasp[0] are also `MayInterfere`, but they witness the
-        // OTHER path: both carry `target_player: Typed`, so this arm catches
-        // them directly and the fold never has to.
+        // `ability_window_reach`: a foreign-library ability that still lacks
+        // `target_player` carries some sibling effect or cost that folds to
+        // `MayInterfere`. Bribery[0], Praetor's Grasp[0], Mimeofacture[0], and
+        // Haunting Echoes[0] witness the DIRECT path: they carry a foreign
+        // `target_player`, so this arm catches them and the fold never has to.
+        // See `mimeofacture_foreign_library_search_is_caught_directly` (#10225).
         //
         // CR 400.1 is cited here only for why a bare `Zone::Library`
         // reference is ambiguous in the first place.
@@ -1720,7 +1719,7 @@ mod tests {
             (&PRAETORS_GRASP, 0),
             (&HAUNTING_ECHOES, 0),
             // The library analogue caught by the ABSORBING FOLD instead is
-            // pinned by `a_foreign_library_search_is_confined_alone_then_absorbed`.
+            // pinned by `mimeofacture_foreign_library_search_is_caught_directly` (#10225).
             // Hand analogue — these do not ride `ChangeZone` at all; they fall
             // to the fail-closed default
             (&THOUGHTSEIZE, 0),
@@ -1768,27 +1767,17 @@ mod tests {
         }
     }
 
-    /// The `SearchLibrary` arm's safety warrant is the ABSORBING fold, not the
-    /// arm itself — and the library rows in the table above do NOT witness
-    /// it: `Bribery[0]`, `Praetor's Grasp[0]` and `Haunting Echoes[0]` each carry
-    /// a `target_player`, so the arm catches them
-    /// directly and the fold is never asked to do anything. This test pins the
-    /// path they miss.
+    /// CR 608.2c + CR 701.23a (issue #10225): Mimeofacture used to arrive as
+    /// `SearchLibrary { target_player: None }` despite naming a foreign library
+    /// ("that player's" = the permanent's controller). The parser now binds
+    /// `Typed{ParentTargetController}`, so the search alone is caught by the
+    /// `SearchLibrary` arm — Bribery-class, not absorb-fold class.
     ///
-    /// `Mimeofacture[0]` searches "that player's library" — FOREIGN, the
-    /// controller of a target permanent — yet its `sub_ability` heads
-    /// `SearchLibrary { target_player: None }`, so that node ALONE classifies
-    /// `OwnResourcesOnly`. Its absorber is the `TargetOnly` head, which reaches
-    /// `effect_window_reach`'s fail-closed `_` arm.
-    ///
-    /// The absorber here is the head, the one term of `ability_window_reach` that
-    /// is not optional; that does NOT generalize to "an absorbed verdict can never
-    /// flip". `Jace, Architect of Thought[2]` (not a fixture here) heads
-    /// `SearchLibrary { target_player: None }` and its absorbers sit on optional
-    /// legs (`cost: Loyalty(-8)`, a `ChangeZone` `sub_ability`, `player_scope: All`):
-    /// dropping all three flips it to `OwnResourcesOnly`.
+    /// The absorb-fold path still matters for foreign searches that lack a
+    /// binding (historically Jace, Architect of Thought[2]); Mimeofacture is
+    /// no longer that witness.
     #[test]
-    fn a_foreign_library_search_is_confined_alone_then_absorbed() {
+    fn mimeofacture_foreign_library_search_is_caught_directly() {
         // Its "Choose target permanent" head parses only on a sorcery.
         let parsed = parse_oracle_text(
             MIMEOFACTURE.oracle,
@@ -1807,28 +1796,23 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("PREMISE: Mimeofacture[0] carries the library search as its sub_ability");
-        assert!(
-            matches!(
-                &*search.effect,
-                Effect::SearchLibrary {
-                    target_player: None,
-                    ..
-                }
-            ),
-            "PREMISE: Mimeofacture[0]'s sub_ability is the foreign-library search, got {:?}",
-            search.effect
+        let Effect::SearchLibrary { target_player, .. } = &*search.effect else {
+            panic!(
+                "PREMISE: Mimeofacture[0]'s sub_ability is SearchLibrary, got {:?}",
+                search.effect
+            );
+        };
+        assert_eq!(
+            target_player,
+            &Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::ParentTargetController)
+            )),
+            "issue #10225: Mimeofacture must bind the permanent's controller as library owner"
         );
         assert_eq!(
             effect_window_reach(&search.effect),
-            WindowReach::OwnResourcesOnly,
-            "PREMISE: the foreign-library search must still look CONFINED on its own — that is \
-             the fail-open shape the fold exists to absorb. If this flips, the parser now carries \
-             the foreign `target_player` and this row has silently become a second Bribery"
-        );
-        assert_eq!(
-            effect_window_reach(&mimeofacture.effect),
             WindowReach::MayInterfere,
-            "the absorber: the `TargetOnly` head is what the fold ORs in"
+            "with the foreign `target_player` bound, the search alone is MayInterfere              (Bribery-class) — no absorb fold required"
         );
         assert_eq!(
             ability_window_reach(mimeofacture),
