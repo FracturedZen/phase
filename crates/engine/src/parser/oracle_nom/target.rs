@@ -1508,6 +1508,7 @@ mod tests {
 
     #[test]
     fn player_or_planeswalker_controller_controls_binds_parent_target_controller() {
+        use super::*;
         for text in [
             "that player or that planeswalker's controller controls",
             "that player or that planeswalker\u{2019}s controller controls",
