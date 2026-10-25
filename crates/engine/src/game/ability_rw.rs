@@ -4273,7 +4273,13 @@ fn target_recipient(f: &TargetFilter) -> (bool, bool) {
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageTargetOwner => (true, false),
+        | TargetFilter::PostReplacementDamageTargetOwner
+        // CR 115.1 + CR 120: "that player" after a declared "target player …"
+        // (Thought Hemorrhage, Blood Oath, Hellhole Rats, …) is a player-only
+        // damage recipient. Without this arm the catch-all classes DeclaredPlayer
+        // as object-only, so DealDamage's read/write profile omits the life write
+        // (#10233).
+        | TargetFilter::DeclaredPlayer { .. } => (true, false),
         // "any target" and player-or-object filters ⇒ both recipients.
         // CR 506.3: the attacked player-or-planeswalker is either a player or a
         // planeswalker permanent, so it writes both life and membership. Without
@@ -10175,4 +10181,40 @@ mod attacked_referent_classification_tests {
             "distinct-event siblings: one's damage can remove the other's recipient"
         );
     }
+
+    /// CR 115.1 + CR 120 (#10233): DealDamage aimed at a DeclaredPlayer ("that
+    /// player" after "target player …") is a player-life write, not an
+    /// object-only recipient. Thought Hemorrhage / Blood Oath / Hellhole Rats.
+    #[test]
+    fn declared_player_deal_damage_is_player_recipient() {
+        use crate::types::ability::ChosenGroupId;
+        let f = TargetFilter::DeclaredPlayer {
+            group: ChosenGroupId::declared_player(0),
+        };
+        assert_eq!(
+            target_recipient(&f),
+            (true, false),
+            "DeclaredPlayer must classify as player-only, matching TriggeringPlayer              / ParentTargetController / DefendingPlayer"
+        );
+        assert_eq!(
+            target_recipient(&TargetFilter::TriggeringPlayer),
+            (true, false),
+            "reach: TriggeringPlayer remains the player-only analog"
+        );
+        // Contrast: the pre-fix catch-all would have returned (false, true).
+        let writes = damage_writes(&f);
+        assert!(
+            writes.writes_external.player_life,
+            "DealDamage to DeclaredPlayer must write player life"
+        );
+        assert!(
+            writes.writes_external.journal_life,
+            "DealDamage to DeclaredPlayer must write the life journal"
+        );
+        assert!(
+            !writes.writes_external.set_membership,
+            "a bare DeclaredPlayer is not an object recipient"
+        );
+    }
+
 }
