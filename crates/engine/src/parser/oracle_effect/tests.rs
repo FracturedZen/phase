@@ -77469,7 +77469,9 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         }
     );
-    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
+    // CR 115.10a + CR 608.2d (#10176): bare untargeted choose is Resolution,
+    // not a cast-time Stack target (shroud must not exclude the pick).
+    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Resolution);
     // A bare Effect cannot represent both instructions. The chain succeeds in
     // U-C4; this lower-level entry point must fail closed rather than lose one.
     let Effect::Unimplemented { name, description } =
@@ -77497,6 +77499,27 @@ fn flip_lose_branch(def: &AbilityDefinition) -> &AbilityDefinition {
     lose_effect
         .as_deref()
         .expect("the lost flip must have a branch")
+}
+
+/// CR 115.10a + CR 608.2d (#10176): bare untargeted "Choose a … you control"
+/// is a resolution pick; the explicit "target" synonym stays Stack.
+#[test]
+fn bare_choose_creature_you_control_is_resolution_timed() {
+    let bare = parse_effect_chain("Choose a creature you control.", AbilityKind::Spell);
+    assert!(matches!(bare.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert_eq!(bare.target_choice_timing, TargetChoiceTiming::Resolution);
+
+    let targeted = parse_effect_chain("Choose target creature you control.", AbilityKind::Spell);
+    assert!(matches!(targeted.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert_eq!(targeted.target_choice_timing, TargetChoiceTiming::Stack);
+
+    // Ascent of the Worthy / Final Showdown class: choose then sacrifice "it".
+    let ascent = parse_effect_chain(
+        "Choose a creature you control. Sacrifice it.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(ascent.effect.as_ref(), Effect::TargetOnly { .. }));
+    assert_eq!(ascent.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
 /// SHAPE U-C4: the whole synthetic spell lowers to object -> opponent -> flip,

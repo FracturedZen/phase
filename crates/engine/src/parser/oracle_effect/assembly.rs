@@ -30,7 +30,7 @@ use crate::types::ability::{
     Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
     SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypedFilter,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -4773,6 +4773,11 @@ fn reconcile_object_choice_durability(result: &mut AbilityDefinition, ir: &Effec
         *result.effect = Effect::TargetOnly {
             target: filter.clone(),
         };
+        // CR 115.10a + CR 608.2d (#10176): restored TargetOnly is still the
+        // bare untargeted choose (Gideon's Sacrifice "the chosen permanent"
+        // redirect axis). Keep Resolution timing so it is not announced as a
+        // cast-time target.
+        result.target_choice_timing = TargetChoiceTiming::Resolution;
     }
 }
 

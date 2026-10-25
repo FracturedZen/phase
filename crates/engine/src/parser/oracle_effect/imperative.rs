@@ -4930,9 +4930,19 @@ pub(super) fn parse_choose_ast(
             // actor/target context for scoped filters, but do not turn its
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
+            //
+            // CR 115.10a + CR 608.2d (#10176): a bare untargeted
+            // "Choose a creature you control" (no printed "target") is chosen
+            // while the spell/ability resolves — not announced as a cast-time
+            // target. Stamp Resolution here so shroud/hexproof do not exclude
+            // an otherwise eligible permanent. Explicit "Choose target …"
+            // keeps the Stack default via the classifier's fragment scan.
             let diagnostic_count = ctx.diagnostics.len();
             let (target, _) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            if !nom_primitives::scan_contains(rest_lower, "target ") {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }
