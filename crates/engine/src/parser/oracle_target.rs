@@ -5305,6 +5305,12 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // reaches this distributor, or carry `Named` on every leg and are
             // deduped by `same_kind`), but excluding it future-proofs the guard.
             | FilterProp::Named { .. }
+            // CR 406.3: prenominal zone / face adjectives ("exiled card",
+            // "face-down permanent", "face-up exiled card") bind only to their
+            // own type-phrase leg — same class as Tapped status.
+            | FilterProp::InZone { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Not { .. }
     )
 }
 
@@ -6474,13 +6480,21 @@ fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
     ))
 }
 
-/// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
-/// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
+/// CR 509.1h / CR 302.6 / CR 701.60b / CR 406.3: Parse status prefixes from type
+/// phrases. Called in a loop to consume multiple prefixes (e.g. "unblocked
+/// attacking ", "face-up exiled ").
 /// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
-/// and designation status (suspected — CR 701.60b).
+/// designation status (suspected — CR 701.60b), and prenominal zone/face status
+/// ("exiled [type]", "face-up [type]" — issue #10281).
 ///
 /// Delegates to `nom_filter::parse_property_filter` for the common property keywords,
-/// then handles "face-down " (hyphenated variant not in the nom combinator).
+/// then handles hyphenated / zone adjectives not in that combinator.
+///
+/// Linked-exile anaphors ("the exiled card", "cards exiled with ~") are owned by
+/// other grammars; this arm only fires as a type-phrase adjective prefix (the
+/// caller requires a following type word). "exiled with …" is never a prefix here
+/// because `parse_type_phrase_folding` only invokes this loop at the head of a
+/// typed noun phrase, not on a postnominal "exiled with" rider.
 pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
     // Try the shared nom property filter combinator for combat/tap status keywords.
     // Filter to only the status properties relevant as type phrase prefixes.
@@ -6515,6 +6529,36 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
     // Handle "face-down " (hyphenated variant not in the nom combinator).
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face-down ").parse(text) {
         return Some((FilterProp::FaceDown, text.len() - rest.len()));
+    }
+
+    // CR 406.3 (issue #10281): prenominal "face-up "/"face up " — cards that are
+    // not face down (Pull from Eternity: "target face-up exiled card"). Negation
+    // of FaceDown keeps FilterProp closed (no FaceUp variant).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("face-up "),
+        tag("face up "),
+    ))
+    .parse(text)
+    {
+        return Some((
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            text.len() - rest.len(),
+        ));
+    }
+
+    // CR 406.3 (issue #10281): prenominal "exiled [type]" → InZone{Exile}
+    // (Riftsweeper, Runic Repetition, Blade of the Swarm, Pull from Eternity).
+    // Distinct from linked-exile anaphors and from the special-cased
+    // "exiled cards with [counter] counters on them" arm in parse_target.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exiled ").parse(text) {
+        return Some((
+            FilterProp::InZone {
+                zone: Zone::Exile,
+            },
+            text.len() - rest.len(),
+        ));
     }
 
     None
@@ -8542,6 +8586,10 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             | "awaken"
             | "foretell"
             | "miracle"
+            // CR 702.185: Warp is parameterized (`Warp(ManaCost)`); "exiled card
+            // with warp" / Blade of the Swarm must match by discriminant (issue
+            // #10281 companion to prenominal exile).
+            | "warp"
     ) {
         let kind = match text {
             "flashback" => KeywordKind::Flashback,
@@ -8557,6 +8605,7 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
             // discriminant so a granted (cost-bearing) instance still matches.
             "foretell" => KeywordKind::Foretell, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
             "miracle" => KeywordKind::Miracle, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
+            "warp" => KeywordKind::Warp, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
             _ => unreachable!(),
         };
         return Some(KeywordMatch::Kind(kind));
@@ -19338,6 +19387,115 @@ mod tests {
         // Postfix forms are handled elsewhere and must not be consumed.
         assert_eq!(parse_combat_status_prefix("blocked by a creature"), None);
         assert_eq!(parse_combat_status_prefix("blocked this turn"), None);
+    }
+
+    /// CR 406.3 + issue #10281: prenominal "exiled " is an InZone{Exile} adjective.
+    #[test]
+    fn combat_status_prefix_exiled() {
+        assert_eq!(
+            parse_combat_status_prefix("exiled card"),
+            Some((FilterProp::InZone { zone: Zone::Exile }, 7))
+        );
+    }
+
+    /// CR 406.3 + issue #10281: prenominal "face-up " is Not{FaceDown}.
+    #[test]
+    fn combat_status_prefix_face_up() {
+        assert_eq!(
+            parse_combat_status_prefix("face-up exiled card"),
+            Some((
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::FaceDown)
+                },
+                8
+            ))
+        );
+        assert_eq!(
+            parse_combat_status_prefix("face up card"),
+            Some((
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::FaceDown)
+                },
+                8
+            ))
+        );
+    }
+
+    /// CR 406.3 + issue #10281: "target face-up exiled card" must keep both
+    /// FaceUp (Not FaceDown) and InZone{Exile} — Pull from Eternity.
+    #[test]
+    fn target_face_up_exiled_card_keeps_exile_zone() {
+        let (filter, rest) = parse_target("target face-up exiled card");
+        assert_eq!(rest.trim(), "", "leftover: {rest:?}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Not { prop } if matches!(prop.as_ref(), FilterProp::FaceDown)
+            )),
+            "face-up must lower to Not{{FaceDown}}, got {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "exiled must lower to InZone{{Exile}}, got {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 406.3 + issue #10281: Runic Repetition — exile zone + flashback.
+    #[test]
+    fn target_exiled_card_with_flashback_you_own() {
+        let (filter, rest) = parse_target("target exiled card with flashback you own");
+        assert_eq!(rest.trim(), "", "leftover: {rest:?}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "missing InZone Exile: {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flashback
+                }
+            )),
+            "missing flashback: {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 406.3 + issue #10281: Blade of the Swarm — face-up exiled with warp.
+    #[test]
+    fn target_face_up_exiled_card_with_warp() {
+        let (filter, rest) = parse_target("target face-up exiled card with warp");
+        assert_eq!(rest.trim(), "", "leftover: {rest:?}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed, got {filter:?}");
+        };
+        assert!(
+            tf.properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "missing InZone Exile: {:?}",
+            tf.properties
+        );
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Warp
+                }
+            )),
+            "missing warp: {:?}",
+            tf.properties
+        );
     }
 
     #[test]
