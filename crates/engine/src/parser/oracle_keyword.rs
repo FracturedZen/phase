@@ -866,9 +866,24 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
         };
     }
 
-    // Fall back to mana cost parsing
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(lower.trim());
-    Some(WardCost::Mana(cost))
+    // CR 702.21a: Fall back to mana cost parsing ONLY when the entire text is a
+    // brace-delimited mana cost. `parse_mtgjson_mana_cost` silently ignores
+    // unrecognized segments and yields generic 0 for prose like "Collect
+    // evidence 4" / "Blight 2" / "Splorf a blorp." — that became a free Ward {0}
+    // and left Axebane Ferox / Auntie Ool marked supported (phase-rs/phase#9986;
+    // same class as #6640). Fail closed (`None`) so the keyword line stays
+    // Unimplemented until a dedicated WardCost arm models the cost.
+    //
+    // Uppercase before the nom mana combinator: `lower` is already lowercased,
+    // and color/hybrid tags are uppercase-only.
+    let trimmed = lower.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(&upper) {
+        if rest.trim().is_empty() {
+            return Some(WardCost::Mana(cost));
+        }
+    }
+    None
 }
 
 /// Split a string on ", " but only when the comma is outside mana braces {}.
@@ -3533,6 +3548,75 @@ mod tests {
             "Ward\u{2014}Discard a card if you control an artifact."
         )
         .is_none());
+    }
+
+    /// Issue #9986: unmodeled non-mana ward costs must fail closed — never a free
+    /// Ward {0}. Axebane Ferox ("Ward—Collect evidence 4.") and Auntie Ool
+    /// ("Ward—Blight 2.") were marked supported with Mana{generic:0}.
+    #[test]
+    fn ward_unmodeled_non_mana_costs_fail_closed() {
+        for unmodeled in [
+            "Collect evidence 4",
+            "Blight 2",
+            "Splorf a blorp.",
+            "You get two poison counters.",
+            "{2}, Collect evidence 4",
+            "{2} collect evidence 4",
+        ] {
+            assert_eq!(
+                parse_ward_cost(unmodeled),
+                None,
+                "unmodeled ward cost must fail closed, not Ward {{0}}: {unmodeled}"
+            );
+        }
+        // Reach: pure mana still parses (brace-delimited, all-consuming).
+        assert_eq!(
+            parse_ward_cost("{2}"),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
+        );
+        assert_eq!(
+            parse_ward_cost("{0}"),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::generic(0))))
+        );
+        assert_eq!(
+            parse_ward_cost("{2}{U}"),
+            Some(Keyword::Ward(WardCost::Mana(
+                crate::database::mtgjson::parse_mtgjson_mana_cost("{2}{U}")
+            )))
+        );
+    }
+
+    /// Issue #9986 end-to-end: Axebane Ferox / Auntie Ool class lines extract no
+    /// Ward keyword (honest fail-closed; no free Ward {0}).
+    #[test]
+    fn axebane_ferox_and_auntie_ool_ward_lines_fail_closed() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let creature = ["Creature".to_string()];
+        let mtgjson_keywords = ["Ward".to_string()];
+
+        for (name, oracle) in [
+            (
+                "Axebane Ferox",
+                "Ward—Collect evidence 4.\nDeathtouch, haste",
+            ),
+            (
+                "Auntie Ool, Cursewretch",
+                "Ward—Blight 2.",
+            ),
+        ] {
+            let parsed = parse_oracle_text(oracle, name, &mtgjson_keywords, &creature, &[]);
+            let wards: Vec<_> = parsed
+                .extracted_keywords
+                .iter()
+                .filter(|kw| matches!(kw, Keyword::Ward(_)))
+                .cloned()
+                .collect();
+            assert!(
+                wards.is_empty(),
+                "{name}: unmodeled ward must not extract Ward (got {wards:?}); free Ward {{0}} was the #9986 defect"
+            );
+        }
     }
 
     #[test]
