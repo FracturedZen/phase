@@ -40853,3 +40853,70 @@ fn untyped_event_window_declines_the_head() {
     assert_eq!(plain.mode, TriggerMode::ChangesZone);
     assert_eq!(plain.condition, None);
 }
+
+/// CR 608.2c + CR 109.4 (#9846): Vial Smasher the Fierce chooses an opponent
+/// at random, then deals damage "to that player or a planeswalker that player
+/// controls". The Choose seeds `relative_player_scope` with ChosenPlayer, so
+/// both arms of the Or must bind that choice — not TriggeringPlayer (player
+/// arm) or You via interim_you_anaphor_seed (planeswalker arm).
+#[test]
+fn vial_smasher_chosen_opponent_damage_or_planeswalker() {
+    use crate::types::ability::{ChoiceType, TargetSelectionMode};
+
+    let oracle = "Whenever you cast your first spell each turn, choose an opponent at random. \
+~ deals damage equal to that spell's mana value to that player or a planeswalker that player controls.";
+    let def = parse_trigger_line(oracle, "Vial Smasher the Fierce");
+    assert_eq!(def.mode, TriggerMode::SpellCast);
+    let execute = def.execute.as_ref().expect("Vial Smasher execute");
+    assert_eq!(
+        execute.effect.as_ref(),
+        &Effect::Choose {
+            choice_type: ChoiceType::opponent(),
+            persist: false,
+            selection: TargetSelectionMode::Random,
+        },
+        "head must be Choose(Opponent) at random"
+    );
+    let damage = execute
+        .sub_ability
+        .as_ref()
+        .expect("DealDamage must follow Choose as SequentialSibling");
+    let Effect::DealDamage { target, amount, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage under Choose, got {:?}", damage.effect);
+    };
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { .. }
+            }
+        ),
+        "damage amount must be that spell's mana value, got {amount:?}"
+    );
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected Or[chosen player, PW that player controls], got {target:?}");
+    };
+    assert_eq!(filters.len(), 2, "Or must have player + planeswalker arms");
+    // Player arm: Typed{controller: ChosenPlayer{index:0}} (not TriggeringPlayer).
+    match &filters[0] {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            type_filters,
+            ..
+        }) if type_filters.is_empty() => {}
+        other => panic!(
+            "player arm must be Typed{{controller: ChosenPlayer{{0}}}}, got {other:?}"
+        ),
+    }
+    // Planeswalker arm: Typed{Planeswalker, controller: ChosenPlayer{0}} (not You).
+    match &filters[1] {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            type_filters,
+            ..
+        }) if type_filters == &[TypeFilter::Planeswalker] => {}
+        other => panic!(
+            "PW arm must be Typed{{Planeswalker, controller: ChosenPlayer{{0}}}}, got {other:?}"
+        ),
+    }
+}

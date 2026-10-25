@@ -8587,6 +8587,20 @@ fn parse_event_context_ref_with_ctx<'a>(
     ctx: &ParseContext,
 ) -> Option<(TargetFilter, &'a str)> {
     let (target, rest) = parse_event_context_ref(text)?;
+    // CR 608.2c + CR 109.4: a resolution-time Choose(Player) earlier in the
+    // chain seeds `relative_player_scope` with ChosenPlayer { index }. "that
+    // player" must name that choice — the same Typed{controller: ChosenPlayer}
+    // filter `chosen_player_anaphor_filter` produces for subject/"them"
+    // anaphors — not the default TriggeringPlayer (Vial Smasher the Fierce,
+    // issue #9846). Checked before the catch-all so a ChosenPlayer scope is
+    // never left as TriggeringPlayer.
+    if matches!(target, TargetFilter::TriggeringPlayer) {
+        if let Some(filter) =
+            subject::chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref())
+        {
+            return Some((filter, rest));
+        }
+    }
     let target = match (&target, ctx.relative_player_scope.as_ref()) {
         (TargetFilter::TriggeringPlayer, Some(ControllerRef::ScopedPlayer)) => {
             TargetFilter::ScopedPlayer
@@ -14830,7 +14844,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
     let target_text = &rest.original[..before_temporal.len()];
     let (target, remainder) =
         ctx.with_player_antecedents(|scoped| parse_target_with_ctx(target_text, scoped));
-    let (target, remainder) = refine_damage_target_remainder(target, remainder);
+    let (target, remainder) = refine_damage_target_remainder(target, remainder, ctx);
     if !remainder.trim().is_empty() {
         ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
             text: remainder.trim().into(),
@@ -24186,7 +24200,7 @@ fn parse_bare_damage_continuation<'a>(
         // trailing "and each <player>" composite scope is lifted into
         // `player_filter`, mirroring the primary each-branch classification.
         let (target, rem) = parse_target_with_ctx(after_to, ctx);
-        let (target, rem) = refine_damage_target_remainder(target, rem);
+        let (target, rem) = refine_damage_target_remainder(target, rem, ctx);
         let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
         let trimmed_rem_lower = trimmed_rem.to_lowercase();
@@ -24225,7 +24239,7 @@ fn parse_bare_damage_continuation<'a>(
         ));
     }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
-    let (target, rem) = refine_damage_target_remainder(target, rem);
+    let (target, rem) = refine_damage_target_remainder(target, rem, ctx);
     let rem = trim_dangling_target_word(rem);
     Some((
         Effect::DealDamage {
@@ -35987,7 +36001,18 @@ fn validate_and_capitalize_labels(labels: &[&str]) -> Option<Vec<String>> {
 /// Handles common patterns:
 /// - "'s controller" → `ParentTargetController` (CR 608.2c)
 /// - "or planeswalker" / "or blocking creature" → union with additional type
-fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (TargetFilter, &str) {
+///
+/// CR 608.2c + CR 109.4: the "or <target>" arm parses through
+/// `parse_target_with_ctx` so anaphoric controller suffixes ("that player
+/// controls") bind via `relative_player_scope` — e.g. ChosenPlayer after
+/// "choose an opponent at random" (Vial Smasher the Fierce, issue #9846).
+/// A context-free `parse_target` would fall back to `You` via
+/// `interim_you_anaphor_seed`.
+fn refine_damage_target_remainder<'a>(
+    target: TargetFilter,
+    remainder: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
     let trimmed = remainder.trim();
     // CR 608.2c: "'s controller" — redirect damage to the controller of the target
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("'s controller").parse(trimmed) {
@@ -35995,10 +36020,10 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     }
     // "or <target>" — expand target to union: "creature or planeswalker",
     // "creature or blocking creature", "~ or enchanted creature", etc.
-    // Uses parse_target (not parse_type_phrase_folding) to handle special patterns
-    // like "enchanted creature" that aren't plain type phrases.
+    // Uses parse_target_with_ctx (not parse_type_phrase_folding) to handle special
+    // patterns like "enchanted creature" and to bind anaphoric controller suffixes.
     if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(trimmed) {
-        let (additional, type_rem) = parse_target(after_or);
+        let (additional, type_rem) = parse_target_with_ctx(after_or, ctx);
         if !matches!(additional, TargetFilter::Any) {
             return (
                 TargetFilter::Or {

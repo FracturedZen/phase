@@ -8802,7 +8802,7 @@ pub(super) fn parse_each_of_up_to_damage_target<'a>(
             // Only this arm trims: `parse_target_with_ctx` must see a phrase
             // starting at `target `/`other target `/`another target `.
             let (target, rest) = parse_target_with_ctx(remainder.trim_start(), ctx);
-            refine_damage_target_remainder(target, rest)
+            refine_damage_target_remainder(target, rest, ctx)
         }
     })
 }
@@ -10385,7 +10385,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                         ));
                     }
                     let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
-                    let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
+                    let (filter, remainder) = refine_damage_target_remainder(filter, remainder, ctx);
                     let (filter, remainder) = fold_each_object_legs(filter, remainder, ctx);
                     // CR 119.2 + CR 120.3: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
@@ -10445,7 +10445,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 } else if let Some((target, ecr_rem)) =
                     parse_event_context_ref_with_ctx(target_phrase, ctx)
                 {
-                    let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+                    let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem, ctx);
                     let mut qty = qty;
                     let target = rebind_dead_event_player_damage_recipient(target, &mut qty, ctx);
                     #[cfg(debug_assertions)]
@@ -10463,7 +10463,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     let (target, remainder) = ctx.with_player_antecedents(|scoped| {
                         parse_target_with_ctx(target_phrase, scoped)
                     });
-                    let (target, remainder) = refine_damage_target_remainder(target, remainder);
+                    let (target, remainder) = refine_damage_target_remainder(target, remainder, ctx);
                     if !remainder.trim().is_empty() {
                         ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
                             text: remainder.trim().into(),
@@ -10651,7 +10651,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
             ));
         }
         let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
-        let (target, rem) = refine_damage_target_remainder(target, rem);
+        let (target, rem) = refine_damage_target_remainder(target, rem, ctx);
         let (target, rem) = fold_each_object_legs(target, rem, ctx);
         // CR 119.2 + CR 120.3: Composite "each <object> and each <player>"
         // (Chandra's Ignition: "to each other creature and each opponent"). The
@@ -10728,7 +10728,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
 
     // CR 608.2k: Check for event-context references before standard target parsing.
     if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
-        let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
+        let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem, ctx);
         let mut amount = amount;
         let target = rebind_dead_event_player_damage_recipient(target, &mut amount, ctx);
         return Some((
@@ -10780,7 +10780,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ctx.pending_damage_multi_target = Some(spec);
     }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
-    let (target, rem) = refine_damage_target_remainder(target, rem);
+    let (target, rem) = refine_damage_target_remainder(target, rem, ctx);
     let rem = trim_dangling_target_word(rem);
     Some((
         Effect::DealDamage {
@@ -10865,10 +10865,10 @@ fn try_parse_each_source_power_damage<'a>(
     // general target parser.
     let (target, rem) =
         if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(recipient_text, ctx) {
-            refine_damage_target_remainder(target, ecr_rem)
+            refine_damage_target_remainder(target, ecr_rem, ctx)
         } else {
             let (target, rem) = parse_target_with_ctx(recipient_text, ctx);
-            refine_damage_target_remainder(target, rem)
+            refine_damage_target_remainder(target, rem, ctx)
         };
     let rem = trim_dangling_target_word(rem);
 
