@@ -63,6 +63,13 @@ pub(crate) struct ParsedEffectClause {
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,
+    /// CR 608.2d: subject-anchored actor for a printed "may" (e.g. "its controller
+    /// may sacrifice it" → `ParentTargetController`). Lowered into
+    /// `AbilityDefinition.optional_player`. `None` means the ability controller
+    /// announces ("you may …"). Distinct from the effect's patient slot — a
+    /// `Sacrifice { target: ParentTarget }` names the object, not the actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) optional_player: Option<TargetFilter>,
     /// CR 118.12: When set, the parsed effect carries an "unless [player] pays
     /// [cost]" modifier (e.g., "Counter target spell unless its controller
     /// pays {2}"). Lowered into `AbilityDefinition.unless_pay` so the
@@ -2252,6 +2259,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         unlowered_guard: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,

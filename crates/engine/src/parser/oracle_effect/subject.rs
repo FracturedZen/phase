@@ -116,6 +116,46 @@ fn subject_phrase_ast(application: Option<SubjectApplication>) -> SubjectPhraseA
     }
 }
 
+
+/// CR 608.2d (issue #8841): which player a subject-anchored "may" names, when
+/// the subject grammar already resolved that actor onto `SubjectPhraseAst::affected`.
+///
+/// Distinct from the effect's patient slot: "its controller may sacrifice it"
+/// has `affected = ParentTargetController` (the announcer) while the Sacrifice
+/// targets `ParentTarget` (the object). Assembly copies this onto
+/// `AbilityDefinition::optional_player` so `optional_prompt_player` does not
+/// fall back to the ability controller.
+///
+/// Admission mirrors `assembly::subject_anchored_optional_actor`'s
+/// `ThisResolution` window for the player anaphors the subject grammar emits
+/// for a "may" modal. Controller-held "you may …" (`Controller`) and object
+/// filters return `None` — the ability controller announces those.
+pub(crate) fn subject_optional_player(subject: &SubjectPhraseAst) -> Option<TargetFilter> {
+    subject_optional_player_parts(subject.is_optional, subject.affected.as_ref())
+}
+
+/// Same as [`subject_optional_player`], for call sites that have already moved
+/// other fields out of the subject phrase.
+pub(crate) fn subject_optional_player_parts(
+    is_optional: bool,
+    affected: Option<&TargetFilter>,
+) -> Option<TargetFilter> {
+    if !is_optional {
+        return None;
+    }
+    match affected? {
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::DeclaredPlayer { .. } => affected.cloned(),
+        _ => None,
+    }
+}
+
 /// CR 121.1 + CR 608.2c: the may-axis player-action verb for a `target opponent
 /// may <verb>` clause whose actor is the announced target opponent. Pinned to the
 /// corpus-proven `draw` (five cards: Tataru Taru, Kuroki, Thief of Talents,
@@ -884,6 +924,7 @@ fn build_conditional_protection_grant_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -952,6 +993,7 @@ fn build_additive_type_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -1034,6 +1076,7 @@ fn try_parse_compound_all_subjects_become_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -1784,6 +1827,7 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         sub_ability: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -1969,6 +2013,7 @@ fn try_parse_target_and_same_name_pump_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
@@ -2110,6 +2155,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -2160,6 +2206,7 @@ fn try_parse_subject_restriction_clause(
                 sub_ability: None,
                 condition: None,
                 optional: application.is_optional,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
@@ -2197,6 +2244,7 @@ fn try_parse_subject_restriction_clause(
                 sub_ability: None,
                 condition: None,
                 optional: application.is_optional,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
@@ -2263,6 +2311,7 @@ fn try_parse_subject_restriction_clause(
                     sub_ability: None,
                     condition: None,
                     optional: application.is_optional,
+                    optional_player: None,
                     unless_pay: None,
                     entry_onset: ContinuousEffectOnset::WhenFollowed,
                 });
@@ -2296,6 +2345,7 @@ fn try_parse_subject_restriction_clause(
                 sub_ability: None,
                 condition: None,
                 optional: application.is_optional,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
@@ -2364,6 +2414,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -2412,6 +2463,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -2448,6 +2500,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -2552,6 +2605,7 @@ fn try_parse_can_attack_with_defender(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -2596,6 +2650,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -2662,6 +2717,7 @@ fn try_parse_can_block_additional(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -4958,6 +5014,7 @@ fn try_split_pump_compound(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5161,6 +5218,7 @@ fn build_keyword_choice_clause(
         multi_target: application.multi_target.clone(),
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5365,6 +5423,7 @@ fn build_pt_choice_clause(
         multi_target: application.multi_target.clone(),
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5412,6 +5471,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -5474,6 +5534,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -5585,6 +5646,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -5629,6 +5691,7 @@ fn build_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5972,6 +6035,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6004,6 +6068,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6062,6 +6127,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6205,6 +6271,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6246,6 +6313,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6284,6 +6352,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6353,6 +6422,7 @@ fn build_become_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6495,6 +6565,7 @@ fn try_parse_become_and_attack_if_able(
         multi_target: application.multi_target.clone(),
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6593,6 +6664,7 @@ fn try_parse_set_life_total(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6859,6 +6931,7 @@ fn try_parse_become_choice(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
@@ -6946,6 +7019,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         sub_ability: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
@@ -7008,6 +7082,7 @@ fn build_restriction_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -7217,6 +7292,7 @@ fn build_restriction_clause(
                 multi_target: None,
                 condition: None,
                 optional: false,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
@@ -7329,6 +7405,7 @@ fn build_restriction_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -7873,6 +7950,7 @@ fn try_parse_copula_goaded_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })

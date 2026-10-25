@@ -3323,8 +3323,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     None => TargetFilter::Opponent,
                 });
             } else if def.optional_for.is_none() && def.optional_player.is_none() {
-                def.optional_player =
-                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
+                // CR 608.2d (issue #8841): prefer the actor the subject grammar
+                // already named on the clause (`ParsedEffectClause::optional_player`)
+                // — "its controller may sacrifice it" keeps `Sacrifice{ParentTarget}`
+                // as the patient, so `Effect::target_filter()` cannot recover the
+                // announcer. Fall back to the effect-slot walk for SearchLibrary /
+                // Draw / … shapes whose player slot already carries the anaphor.
+                def.optional_player = clause_ir.parsed.optional_player.clone().or_else(|| {
+                    subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution)
+                });
             }
         }
         if matches!(&clause_ir.parsed.effect, Effect::SearchOutsideGame { .. }) {

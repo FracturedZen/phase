@@ -9855,6 +9855,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -9942,6 +9943,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -10018,6 +10020,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -10130,6 +10133,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })

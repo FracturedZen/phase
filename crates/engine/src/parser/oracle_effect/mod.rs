@@ -2547,6 +2547,7 @@ fn try_parse_whenever_this_turn_from(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -2690,6 +2691,7 @@ fn build_reflexive_coin_flip_trigger(is_win: bool, inner: AbilityDefinition) -> 
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
@@ -2728,6 +2730,7 @@ fn build_when_next_delayed_trigger(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
@@ -3014,6 +3017,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -3118,6 +3122,7 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -3207,6 +3212,7 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -3358,6 +3364,7 @@ fn try_parse_at_next_phase_delayed_trigger(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -4237,6 +4244,7 @@ fn try_parse_conditional_damage_prevention_with_followup(text: &str) -> Option<P
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5181,6 +5189,7 @@ fn try_parse_inline_delayed_trigger(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5517,6 +5526,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5594,6 +5604,7 @@ fn try_parse_cant_enter_battlefield_from_restriction(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5663,6 +5674,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5728,6 +5740,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         sub_ability: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5778,6 +5791,7 @@ fn try_parse_temporary_attack_only_neighbor(tp: TextPair<'_>) -> Option<ParsedEf
         sub_ability: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -5849,6 +5863,7 @@ fn try_parse_temporary_cant_become_tapped(tp: TextPair<'_>) -> Option<ParsedEffe
         sub_ability: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6061,6 +6076,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
@@ -6164,6 +6180,7 @@ fn try_parse_passive_cant_be_played_land_effect(tp: TextPair<'_>) -> Option<Pars
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6252,6 +6269,7 @@ fn try_parse_passive_cant_be_cast_effect(tp: TextPair<'_>) -> Option<ParsedEffec
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6373,6 +6391,7 @@ fn try_parse_cant_play_from_zone(tp: TextPair<'_>) -> Option<ParsedEffectClause>
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6454,6 +6473,7 @@ fn try_parse_cant_activate_non_mana_abilities_effect(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6507,6 +6527,7 @@ fn try_parse_during_that_turn_powerup_prohibition(tp: TextPair<'_>) -> Option<Pa
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6574,6 +6595,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -6657,6 +6679,7 @@ fn try_parse_that_player_cant_attack_prohibition(tp: TextPair<'_>) -> Option<Par
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6813,6 +6836,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -6912,6 +6936,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -8561,6 +8586,7 @@ fn ability_definition_from_clause(
         optional_targeting,
         condition,
         optional,
+        optional_player,
         unless_pay,
         // CR 608.2c + CR 614.1a: dropped on purpose — see the doc comment above. Bound as `_`
         // rather than omitted via `..` so a new field cannot hide behind the rest pattern.
@@ -8572,6 +8598,8 @@ fn ability_definition_from_clause(
     def.duration = duration;
     def.condition = condition;
     def.optional = optional;
+    // CR 608.2d (issue #8841): carry the subject-anchored announcer with the may.
+    def.optional_player = optional_player;
     def.multi_target = multi_target;
     // CR 115.6: thread the Attach host frame's declared zero-target authority —
     // dropping it here would make a modal/sequenced Attach head mandatory.
@@ -8956,6 +8984,7 @@ fn try_parse_for_each_counter_kind_choice(tp: TextPair<'_>) -> Option<ParsedEffe
         // CR 608.2: "you may" makes the per-iteration choice optional. When this
         // body was peeled, `peel_clause` will OR its own optional flag in too.
         optional: saw_you_may,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -9024,6 +9053,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -9111,6 +9141,7 @@ fn try_parse_for_each_category_exile(tp: TextPair<'_>) -> Option<ParsedEffectCla
         // CR 608.2: "you may exile" — the iteration itself is optional per
         // member; `up_to` carries the per-member optionality.
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -9197,6 +9228,7 @@ fn try_parse_for_each_category_put_counter(tp: TextPair<'_>) -> Option<ParsedEff
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -11196,6 +11228,7 @@ fn try_parse_player_draws_and_gains_control(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -14860,6 +14893,7 @@ fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<P
         duration: Some(Duration::UntilEndOfTurn),
         sub_ability: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -14960,6 +14994,7 @@ impl ParsedRetainedTypeClause {
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             // CR 205.1b: "still a [type]" retains a prior type as part of the governing
             // type-changing effect ("becomes …"); it is not a CR 611.2e "is" statement of
@@ -19581,6 +19616,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             multi_target: None,
             condition: None,
             optional: false,
+            optional_player: None,
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         });
@@ -19631,6 +19667,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 multi_target: None,
                 condition: None,
                 optional: false,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             });
@@ -19907,6 +19944,7 @@ fn parsed_for_each_quantity_effect(
                 multi_target: None,
                 condition: None,
                 optional: false,
+                optional_player: None,
                 unless_pay: None,
                 entry_onset: ContinuousEffectOnset::WhenFollowed,
             };
@@ -19923,6 +19961,7 @@ fn parsed_for_each_quantity_effect(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
@@ -20069,6 +20108,7 @@ fn try_parse_random_card_perpetual_gain_quoted_ability(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -21046,6 +21086,7 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -22624,6 +22665,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     multi_target: up_to_spec,
                     condition: None,
                     optional: false,
+                    optional_player: None,
                     unless_pay: None,
                     entry_onset: ContinuousEffectOnset::WhenFollowed,
                 };
@@ -22872,6 +22914,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         multi_target: primary_multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -22912,6 +22955,7 @@ fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -23286,6 +23330,7 @@ fn try_parse_compound_player_object_damage(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -23419,6 +23464,7 @@ fn try_parse_compound_object_player_damage(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -23556,6 +23602,7 @@ fn try_parse_radiance_color_fanout_damage_inner(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -23753,6 +23800,7 @@ fn try_parse_multi_target_damage_chain_inner(
         multi_target: primary_damage_multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -23878,6 +23926,7 @@ fn try_parse_multi_target_counter_chain(
         multi_target: primary_multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -24329,6 +24378,7 @@ fn try_split_copy_cast_compound(text: &str, ctx: &mut ParseContext) -> Option<Pa
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -24481,6 +24531,7 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
         multi_target: primary_damage_multi_target,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -24664,6 +24715,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -25265,6 +25317,7 @@ fn try_parse_compound_subject_each(
         multi_target: None,
         condition: half_a.condition,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
@@ -25292,6 +25345,7 @@ fn try_parse_compound_subject_each(
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -28312,6 +28366,7 @@ fn lower_subject_predicate_ast_body(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            optional_player: subject::subject_optional_player(&subject),
             unless_pay: None,
             // CR 611.2e: the onset the predicate's verb form stated.
             entry_onset: onset,
@@ -28331,6 +28386,7 @@ fn lower_subject_predicate_ast_body(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            optional_player: subject::subject_optional_player(&subject),
             unless_pay: None,
             // CR 611.2e: the onset the predicate's verb form stated.
             entry_onset: onset,
@@ -28349,6 +28405,7 @@ fn lower_subject_predicate_ast_body(
             multi_target,
             condition: None,
             optional: subject.is_optional,
+            optional_player: subject::subject_optional_player(&subject),
             unless_pay: None,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
         },
@@ -28601,6 +28658,9 @@ fn lower_subject_predicate_ast_body(
                             // ("up to two target players") opens both slots.
                             clause.multi_target = multi_target.clone();
                             clause.optional = subject.is_optional;
+                            if clause.optional_player.is_none() {
+                                clause.optional_player = subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref());
+                            }
                             return clause;
                         }
                     }
@@ -28666,6 +28726,7 @@ fn lower_subject_predicate_ast_body(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        optional_player: subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref()),
                         unless_pay: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
@@ -28897,6 +28958,7 @@ fn lower_subject_predicate_ast_body(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        optional_player: subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref()),
                         unless_pay: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
@@ -28924,6 +28986,7 @@ fn lower_subject_predicate_ast_body(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        optional_player: subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref()),
                         unless_pay: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
@@ -28945,6 +29008,7 @@ fn lower_subject_predicate_ast_body(
                         multi_target: subject.multi_target,
                         condition: None,
                         optional: subject.is_optional,
+                        optional_player: subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref()),
                         unless_pay: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                     };
@@ -29047,9 +29111,15 @@ fn lower_subject_predicate_ast_body(
             }
             // CR 608.2c + CR 608.2d: Propagate the subject phrase's "may" modal
             // so the lowered ability is marked optional (e.g., "its controller
-            // may search their library").
+            // may search their library"). Issue #8841: also stamp the named
+            // announcer — Sacrifice/Destroy/… keep the object in the effect's
+            // patient slot (`ParentTarget`), so assembly cannot recover the
+            // actor from `Effect::target_filter()` alone.
             if subject.is_optional {
                 clause.optional = true;
+                if clause.optional_player.is_none() {
+                    clause.optional_player = subject::subject_optional_player_parts(subject.is_optional, subject.affected.as_ref());
+                }
             }
             clause
         }
@@ -30339,6 +30409,7 @@ fn wrap_target_subject_damage(
         multi_target: subject.multi_target.clone(),
         condition: None,
         optional: subject.is_optional,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
@@ -46215,6 +46286,7 @@ fn parse_effect_chain_ir_body(
                         multi_target: animate_def.multi_target.clone(),
                         condition: animate_def.condition.clone(),
                         optional: animate_def.optional,
+                        optional_player: None,
                         unless_pay: animate_def.unless_pay.clone(),
                         // CR 611.2e: "it's a/an [type]" is an "is" statement, so it
                         // applies simultaneously with the entry.

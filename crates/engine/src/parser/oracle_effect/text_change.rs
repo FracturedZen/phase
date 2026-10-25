@@ -97,6 +97,7 @@ pub(super) fn try_parse_text_change_clause(tp: TextPair<'_>) -> Option<ParsedEff
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })

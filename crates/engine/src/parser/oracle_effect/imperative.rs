@@ -10413,6 +10413,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         multi_target: None,
         condition: None,
         optional: false,
+        optional_player: None,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     }

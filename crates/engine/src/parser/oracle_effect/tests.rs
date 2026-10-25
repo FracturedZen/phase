@@ -71792,6 +71792,58 @@ fn subject_anchored_may_names_the_announcing_player_across_the_anaphor_family() 
     }
 }
 
+/// Issue #8841 — Star Athlete: "Its controller may sacrifice it" must stamp
+/// `optional_player = ParentTargetController` while the Sacrifice patient stays
+/// `ParentTarget`. Unlike Path to Exile's SearchLibrary (whose player slot
+/// `Effect::target_filter()` already surfaces the announcer), Sacrifice's
+/// target is the object — assembly cannot recover the actor from the effect
+/// alone and previously left `optional_player: None`, routing the may to the
+/// ability controller (Star Athlete's AI) instead of the permanent's controller.
+/// CR 608.2d + CR 701.21a.
+#[test]
+fn star_athlete_sacrifice_may_stamps_parent_target_controller_as_optional_player() {
+    let parsed = parse_oracle_text(
+        "Menace\nWhenever this creature attacks, choose up to one target nonland permanent. Its controller may sacrifice it. If they don't, this creature deals 5 damage to that player.",
+        "Star Athlete",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Warrior".to_string()],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Star Athlete has an attacks trigger");
+    // Walk the sub_ability spine for the Sacrifice node.
+    let mut node = Some(execute);
+    let mut sacrifice = None;
+    while let Some(n) = node {
+        if matches!(&*n.effect, Effect::Sacrifice { .. }) {
+            sacrifice = Some(n);
+            break;
+        }
+        node = n.sub_ability.as_deref();
+    }
+    let sacrifice = sacrifice.expect("chain must contain Sacrifice");
+    assert!(
+        sacrifice.optional,
+        "reach-guard: 'its controller may' marks the sacrifice optional"
+    );
+    match &*sacrifice.effect {
+        Effect::Sacrifice { target, .. } => assert_eq!(
+            *target,
+            TargetFilter::ParentTarget,
+            "the sacrificed object is the chosen permanent, not its controller"
+        ),
+        other => panic!("expected Sacrifice, got {other:?}"),
+    }
+    assert_eq!(
+        sacrifice.optional_player,
+        Some(TargetFilter::ParentTargetController),
+        "CR 608.2d: the chosen permanent's controller announces the may,          not Star Athlete's controller"
+    );
+}
+
 /// CR 608.2c + CR 608.2d hostile fixture: the same anaphor (`DefendingPlayer`)
 /// in the same `RevealHand` player slot under `optional: true`, but opposite
 /// provenance and therefore opposite routing.
