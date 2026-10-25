@@ -27725,11 +27725,21 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
         // or whole-spell casting condition (Addendum / kicker) decides whether its
         // instruction happens, not what that instruction declared, so its declared
         // target stays the nearest antecedent of a later "that creature" (Magitek
-        // Scythe; Neyith of the Dire Hunt). Every other condition still blocks.
+        // Scythe; Neyith of the Dire Hunt). Every other condition still blocks —
+        // except a type-membership gate on an anaphoric ParentTarget carrier
+        // (Alacrian Armory #10285: "… becomes saddled if it's a Mount"), which
+        // decides whether THAT instruction applies, not which object a later
+        // sibling anaphor names.
         if prev.condition.as_ref().is_some_and(|condition| {
             !condition.is_affirmative_reflexive_gate() && !condition.is_casting_condition()
         }) {
-            return None;
+            let is_anaphoric_parent_carrier = matches!(
+                prev.parsed.effect.target_filter(),
+                Some(TargetFilter::ParentTarget)
+            );
+            if !is_anaphoric_parent_carrier {
+                return None;
+            }
         }
         match prev.parsed.effect.target_filter() {
             Some(TargetFilter::ParentTarget) => continue,
@@ -27743,6 +27753,16 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
             }
             Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => return Some((index, t)),
             Some(TargetFilter::Typed(_)) => return None,
+            // CR 608.2c + CR 115.1 (#10285): a disjunctive declared target
+            // ("choose … Mount or Vehicle") is still an announced object target.
+            Some(t @ (TargetFilter::Or { .. } | TargetFilter::And { .. }))
+                if !t.is_player_scope()
+                    && triggers::extract_target_filter_from_effect(&prev.parsed.effect)
+                        .is_some()
+                    && subject::declared_object_target_is_object(t) =>
+            {
+                return Some((index, t));
+            }
             // CR 608.2c: an earlier anaphor already bound to the declared target
             // ("That land becomes a 0/0 Elemental creature") names the same object,
             // so the walk passes it on to that target.
@@ -27765,6 +27785,12 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
                 })
                 .filter_map(|def| match def.effect.target_filter() {
                     Some(t @ TargetFilter::Typed(_)) if !t.is_player_scope() => Some((index, t)),
+                    Some(t @ (TargetFilter::Or { .. } | TargetFilter::And { .. }))
+                        if !t.is_player_scope()
+                            && subject::declared_object_target_is_object(t) =>
+                    {
+                        Some((index, t))
+                    }
                     _ => None,
                 })
                 .last();
@@ -45833,7 +45859,17 @@ fn parse_effect_chain_ir_body(
             // stated by an earlier chunk cannot promote a later capped chunk that
             // states none — the fail-open direction, pinned by
             // `a_stated_duration_does_not_leak_into_the_next_clause`.
-            stated_clause_duration: chunk.leading_duration.clone(),
+            // CR 611.2a + CR 608.2c (#10285): when the sequence splitter (not
+            // expand) peeled a coordinated conjunct off a duration-headed
+            // sentence ("Until end of turn, A and becomes B"), the later chunk
+            // has no `leading_duration` of its own — seed from
+            // `sentence_leading_duration` so `build_become_clause` still sees
+            // the printed window.
+            stated_clause_duration: chunk.leading_duration.clone().or_else(|| {
+                sentence_leading_duration
+                    .get(chunk_idx)
+                    .and_then(|d| d.clone())
+            }),
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single

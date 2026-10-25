@@ -21,7 +21,7 @@ use crate::types::ability::{
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
     EachDamageRecipient, Effect, EffectScope, FilterProp, MultiTargetSpec, ObjectScope,
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, StaticCondition,
-    StaticDefinition, TargetFilter, TypedFilter,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state::DayNight;
 use crate::types::keywords::Keyword;
@@ -1037,6 +1037,95 @@ fn try_parse_compound_all_subjects_become_clause(
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
+}
+
+
+/// CR 608.2c + CR 110.1: does a typed anaphor ("that permanent", "that Mount")
+/// name the chain's declared object target? Ordinary Typed containment, plus
+/// Permanent-over-Or/And when every arm is a battlefield permanent (Alacrian
+/// Armory #10285: "choose … Mount or Vehicle" → "that permanent").
+fn anaphor_names_declared_object_target(declared: &TargetFilter, anaphor: &TargetFilter) -> bool {
+    let TargetFilter::Typed(anaphor_tf) = anaphor else {
+        return false;
+    };
+    if anaphor_tf.type_filters.is_empty() {
+        return false;
+    }
+    match declared {
+        TargetFilter::Typed(antecedent) => anaphor_tf
+            .type_filters
+            .iter()
+            .all(|t| antecedent.type_filters.contains(t)),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => anaphor_tf
+            .type_filters
+            .iter()
+            .all(|t| match t {
+                TypeFilter::Permanent => {
+                    !filters.is_empty()
+                        && filters
+                            .iter()
+                            .all(declared_arm_is_battlefield_permanent)
+                }
+                other => filters.iter().any(|arm| match arm {
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(other),
+                    _ => false,
+                }),
+            }),
+        _ => false,
+    }
+}
+
+/// CR 110.1 + CR 205.2a: every object matching this filter arm is a battlefield
+/// permanent (Mount, Vehicle, Creature, …) — never a spell-only type.
+fn declared_arm_is_battlefield_permanent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            if tf.type_filters.is_empty() {
+                return true;
+            }
+            let has_permanent_capable = tf.type_filters.iter().any(|t| {
+                matches!(
+                    t,
+                    TypeFilter::Permanent
+                        | TypeFilter::Creature
+                        | TypeFilter::Artifact
+                        | TypeFilter::Enchantment
+                        | TypeFilter::Land
+                        | TypeFilter::Planeswalker
+                        | TypeFilter::Battle
+                        | TypeFilter::Kindred
+                        | TypeFilter::Subtype(_)
+                        | TypeFilter::Any
+                )
+            });
+            let has_non_permanent = tf.type_filters.iter().any(|t| {
+                matches!(
+                    t,
+                    TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card
+                )
+            });
+            has_permanent_capable && !has_non_permanent
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty() && filters.iter().all(declared_arm_is_battlefield_permanent)
+        }
+        _ => false,
+    }
+}
+
+/// CR 115.1 + CR 608.2c: a declared object target the slot collector announced
+/// — Typed, or a non-player Or/And of Typed arms (Mount or Vehicle).
+pub(super) fn declared_object_target_is_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(_) => !filter.is_player_scope(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty()
+                && filters.iter().all(|f| {
+                    matches!(f, TargetFilter::Typed(_)) && !f.is_player_scope()
+                })
+        }
+        _ => false,
+    }
 }
 
 fn try_parse_subject_become_clause(
@@ -3908,7 +3997,10 @@ fn parse_subject_application_for(
         // condition, and a nearer object this chain created is excluded below,
         // so those antecedents keep the stamps below.
         if consumer == AnaphorConsumer::AffectedObject
-            && matches!(ctx.chain_declared_object_target, Some(TargetFilter::Typed(_)))
+            && ctx
+                .chain_declared_object_target
+                .as_ref()
+                .is_some_and(declared_object_target_is_object)
             // CR 608.2c + CR 111.1 + CR 707.2: an object this chain created (a token, a
             // copy of the declared target included) is the nearer antecedent, so "it"
             // keeps the created-object stamp.
@@ -4034,15 +4126,12 @@ fn parse_subject_application_for(
             // optional target was declined, CR 115.6). Any other antecedent or consumer
             // keeps the trigger-source stamp (Spiked Ripsaw's attacker; "that creature
             // deals damage", phase 5).
-            let names_declared_target = matches!(
-                (ctx.chain_declared_object_target.as_ref(), &filter),
-                (Some(TargetFilter::Typed(antecedent)), TargetFilter::Typed(anaphor))
-                    if !anaphor.type_filters.is_empty()
-                        && anaphor
-                            .type_filters
-                            .iter()
-                            .all(|t| antecedent.type_filters.contains(t))
-            );
+            // CR 608.2c + CR 110.1: Typed containment, or Permanent naming an
+            // Or/And of battlefield permanents (Alacrian Armory #10285).
+            let names_declared_target = ctx
+                .chain_declared_object_target
+                .as_ref()
+                .is_some_and(|declared| anaphor_names_declared_object_target(declared, &filter));
             let binds_declared_target =
                 consumer == AnaphorConsumer::AffectedObject && names_declared_target;
             if ctx.subject.is_some() && !binds_declared_target {
@@ -5920,7 +6009,15 @@ fn build_become_clause(
     // of the game, so an undurated "becomes" is permanent. (611.2b governs "for
     // as long as …" windows, which is a different clause of the same rule and
     // is what the attachment rewrite in `oracle_ir::ast` keys off.)
-    let duration = stated_duration.clone().or(Some(Duration::Permanent));
+    // CR 611.2a + CR 608.2c: a leading "Until end of turn," that rode with an
+    // earlier coordinated conjunct reaches here through
+    // `ParseContext::stated_clause_duration` (Alacrian Armory #10285 — the
+    // subject-carried "becomes an artifact creature" half). Prefer a printed /
+    // peeled duration over Permanent.
+    let duration = stated_duration
+        .clone()
+        .or_else(|| ctx.stated_clause_duration.clone())
+        .or(Some(Duration::Permanent));
 
     // CR 119.5: "life total becomes N" — set life total to a specific number.
     // Must intercept before parse_animation_spec which tokenizes each word as a subtype.
@@ -6122,10 +6219,17 @@ fn build_become_clause(
         .parse(become_lower.as_str())
         .is_ok()
     {
-        let target = application
-            .target
-            .clone()
-            .unwrap_or_else(|| application.affected.clone());
+        // CR 702.171b + CR 608.2c + CR 115.6: mirror `prepared_designation_subject`.
+        // A declared typed target keeps its filter as the selection slot; an
+        // anaphoric "that permanent" / empty-subject carry (inherits_parent, no
+        // target of its own) binds ParentTarget so optional-target decline and
+        // later sibling anaphors see the same chosen object (Alacrian Armory
+        // #10285). Other context refs keep `affected`.
+        let target = match application.target.as_ref() {
+            Some(t) => t.clone(),
+            None if application.inherits_parent => TargetFilter::ParentTarget,
+            None => application.affected.clone(),
+        };
         return Some(super::parsed_clause(Effect::BecomeSaddled { target }));
     }
 
