@@ -344,6 +344,59 @@ fn has_choice_partition_destinations(lower: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2d + issue #7460: whether `lower` is a choose-from-revealed/searched
+/// pool continuation — either the classic "… of them/those" form, or the bare
+/// Intuition-class "Target/An opponent chooses N." (no "of them/those").
+///
+/// Modal "Target opponent chooses one —" headers are declined: the bare-count
+/// `all_consuming` rejects the trailing dash, and em-dash forms are refused
+/// up front so they stay with `oracle_modal`.
+fn is_choose_from_pool_continuation(lower: &str) -> bool {
+    // Em-dash modal header ("Target opponent chooses one —") — not a pool pick.
+    if nom_primitives::scan_contains(lower, " —") {
+        return false;
+    }
+
+    let has_of_them = nom_primitives::scan_contains(lower, "of them")
+        || nom_primitives::scan_contains(lower, "of those");
+    let any_chooser = alt((
+        tag::<_, _, OracleError<'_>>("choose "),
+        tag("you choose "),
+        tag("an opponent chooses "),
+        tag("target opponent chooses "),
+    ))
+    .parse(lower)
+    .is_ok();
+
+    if has_of_them {
+        return any_chooser;
+    }
+    // Bare "Target/An opponent chooses N." — controller "choose one." without
+    // of-them is the modal/ChooseOneOf shape and must not claim this arm.
+    is_bare_opponent_choose_count_clause(lower)
+}
+
+/// True when `lower` is exactly "<an|target opponent> chooses <N>[.]" with no
+/// further predicate (no "of them", no card filter, no modal dash).
+fn is_bare_opponent_choose_count_clause(lower: &str) -> bool {
+    let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("an opponent chooses "),
+        tag("target opponent chooses "),
+    ))
+    .parse(lower.trim())
+    else {
+        return false;
+    };
+    all_consuming((
+        nom_primitives::parse_number,
+        multispace0,
+        opt(tag(".")),
+        multispace0,
+    ))
+    .parse(rest)
+    .is_ok()
+}
+
 /// Parse count from "choose one/two/three/N of them/those" text using nom combinator.
 /// Handles all chooser prefix forms: "choose ", "you choose ", "an opponent chooses ",
 /// "target opponent chooses ".
@@ -446,11 +499,16 @@ fn parse_shuffle_choice_partition_destinations(lower: &str) -> Option<(Zone, Zon
 }
 
 fn parse_chosen_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    // CR 608.2c: "that card" is the singular demonstrative for the card just
+    // chosen (Intuition: "Target opponent chooses one. Put that card into
+    // your hand and put the rest into your graveyard."). Listed after the
+    // explicit "the chosen card(s)" forms so those stay preferred.
     value(
         (),
         alt((
             tag::<_, _, OracleError<'_>>("the chosen cards"),
             tag("the chosen card"),
+            tag("that card"),
         )),
     )
     .parse(input)
@@ -9354,22 +9412,19 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             }),
         // CR 608.2d: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
         // of them/those" after ChangeZone, ExileTop, RevealTop, RevealHand, or a search
-        // whose found cards wait in the library → ChooseFromZone building block
+        // whose found cards wait in the library → ChooseFromZone building block.
+        //
+        // Issue #7460 (Intuition class): bare "Target opponent chooses one." /
+        // "An opponent chooses one." — no "of them/those" — is the same building
+        // block once a search/reveal has already produced the candidate pool.
+        // Modal "Target opponent chooses one —" (em dash / ASCII hyphen bullet
+        // header) is owned by oracle_modal and deliberately declined here.
         Effect::ChangeZone { .. }
         | Effect::ExileTop { .. }
         | Effect::RevealTop { .. }
         | Effect::RevealHand { .. }
         | Effect::SearchLibrary { .. }
-            if (nom_primitives::scan_contains(&lower, "of them")
-                || nom_primitives::scan_contains(&lower, "of those"))
-                && alt((
-                    tag::<_, _, OracleError<'_>>("choose "),
-                    tag("you choose "),
-                    tag("an opponent chooses "),
-                    tag("target opponent chooses "),
-                ))
-                .parse(lower.as_str())
-                .is_ok() =>
+            if is_choose_from_pool_continuation(&lower) =>
         {
             let count = parse_choose_count_from_text(&lower);
             let chooser = if alt((

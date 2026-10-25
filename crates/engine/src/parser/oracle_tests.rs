@@ -16326,6 +16326,117 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
     ));
 }
 
+// ── Issue #7460: bare "Target opponent chooses one." (Intuition class) ──
+
+#[test]
+fn bare_target_opponent_chooses_one_after_search_is_choose_from_zone() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+
+    // Intuition (exact Oracle): no "of them/those" on the choose clause.
+    let chain = parse_effect_chain(
+        "Search your library for three cards and reveal them. Target opponent chooses one. Put that card into your hand and the rest into your graveyard. Then shuffle.",
+        AbilityKind::Spell,
+    );
+    let choose = chain
+        .sub_ability
+        .as_ref()
+        .expect("search must chain to ChooseFromZone");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 1,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "bare Target opponent chooses one. must be ChooseFromZone{{Opponent,1}}, got {:?}",
+        choose.effect
+    );
+    let chosen_move = choose
+        .sub_ability
+        .as_ref()
+        .expect("choice must route that card first");
+    assert!(
+        matches!(
+            &*chosen_move.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "Put that card into your hand → Hand, got {:?}",
+        chosen_move.effect
+    );
+    let rest_move = chosen_move
+        .sub_ability
+        .as_ref()
+        .expect("chosen move must route the rest");
+    let rest_ok = matches!(
+        &*rest_move.effect,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Graveyard,
+            ..
+        }
+    );
+    assert!(
+        rest_ok,
+        "put the rest into your graveyard → Graveyard, got {:?}",
+        rest_move.effect
+    );
+}
+
+#[test]
+fn bare_an_opponent_chooses_one_after_search_is_choose_from_zone() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+
+    let chain = parse_effect_chain(
+        "Search your library for three cards and reveal them. An opponent chooses one. Put that card into your hand and the rest into your graveyard.",
+        AbilityKind::Spell,
+    );
+    let choose = chain
+        .sub_ability
+        .as_ref()
+        .expect("search must chain to ChooseFromZone");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 1,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "bare An opponent chooses one. must be ChooseFromZone{{Opponent}}, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
+fn modal_target_opponent_chooses_one_emdash_is_not_pool_choose() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    // Discrimination: modal header must NOT become ChooseFromZone via the
+    // pool-continuation arm (oracle_modal owns "chooses one —").
+    let chain = parse_effect_chain(
+        "Search your library for a card and reveal it. Target opponent chooses one —",
+        AbilityKind::Spell,
+    );
+    let mut node = Some(&chain);
+    while let Some(d) = node {
+        assert!(
+            !matches!(&*d.effect, Effect::ChooseFromZone { .. }),
+            "modal em-dash header must not lower to ChooseFromZone, got {:?}",
+            d.effect
+        );
+        node = d.sub_ability.as_deref();
+    }
+}
+
 #[test]
 fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
     use crate::parser::oracle_effect::parse_effect_chain;
