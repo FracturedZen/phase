@@ -599,6 +599,10 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+    /// CR 702.16i + CR 611.3a: colors among permanents the granting effect's
+    /// controller controls (Empty-Shrine Kannushi, Pledge of Loyalty). Re-read as
+    /// permanents and their colors change.
+    AmongPermanentsYouControl,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -3341,26 +3345,33 @@ pub(crate) fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
-/// identity" (and its "that is not in" / "not in" spellings) into a
-/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
-/// quality splitter can preserve sentence punctuation.
+/// CR 702.16i + CR 903.4 + CR 611.3a: Parse a "protection from each color …"
+/// color-set quality into a `ProtectionColorSet`. One trailing period is
+/// tolerated because the keyword quality splitter can preserve sentence
+/// punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;
 
     all_consuming(terminated(
-        value(
-            ProtectionColorSet::OutsideCommanderColorIdentity,
-            (
-                tag::<_, _, E<'_>>("each color "),
-                alt((
-                    tag("that's not in "),
-                    tag("that is not in "),
-                    tag("not in "),
-                )),
-                crate::parser::oracle_nom::primitives::parse_your_commanders_color_identity,
+        alt((
+            value(
+                ProtectionColorSet::OutsideCommanderColorIdentity,
+                (
+                    tag::<_, _, E<'_>>("each color "),
+                    alt((
+                        tag("that's not in "),
+                        tag("that is not in "),
+                        tag("not in "),
+                    )),
+                    crate::parser::oracle_nom::primitives::parse_your_commanders_color_identity,
+                ),
             ),
-        ),
+            // Empty-Shrine Kannushi / Pledge of Loyalty (#10159).
+            value(
+                ProtectionColorSet::AmongPermanentsYouControl,
+                tag::<_, _, E<'_>>("each color among permanents you control"),
+            ),
+        )),
         opt(tag(".")),
     ))
     .parse(s)
@@ -4862,6 +4873,31 @@ mod tests {
         );
     }
 
+    /// CR 702.16i + CR 611.3a: "each color among permanents you control"
+    /// (Empty-Shrine Kannushi, Pledge of Loyalty) is a typed color set.
+    #[test]
+    fn parse_protection_target_each_color_among_permanents_you_control() {
+        let expected =
+            ProtectionTarget::EachColor(ProtectionColorSet::AmongPermanentsYouControl);
+        for phrase in [
+            "each color among permanents you control",
+            "Each color among permanents you control",
+            "each color among permanents you control.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected, "{phrase}");
+        }
+
+        let kw = Keyword::from_str("Protection:each color among permanents you control").unwrap();
+        assert_eq!(kw, Keyword::Protection(expected));
+        assert_eq!(
+            serde_json::to_value(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl
+            ))
+            .unwrap(),
+            serde_json::json!({"EachColor": "AmongPermanentsYouControl"})
+        );
+    }
+
     /// Hostile siblings of the color-set phrase stay untyped card-type strings.
     #[test]
     fn parse_protection_target_each_color_siblings_stay_card_type() {
@@ -4869,6 +4905,9 @@ mod tests {
             "each color that's in your commander's color identity",
             "each color that's not in your commander's color identity and from artifacts",
             "each color with the most votes",
+            // Affirmative "among" without the permanents-you-control population
+            // must not steal the typed set arm.
+            "each color among cards in your graveyard",
         ] {
             assert_eq!(
                 parse_protection_target(phrase),

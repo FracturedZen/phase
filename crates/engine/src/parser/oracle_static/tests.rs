@@ -41230,3 +41230,44 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
         ]
     );
 }
+
+/// CR 702.16i + CR 611.3a (#10159): Empty-Shrine Kannushi — "This creature has
+/// protection from each color among permanents you control." Typed
+/// `AmongPermanentsYouControl` set, not an inert CardType string.
+#[test]
+fn empty_shrine_kannushi_protection_among_permanents_you_control() {
+    use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
+
+    let def = parse_static_line(
+        "This creature has protection from each color among permanents you control.",
+    )
+    .expect("Empty-Shrine Kannushi static line must parse");
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl
+            )),
+        }]
+    );
+}
+
+/// CR 702.16i + CR 611.3a (#10159): Pledge of Loyalty — enchanted-creature grant
+/// of the same color set. The "doesn't remove this Aura" rider is a separate
+/// sentence handled by the per-grant exemption and is not part of this assert.
+#[test]
+fn pledge_of_loyalty_protection_among_permanents_you_control() {
+    use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
+
+    let mods = parse_continuous_modifications(
+        "Enchanted creature has protection from each color among permanents you control.",
+    );
+    assert!(
+        mods.contains(&ContinuousModification::AddKeyword {
+            keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                ProtectionColorSet::AmongPermanentsYouControl
+            )),
+        }),
+        "expected AmongPermanentsYouControl grant, got {mods:?}"
+    );
+}

@@ -4811,6 +4811,35 @@ mod tests {
     }
 
     #[test]
+    fn protection_from_each_color_among_permanents_not_expanded() {
+        use crate::types::keywords::ProtectionTarget;
+
+        // Empty-Shrine Kannushi / Pledge of Loyalty (#10159): must stay one
+        // typed EachColor set entry, not five Color entries and not CardType.
+        let keywords = extract_granted_keyword_list(
+            "protection from each color among permanents you control",
+            &["protection".to_string()],
+        )
+        .unwrap();
+        let prots: Vec<_> = keywords
+            .iter()
+            .filter(|k| matches!(k, Keyword::Protection(_)))
+            .collect();
+        assert_eq!(
+            prots.len(),
+            1,
+            "qualified 'each color among …' must not expand, got {prots:?}"
+        );
+        assert_eq!(
+            *prots[0],
+            Keyword::Protection(ProtectionTarget::EachColor(
+                crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl
+            )),
+            "Kannushi/Pledge phrase must be the typed AmongPermanentsYouControl set"
+        );
+    }
+
+    #[test]
     fn extract_granted_keyword_list_transmute() {
         // CR 702.53a: Transmute {cost} — single-keyword line with parameterized cost
         let mtgjson_kws = vec!["transmute".to_string()];

@@ -722,6 +722,29 @@ pub fn protection_color_set_members(
                 })
                 .unwrap_or_default()
         }
+        // CR 702.16i + CR 611.3a: colors among permanents `you` controls, in
+        // WUBRG order. Battlefield objects are permanents (CR 110.1); colorless
+        // permanents contribute nothing (CR 105.2).
+        ProtectionColorSet::AmongPermanentsYouControl => {
+            use std::collections::HashSet;
+            let mut seen: HashSet<ManaColor> = HashSet::new();
+            for &id in crate::game::targeting::zone_object_ids(state, Zone::Battlefield).iter() {
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                if obj.controller != you {
+                    continue;
+                }
+                for color in &obj.color {
+                    seen.insert(*color);
+                }
+            }
+            ManaColor::ALL
+                .iter()
+                .copied()
+                .filter(|color| seen.contains(color))
+                .collect()
+        }
     }
 }
 
@@ -2016,6 +2039,63 @@ mod tests {
         );
         // The other player has no commander.
         assert!(protection_color_set_members(&state, &set, PlayerId(1)).is_empty());
+    }
+
+    /// CR 702.16i + CR 611.3a: Empty-Shrine Kannushi / Pledge of Loyalty — colors
+    /// among permanents you control, re-read as the board changes.
+    #[test]
+    fn protection_color_set_members_among_permanents_you_control() {
+        let set = ProtectionColorSet::AmongPermanentsYouControl;
+        let mut state = GameState::new_two_player(3);
+        assert!(
+            protection_color_set_members(&state, &set, PlayerId(0)).is_empty(),
+            "empty board grants no protection colors"
+        );
+
+        let red = crate::game::zones::create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Red Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&red).unwrap().color = vec![ManaColor::Red];
+        let blue = crate::game::zones::create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Blue Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&blue).unwrap().color = vec![ManaColor::Blue];
+        // Opponent's green must not contribute to "you control".
+        let opp = crate::game::zones::create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(1),
+            "Opp Green".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&opp).unwrap().color = vec![ManaColor::Green];
+        // Multicolored permanent contributes each of its colors once.
+        let gold = crate::game::zones::create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "Gold Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&gold).unwrap().color = vec![ManaColor::Red, ManaColor::White];
+
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(0)),
+            vec![ManaColor::White, ManaColor::Blue, ManaColor::Red],
+            "WUBRG order over the controller's permanents only"
+        );
+        assert_eq!(
+            protection_color_set_members(&state, &set, PlayerId(1)),
+            vec![ManaColor::Green]
+        );
     }
 
     /// CR 702.16 + CR 702.16i: `resolve_granted_protection` expands set and chosen
