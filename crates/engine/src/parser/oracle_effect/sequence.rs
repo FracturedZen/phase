@@ -2321,6 +2321,17 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
             || starts_you_control_subject_predicate(after_then_lower)
             || starts_with_damage_clause(after_then_lower)
             || starts_target_players_subject_clause(after_then_lower)
+            // CR 601.2c + CR 115.6 + CR 608.2c / #9602: "up to <n> [other]
+            // target … gets ±N/±M" (Dark Salvation) and bare "another target …
+            // gets" after ", then" open their own announced target — the same
+            // recognizer the comma path already uses.
+            || starts_targeted_pt_conjunct_lower(after_then_lower).is_ok()
+            // CR 601.2c + CR 115.6 / #9602: "up to <n> target …" whose residual
+            // is target-led but not a P/T pump (Unstable Experiment:
+            // "…, then up to one target creature you control connives") — the
+            // "up to <n> " quantifier blinds starts_clause_text's bare
+            // "target " arm, so strip it here.
+            || starts_up_to_prefixed_target_clause_lower(after_then_lower)
         {
             return Some((ClauseBoundary::Then, whitespace_len + "then ".len()));
         }
@@ -3176,6 +3187,26 @@ fn starts_target_continuous_clause_lower(s: &str) -> OracleResult<'_, ()> {
     ))
     .parse(segment)?;
     Ok((rest, ()))
+}
+
+/// CR 601.2c + CR 115.6 + CR 608.2c: "up to <n> target …" after ", then" opens its
+/// own announced (optional) target — Dark Salvation / Unstable Experiment class
+/// (#9602). `starts_clause_text` already recognizes bare "target …", but the
+/// optional "up to <n> " quantifier sits in front and blinds that check, so the
+/// Then boundary never fires and the second clause is folded into (or lost under)
+/// the first. Discriminator is residual `target ` after the quantifier — a
+/// non-target "up to N cards" dig keep is left un-split here (handled elsewhere).
+fn starts_up_to_prefixed_target_clause_lower(s: &str) -> bool {
+    let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("up to "),
+        nom_primitives::parse_number,
+        tag(" "),
+    )
+        .parse(s)
+    else {
+        return false;
+    };
+    tag::<_, _, OracleError<'_>>("target ").parse(rest).is_ok()
 }
 
 /// CR 601.2c + CR 115.6: a "[up to one] [other] target <noun phrase> gets +-N/+-M" or
@@ -12460,6 +12491,125 @@ mod tests {
                 "destroy all creatures",
                 "any number of target players each mill half their library, rounded down",
             ]
+        );
+    }
+
+    /// #9602 Dark Salvation / Unstable Experiment: ", then up to one target …"
+    /// must open a Then boundary. Without the up-to-prefixed / targeted-P/T arms
+    /// the second clause was folded into (or dropped under) the first — Dark
+    /// Salvation lost its Token create and pumped the player; Unstable Experiment
+    /// lost Connive entirely.
+    #[test]
+    fn up_to_one_target_creature_splits_after_then() {
+        assert_eq!(
+            clause_texts(
+                "target player creates X 2/2 black Zombie creature tokens, then up to one target creature gets -1/-1 until end of turn for each Zombie that player controls",
+            ),
+            vec![
+                "target player creates X 2/2 black Zombie creature tokens".to_string(),
+                "up to one target creature gets -1/-1 until end of turn for each Zombie that player controls"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(
+            clause_texts(
+                "target player draws a card, then up to one target creature you control connives",
+            ),
+            vec![
+                "target player draws a card".to_string(),
+                "up to one target creature you control connives".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn starts_up_to_prefixed_target_clause_recognizes_quantified_target() {
+        assert!(starts_up_to_prefixed_target_clause_lower(
+            "up to one target creature gets -1/-1"
+        ));
+        assert!(starts_up_to_prefixed_target_clause_lower(
+            "up to one target creature you control connives"
+        ));
+        assert!(starts_up_to_prefixed_target_clause_lower(
+            "up to two target creatures"
+        ));
+        // Non-target "up to N cards" dig keeps must not trip this arm.
+        assert!(!starts_up_to_prefixed_target_clause_lower(
+            "up to two cards from among them"
+        ));
+        assert!(!starts_up_to_prefixed_target_clause_lower("draw a card"));
+    }
+
+    /// #9602 Dark Salvation: Target-player create-tokens THEN up-to-one-creature
+    /// pump. Before the fix the Then boundary never fired — Token was lost and
+    /// Pump targeted the player. Reach: Token (player owner) + Pump (creature
+    /// target, optional).
+    #[test]
+    fn dark_salvation_token_then_optional_creature_pump() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Target player creates X 2/2 black Zombie creature tokens, then up to one target creature gets -1/-1 until end of turn for each Zombie that player controls.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&Effect> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d.effect.as_ref());
+            node = d.sub_ability.as_deref();
+        }
+
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Token { .. })),
+            "Dark Salvation must keep the Token create; got {effects:?}"
+        );
+        let Some(pump) = effects.iter().find_map(|e| match e {
+            Effect::Pump { target, power, toughness } => Some((target, power, toughness)),
+            _ => None,
+        }) else {
+            panic!("Dark Salvation must keep the creature Pump; got {effects:?}");
+        };
+        assert!(
+            matches!(pump.0, TargetFilter::Typed(_)),
+            "pump target must be a creature Typed filter, not the player; got {:?}",
+            pump.0
+        );
+        // Optional "up to one" on the second target slot (may land on the root
+        // or the pump sub_ability depending on chain folding).
+        assert!(
+            def.optional_targeting
+                || def.sub_ability.as_ref().is_some_and(|s| s.optional_targeting),
+            "up to one target creature must mark optional_targeting on the pump clause; def={def:#?}"
+        );
+    }
+
+    /// #9602 Unstable Experiment: Target-player draw THEN up-to-one-creature
+    /// connive. Before the fix Connive was dropped entirely (Draw only,
+    /// sub_ability: null).
+    #[test]
+    fn unstable_experiment_draw_then_optional_creature_connive() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "Target player draws a card, then up to one target creature you control connives.",
+            AbilityKind::Spell,
+        );
+
+        let mut effects: Vec<&Effect> = Vec::new();
+        let mut node = Some(&def);
+        while let Some(d) = node {
+            effects.push(d.effect.as_ref());
+            node = d.sub_ability.as_deref();
+        }
+
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+            "Unstable Experiment must keep Draw; got {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Connive { .. })),
+            "Unstable Experiment must keep Connive on the second target; got {effects:?}"
         );
     }
 
