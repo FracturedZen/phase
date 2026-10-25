@@ -2467,6 +2467,15 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" you own")),
         value((), tag(" an opponent controls")),
         value((), tag(" your opponents control")),
+        // CR 201.2 + CR 608.2c: mass same-name conjuncts after a named / not-named
+        // restriction ("… not named Detention Sphere and all other permanents with
+        // the same name as that permanent"). Quantifier-led "and all/each/every"
+        // never opens a printed card name (contrast "Gisa and Geralf", which
+        // continues with a proper noun). Without these, named_filter_name_end
+        // would scan into the mass conjunct and stop only at a later " that ".
+        value((), tag(" and all ")),
+        value((), tag(" and each ")),
+        value((), tag(" and every ")),
         // Relative-pronoun clause leads (CR 201.2 descriptive clauses).
         value((), tag(" that ")),
         value((), tag(" with ")),
@@ -4217,6 +4226,47 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             &mut controller,
             ctx,
         );
+    }
+
+    // CR 201.2 + CR 201.2a: "not named [card name]" — NAME exclusion predicate
+    // (`Not(Named)`). Tried before the positive "named " arm so the exclusion is
+    // not left as leftover that blocks a following mass conjunct (Detention
+    // Sphere / issue #10125: "target nonland permanent not named Detention
+    // Sphere and all other permanents with the same name as that permanent").
+    // A name carrying `~` is refused (CR 201.5): `Not(Named{"~"})` would accept
+    // every object. Shares `named_filter_name_end` with the positive arm.
+    let remaining_not_named = lower[pos..].trim_start();
+    let not_named_offset = lower[pos..].len() - remaining_not_named.len();
+    if let Ok((name_text, _)) =
+        tag::<_, _, OracleError<'_>>("not named ").parse(remaining_not_named)
+    {
+        let name_end = named_filter_name_end(name_text);
+        let raw_name = name_text[..name_end].trim();
+        if !raw_name.is_empty() && !raw_name.contains('~') {
+            let orig_offset = pos + not_named_offset + "not named ".len();
+            let orig_name = text[orig_offset..orig_offset + raw_name.len()].trim();
+            properties.push(FilterProp::Not {
+                prop: Box::new(FilterProp::Named {
+                    name: orig_name.to_string(),
+                }),
+            });
+            pos += not_named_offset + "not named ".len() + name_end;
+
+            // Locative after the exclusion ("not named X in your graveyard") —
+            // rare, but parity with the positive "named X in …" path below.
+            let after_not_named = lower[pos..].trim_start();
+            let is_locative =
+                alt((tag::<_, _, OracleError<'_>>("in "), tag("on "))).parse(after_not_named);
+            if is_locative.is_ok() {
+                if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+                    properties.extend(zone_props);
+                    pos += consumed;
+                    if controller.is_none() {
+                        controller = zone_ctrl;
+                    }
+                }
+            }
+        }
     }
 
     // CR 201.2: "named [card name]" suffix — filter by exact card name.
@@ -11295,6 +11345,73 @@ mod tests {
             tf.properties
         );
         assert_eq!(rest.trim(), "draws a card");
+
+        // Issue #10125: mass same-name conjunct after a named/not-named restriction
+        // must not be swallowed into the literal card name.
+        assert_eq!(
+            named_filter_name_end(
+                "detention sphere and all other permanents with the same name as that permanent"
+            ),
+            "detention sphere".len()
+        );
+        // "Gisa and Geralf" stays whole — "and" + proper noun, not a quantifier.
+        assert_eq!(
+            named_filter_name_end("gisa and geralf you control"),
+            "gisa and geralf".len()
+        );
+    }
+
+    /// Issue #10125 / CR 201.2 + CR 201.2a: "not named <name>" on a target type
+    /// phrase folds to `Not(Named)` and leaves a following mass same-name
+    /// conjunct ("and all other …") as remainder for the effect composer.
+    #[test]
+    fn type_phrase_not_named_exclusion_and_mass_conjunct_remainder() {
+        let (filter, rest) = parse_type_phrase_folding(
+            "nonland permanent not named detention sphere and all other permanents with the same name as that permanent",
+        );
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Permanent),
+            "expected Permanent, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))),
+            "expected Non(Land), got {:?}",
+            tf.type_filters
+        );
+        let expected = FilterProp::Not {
+            prop: Box::new(FilterProp::Named {
+                name: "detention sphere".to_string(),
+            }),
+        };
+        assert!(
+            tf.properties.contains(&expected),
+            "expected Not(Named{{detention sphere}}), got {:?}",
+            tf.properties
+        );
+        assert_eq!(
+            rest.trim(),
+            "and all other permanents with the same name as that permanent",
+            "mass conjunct must remain for the effect composer"
+        );
+
+        // Bare exclusion with no mass conjunct — fully consumed.
+        let (filter, rest) =
+            parse_type_phrase_folding("creature not named ebondeath, dracolich");
+        let tf = typed_leg(&filter).expect("typed filter");
+        assert!(
+            tf.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::Named {
+                    name: "ebondeath, dracolich".to_string(),
+                }),
+            }),
+            "{:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "leftover={rest:?}");
     }
 
     /// Extract the `AggregateFunction` a superlative-property suffix encodes,

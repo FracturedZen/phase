@@ -51433,6 +51433,75 @@ fn maelstrom_pulse_destroys_only_same_named_permanents() {
     );
 }
 
+/// Issue #10125 — Detention Sphere: "exile target nonland permanent not named
+/// Detention Sphere and all other permanents with the same name as that
+/// permanent." The target must carry `Not(Named{"detention sphere"})`, and the
+/// mass conjunct must still lower to `ChangeZoneAll` with
+/// `SameNameAsParentTarget` (without the exclusion the "not named …" leftover
+/// blocked the mass conjunct and every opponent permanent was legal).
+#[test]
+fn detention_sphere_not_named_and_same_name_mass_exile() {
+    let parsed = crate::parser::parse_oracle_text(
+        "When this enchantment enters, you may exile target nonland permanent not named Detention Sphere and all other permanents with the same name as that permanent.\nWhen this enchantment leaves the battlefield, return the exiled cards to the battlefield under their owner's control.",
+        "Detention Sphere",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("enters trigger");
+    let root = trigger
+        .execute
+        .as_ref()
+        .expect("enters execute");
+    assert!(root.optional, "you may exile …");
+    let Effect::ChangeZone {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(primary),
+        ..
+    } = &*root.effect
+    else {
+        panic!("expected ChangeZone(Exile, Typed), got {:?}", root.effect);
+    };
+    assert!(
+        primary.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::Not { prop }
+                if matches!(
+                    prop.as_ref(),
+                    FilterProp::Named { name }
+                        if name.eq_ignore_ascii_case("detention sphere")
+                )
+        )),
+        "primary target must exclude Detention Sphere by name, got {:?}",
+        primary.properties
+    );
+    let sub = root
+        .sub_ability
+        .as_ref()
+        .expect("same-name mass exile continuation");
+    let Effect::ChangeZoneAll {
+        destination: Zone::Exile,
+        target: TargetFilter::Typed(mass),
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected ChangeZoneAll(Exile, Typed), got {:?}", sub.effect);
+    };
+    assert!(
+        mass.properties.contains(&FilterProp::SameNameAsParentTarget),
+        "mass exile must restrict to the parent target's name, got {:?}",
+        mass.properties
+    );
+    assert!(
+        mass.properties.contains(&FilterProp::Another),
+        "mass exile must exclude the targeted permanent itself, got {:?}",
+        mass.properties
+    );
+}
+
 /// CR 608.2c + CR 201.2a: "<verb> target <object> an opponent
 /// controls and all <X> that player controls with the same name as that
 /// <object>" — "that player" is the targeted object's controller, so the mass
