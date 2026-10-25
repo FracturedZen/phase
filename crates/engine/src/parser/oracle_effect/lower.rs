@@ -12050,6 +12050,14 @@ pub(crate) fn apply_where_x_quantity_expression(
     value: QuantityExpr,
     where_x_expression: Option<&str>,
 ) -> Option<QuantityExpr> {
+    apply_where_x_quantity_expression_under_player_scope(value, where_x_expression, None)
+}
+
+fn apply_where_x_quantity_expression_under_player_scope(
+    value: QuantityExpr,
+    where_x_expression: Option<&str>,
+    player_scope: Option<ControllerRef>,
+) -> Option<QuantityExpr> {
     Some(match value {
         // CR 107.3i: Generic "X is N or more" condition parsing defaults to
         // CostXPaid for X-cost spells, but a surrounding "where X is ..." clause
@@ -12059,13 +12067,13 @@ pub(crate) fn apply_where_x_quantity_expression(
             qty: QuantityRef::CostXPaid,
         } if where_x_expression.is_some() => {
             let expression = where_x_expression.expect("checked is_some above");
-            parse_where_x_quantity_expression(expression)?
+            parse_where_x_definition_under_player_scope(expression, player_scope)?
         }
         QuantityExpr::Ref {
             qty: QuantityRef::Variable { name },
         } if where_x_expression.is_some() && name.eq_ignore_ascii_case("X") => {
             let expression = where_x_expression.expect("checked is_some above");
-            parse_where_x_quantity_expression(expression)?
+            parse_where_x_definition_under_player_scope(expression, player_scope)?
         }
         // CR 107.3i: "search ... for up to X ..., where X is …" wraps the X
         // count in `UpTo`. Recurse into `max` so the defining clause rewrites
@@ -12073,27 +12081,27 @@ pub(crate) fn apply_where_x_quantity_expression(
         // must bind X to the where-clause population, not stay at 0). `up_to`
         // re-asserts the non-nesting invariant.
         QuantityExpr::UpTo { max } => {
-            QuantityExpr::up_to(apply_where_x_quantity_expression(*max, where_x_expression)?)
+            QuantityExpr::up_to(apply_where_x_quantity_expression_under_player_scope(*max, where_x_expression, player_scope.clone())?)
         }
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
-            inner: Box::new(apply_where_x_quantity_expression(
+            inner: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *inner,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
             offset,
         },
         QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
-            inner: Box::new(apply_where_x_quantity_expression(
+            inner: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *inner,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
             minimum,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,
-            inner: Box::new(apply_where_x_quantity_expression(
+            inner: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *inner,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
         },
         QuantityExpr::DivideRounded {
@@ -12101,9 +12109,9 @@ pub(crate) fn apply_where_x_quantity_expression(
             divisor,
             rounding,
         } => QuantityExpr::DivideRounded {
-            inner: Box::new(apply_where_x_quantity_expression(
+            inner: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *inner,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
             divisor,
             rounding,
@@ -12111,30 +12119,30 @@ pub(crate) fn apply_where_x_quantity_expression(
         QuantityExpr::Sum { exprs } => QuantityExpr::Sum {
             exprs: exprs
                 .into_iter()
-                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .map(|expr| apply_where_x_quantity_expression_under_player_scope(expr, where_x_expression, player_scope.clone()))
                 .collect::<Option<Vec<_>>>()?,
         },
         QuantityExpr::Max { exprs } => QuantityExpr::Max {
             exprs: exprs
                 .into_iter()
-                .map(|expr| apply_where_x_quantity_expression(expr, where_x_expression))
+                .map(|expr| apply_where_x_quantity_expression_under_player_scope(expr, where_x_expression, player_scope.clone()))
                 .collect::<Option<Vec<_>>>()?,
         },
         QuantityExpr::Difference { left, right } => QuantityExpr::Difference {
-            left: Box::new(apply_where_x_quantity_expression(
+            left: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *left,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
-            right: Box::new(apply_where_x_quantity_expression(
+            right: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *right,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
         },
         QuantityExpr::Power { base, exponent } => QuantityExpr::Power {
             base,
-            exponent: Box::new(apply_where_x_quantity_expression(
+            exponent: Box::new(apply_where_x_quantity_expression_under_player_scope(
                 *exponent,
-                where_x_expression,
+                where_x_expression, player_scope.clone(),
             )?),
         },
         other => other,
@@ -12154,10 +12162,44 @@ fn bind_where_x_quantity(
     where_x_expression: Option<&str>,
     unbound: &mut Option<String>,
 ) {
-    match apply_where_x_quantity_expression(slot.clone(), where_x_expression) {
+    bind_where_x_quantity_under_player_scope(slot, where_x_expression, unbound, None);
+}
+
+/// CR 608.2c + CR 115.1 (#9600): bind a where-X definition under an optional
+/// declared-player recipient scope so "that player controls" / "they control"
+/// in the definition name the clause's announced player (Jovial Evil), not the
+/// interim You seed of the context-free where-X authority.
+fn bind_where_x_quantity_under_player_scope(
+    slot: &mut QuantityExpr,
+    where_x_expression: Option<&str>,
+    unbound: &mut Option<String>,
+    player_scope: Option<ControllerRef>,
+) {
+    match apply_where_x_quantity_expression_under_player_scope(
+        slot.clone(),
+        where_x_expression,
+        player_scope,
+    ) {
         Some(bound) => *slot = bound,
         None => *unbound = where_x_expression.map(str::to_string),
     }
+}
+
+/// Parse a where-X definition, preferring a context-aware CDA read when the
+/// clause announced a player target for "that player"/"they" to bind to.
+fn parse_where_x_definition_under_player_scope(
+    expression: &str,
+    player_scope: Option<ControllerRef>,
+) -> Option<QuantityExpr> {
+    if let Some(scope) = player_scope {
+        let mut ctx = ParseContext::default();
+        if let Some(qty) = ctx.with_player_scope(scope, |c| {
+            parse_cda_quantity_with_context(expression, c)
+        }) {
+            return Some(qty);
+        }
+    }
+    parse_where_x_quantity_expression(expression)
 }
 
 /// An absent slot has no X to bind, so `None` is left alone; a present one routes
@@ -12239,11 +12281,32 @@ pub(super) fn apply_where_x_effect_expression(
     let mut unbound_where_x: Option<String> = None;
     let mut unbound_prevention_where_x: Option<String> = None;
     match effect {
-        Effect::DealDamage { amount, .. }
-        | Effect::DamageAll { amount, .. }
+        // CR 608.2c + CR 115.1 (#9600): a declared player recipient is the
+        // antecedent of "that player"/"they" in the where-X definition
+        // (Jovial Evil: "~ deals X damage to target opponent, where X is twice
+        // the number of white creatures that player controls").
+        Effect::DealDamage { amount, target, .. } => {
+            bind_where_x_quantity_under_player_scope(
+                amount,
+                where_x_expression,
+                &mut unbound_where_x,
+                declared_player_controller_ref(target),
+            );
+            if rebind_magnitude_target_anaphor {
+                rebind_cost_paid_object_pt_to_target(amount);
+            }
+        }
+        Effect::LoseLife { amount, target, .. } => {
+            bind_where_x_quantity_under_player_scope(
+                amount,
+                where_x_expression,
+                &mut unbound_where_x,
+                target.as_ref().and_then(declared_player_controller_ref),
+            );
+        }
+        Effect::DamageAll { amount, .. }
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::GainLife { amount, .. }
-        | Effect::LoseLife { amount, .. }
         | Effect::ChangeSpeed { amount, .. }
         | Effect::Draw { count: amount, .. }
         | Effect::Mill { count: amount, .. }

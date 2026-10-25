@@ -1009,10 +1009,27 @@ pub(crate) fn parse_count_slot<'a>(text: &'a str, ctx: &mut ParseContext) -> Opt
             let CountHead::VariableX(count) = head else {
                 return None;
             };
-            let x = super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
-                .or_else(|| {
-                    parse_cda_quantity_with_context(quantity, &mut ctx.clone_player_antecedents())
-                })?;
+            // CR 608.2c + CR 115.1 (#9600): when a prior clause declared a player
+            // ("Choose target opponent. … where X is the number of artifacts
+            // that player controls"), prefer the context-aware CDA parse so
+            // "that player"/"they" bind to the declared antecedent. The
+            // context-free where-X authority seeds unbound anaphors as You
+            // (`interim_you_anaphor_seed`) and would win first otherwise
+            // (Curious Herd).
+            let mut qty_ctx = ctx.clone_player_antecedents();
+            let antecedents = qty_ctx.player_antecedents();
+            let has_player_antecedent = antecedents.declared_that_player.is_some()
+                || antecedents.declared_they.is_some()
+                || antecedents.third_person.is_some();
+            let x = if has_player_antecedent {
+                parse_cda_quantity_with_context(quantity, &mut qty_ctx).or_else(|| {
+                    super::oracle_effect::lower::parse_where_x_quantity_expression(quantity)
+                })
+            } else {
+                super::oracle_effect::lower::parse_where_x_quantity_expression(quantity).or_else(
+                    || parse_cda_quantity_with_context(quantity, &mut qty_ctx),
+                )
+            }?;
             let bare_x = matches!(
                 &count,
                 QuantityExpr::Ref { qty: QuantityRef::Variable { name } } if name == "X"

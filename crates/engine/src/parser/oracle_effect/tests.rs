@@ -6327,6 +6327,140 @@ fn effect_damage_all_that_player_controls_uses_relative_player_scope() {
     }
 }
 
+/// CR 608.2c + CR 115.1 (#9600): Curious Herd — "Choose target opponent. …
+/// where X is the number of artifacts that player controls" must bind the
+/// token count to the chosen opponent (DeclaredPlayer), not You.
+#[test]
+fn effect_create_tokens_where_x_that_player_controls_uses_target_player() {
+    let parsed = parse_oracle_text(
+        "Choose target opponent. You create X 3/3 green Beast creature tokens, where X is the number of artifacts that player controls.",
+        "Curious Herd",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Curious Herd should parse an ability");
+    // Choose-target installs TargetOnly; the create rides as a sub_ability.
+    let create = ability
+        .sub_ability
+        .as_ref()
+        .map(|s| s.effect.as_ref())
+        .unwrap_or(ability.effect.as_ref());
+    match create {
+        Effect::Token {
+            count:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf),
+                    },
+                },
+            ..
+        } => {
+            assert!(
+                matches!(
+                    tf.controller,
+                    Some(ControllerRef::DeclaredPlayer { .. })
+                        | Some(ControllerRef::TargetOpponent)
+                        | Some(ControllerRef::TargetPlayer)
+                ),
+                "WhereX after Choose target opponent must not bind You; got {tf:?}"
+            );
+            assert_ne!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "regression: that player controls must not fall through to You"
+            );
+        }
+        other => panic!("expected Token with ObjectCount WhereX, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 115.1 (#9600): Jovial Evil-class where-X after dealing damage
+/// to a declared opponent binds the count to that opponent.
+#[test]
+fn effect_deal_damage_where_x_that_player_controls_binds_recipient() {
+    let ability = parse_effect_chain(
+        "~ deals X damage to target opponent, where X is the number of white creatures that player controls",
+        AbilityKind::Spell,
+    );
+    match &*ability.effect {
+        Effect::DealDamage { amount, .. } => {
+            let filter = match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                } => filter.clone(),
+                QuantityExpr::Multiply { inner, .. } => match inner.as_ref() {
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    } => filter.clone(),
+                    other => panic!("expected ObjectCount inside Multiply, got {other:?}"),
+                },
+                other => panic!("expected ObjectCount/Multiply amount, got {other:?}"),
+            };
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(
+                        tf.controller,
+                        Some(ControllerRef::TargetOpponent),
+                        "damage amount must count the recipient's creatures, got {tf:?}"
+                    );
+                }
+                other => panic!("expected Typed ObjectCount filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected DealDamage with that-player ObjectCount, got {other:?}"),
+    }
+}
+
+/// CR 608.2c + CR 115.1 (#9600): Oriss / Samite Guardian-class "target player
+/// can't cast …, and creatures that player controls can't attack" must keep
+/// the CantAttack affected controller as TargetPlayer (not You).
+#[test]
+fn effect_cant_cast_and_that_player_controls_cant_attack_binds_target() {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::statics::StaticMode;
+
+    let ability = parse_effect_chain(
+        "Target player can't cast spells this turn, and creatures that player controls can't attack this turn",
+        AbilityKind::Spell,
+    );
+    fn find_cant_attack_controller(ability: &AbilityDefinition) -> Option<ControllerRef> {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = ability.effect.as_ref()
+        {
+            for s in static_abilities {
+                let is_cant_attack = s.mode == StaticMode::CantAttack
+                    || s.modifications.iter().any(|m| {
+                        matches!(
+                            m,
+                            ContinuousModification::GrantStaticAbility { definition }
+                                if definition.mode == StaticMode::CantAttack
+                        )
+                    });
+                if is_cant_attack {
+                    if let Some(TargetFilter::Typed(tf)) = &s.affected {
+                        return tf.controller.clone();
+                    }
+                }
+            }
+        }
+        ability
+            .sub_ability
+            .as_ref()
+            .and_then(|sub| find_cant_attack_controller(sub))
+    }
+    let controller = find_cant_attack_controller(&ability);
+    assert_eq!(
+        controller,
+        Some(ControllerRef::TargetPlayer),
+        "Oriss cant-attack tail must bind that player controls to TargetPlayer; got full ability {ability:?}"
+    );
+}
+
 /// CR 508.5: In an attacking creature's ability, "defending player" is the
 /// player the source is attacking, so local third-person refs in the damage
 /// amount ("they control") bind to that player.

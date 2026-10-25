@@ -6038,8 +6038,33 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
         .trim_start()
         .trim_start_matches([',', ' '])
         .trim_start();
+    // CR 608.2c + CR 115.1 (#9600): a "target player can't cast …, and creatures
+    // that player controls can't attack" tail names the same declared player.
+    // Re-parse the conjunct under TargetPlayer so "that player controls" does
+    // not fall through to the interim You seed (Oriss, Samite Guardian).
     let sub_ability = if tail.is_empty() {
         None
+    } else if matches!(
+        affected_players,
+        RestrictionPlayerScope::TargetedPlayer | RestrictionPlayerScope::ParentTargetedPlayer
+    ) {
+        let scope = match &affected_players {
+            RestrictionPlayerScope::ParentTargetedPlayer => {
+                ControllerRef::ParentTargetController
+            }
+            _ => ControllerRef::TargetPlayer,
+        };
+        let mut tail_ctx = ParseContext {
+            relative_player_scope: Some(scope.clone()),
+            declared_player_scope: Some(scope),
+            prior_player_declaration: true,
+            ..ParseContext::default()
+        };
+        Some(Box::new(parse_effect_chain_with_context(
+            tail,
+            AbilityKind::Spell,
+            &mut tail_ctx,
+        )))
     } else {
         Some(Box::new(parse_effect_chain(tail, AbilityKind::Spell)))
     };
