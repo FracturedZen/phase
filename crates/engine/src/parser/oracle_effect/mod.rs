@@ -24081,6 +24081,40 @@ fn parse_bare_counter_continuation<'a>(
 /// (fixed numbers, `half X`, `that much`, `twice that much`, etc.) by
 /// delegating to [`oracle_util::parse_count_expr`]. The recipient is parsed
 /// through [`parse_target_with_ctx`], same as the primary segment.
+
+/// CR 608.2c: Restate a compound-damage-chain "each other <X>" population so
+/// "other" excludes the head DealDamage's chosen target (`ParentTarget`), not
+/// the ability source. `FilterProp::Another` is source-relative; leaving it on a
+/// fan-out DamageAll would double-hit the chosen creature (Fear, Fire, Foes!).
+fn rewrite_chain_other_as_distinct_from_parent_target(target: TargetFilter) -> TargetFilter {
+    let TargetFilter::Typed(mut typed) = target else {
+        return target;
+    };
+    let had_another = typed
+        .properties
+        .iter()
+        .any(|prop| matches!(prop, FilterProp::Another));
+    if !had_another {
+        return TargetFilter::Typed(typed);
+    }
+    typed
+        .properties
+        .retain(|prop| !matches!(prop, FilterProp::Another));
+    let already_distinct = typed.properties.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::DistinctFrom { reference }
+                if matches!(**reference, TargetFilter::ParentTarget)
+        )
+    });
+    if !already_distinct {
+        typed.properties.push(FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        });
+    }
+    TargetFilter::Typed(typed)
+}
+
 fn parse_bare_damage_continuation<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
@@ -24187,6 +24221,12 @@ fn parse_bare_damage_continuation<'a>(
         // `player_filter`, mirroring the primary each-branch classification.
         let (target, rem) = parse_target_with_ctx(after_to, ctx);
         let (target, rem) = refine_damage_target_remainder(target, rem);
+        // CR 608.2c: in a compound damage chain the head already chose a target,
+        // so "each other <X>" is relative to that ParentTarget — not the source.
+        // `FilterProp::Another` excludes the source only; restate as
+        // `DistinctFrom { ParentTarget }` so the chosen creature is not hit by
+        // both the head DealDamage and this DamageAll (Fear, Fire, Foes!).
+        let target = rewrite_chain_other_as_distinct_from_parent_target(target);
         let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
         let trimmed_rem_lower = trimmed_rem.to_lowercase();

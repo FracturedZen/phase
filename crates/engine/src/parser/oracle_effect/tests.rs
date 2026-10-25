@@ -7207,6 +7207,82 @@ fn radiance_fanout_declines_variable_x_amount() {
     );
 }
 
+/// Issue #7021 — Fear, Fire, Foes!: "deals X damage to target creature and 1
+/// damage to each other creature with the same controller." The second segment
+/// must be a `DamageAll` whose typed filter (a) binds
+/// `controller: ParentTargetController` so only the chosen creature's
+/// controller's creatures are hit, and (b) excludes the chosen creature itself
+/// via `DistinctFrom { ParentTarget }` (not source-relative `Another`).
+#[test]
+fn fear_fire_foes_same_controller_damage_all() {
+    let clause = parse_effect_clause(
+        "Fear, Fire, Foes! deals X damage to target creature and 1 damage to each other creature with the same controller.",
+        &mut ParseContext::default(),
+    );
+    let Effect::DealDamage {
+        amount,
+        target: TargetFilter::Typed(primary_tf),
+        ..
+    } = &clause.effect
+    else {
+        panic!("expected DealDamage primary, got {:?}", clause.effect);
+    };
+    assert!(
+        matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name }
+            } if name == "X"
+        ),
+        "primary amount should be Variable X, got {amount:?}"
+    );
+    assert!(primary_tf
+        .type_filters
+        .iter()
+        .any(|t| matches!(t, TypeFilter::Creature)));
+
+    let sub = clause
+        .sub_ability
+        .as_ref()
+        .expect("FFF continuation must attach a DamageAll sub-ability");
+    let Effect::DamageAll {
+        amount: fan_amount,
+        target: TargetFilter::Typed(fan_tf),
+        player_filter: None,
+        damage_source: None,
+    } = sub.effect.as_ref()
+    else {
+        panic!(
+            "expected DamageAll fan-out sub-effect, got {:?}",
+            sub.effect
+        );
+    };
+    assert_eq!(*fan_amount, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(
+        fan_tf.controller,
+        Some(ControllerRef::ParentTargetController),
+        "fan-out must bind ParentTargetController, got {:?}",
+        fan_tf.controller
+    );
+    assert!(
+        fan_tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::DistinctFrom { reference }
+                if matches!(**reference, TargetFilter::ParentTarget)
+        )),
+        "fan-out must exclude ParentTarget via DistinctFrom, got {:?}",
+        fan_tf.properties
+    );
+    assert!(
+        !fan_tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Another)),
+        "source-relative Another must be restated as DistinctFrom, got {:?}",
+        fan_tf.properties
+    );
+}
+
 /// Issue #495 — Rite of Consumption. The explicit participle-possessive
 /// "the sacrificed creature's power" must resolve to the cost-paid object
 /// (CR 608.2k), NOT the source. The subject-injection rewrite for a `~`

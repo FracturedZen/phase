@@ -3640,6 +3640,18 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 109.4: "with the same controller" — controller equals the resolving
+    // ability's first object target's controller (Fear, Fire, Foes! "each other
+    // creature with the same controller"; Glamer Spinners destination). Bare
+    // form only: no "as <referent>" tail; the ParentTarget is the implicit
+    // referent from the compound head.
+    if controller.is_none() {
+        if let Some((ctrl, consumed)) = parse_same_controller_suffix(&lower[pos..]) {
+            controller = Some(ctrl);
+            pos += consumed;
+        }
+    }
+
     if controller.is_none()
         && !properties
             .iter()
@@ -8278,6 +8290,30 @@ fn parse_same_name_referent_noun(input: &str) -> nom::IResult<&str, &str, Oracle
         tag("card"),
     ))
     .parse(input)
+}
+
+/// CR 109.4: Parse a bare "with the same controller" filter suffix. The
+/// controller is the resolving ability's first object target
+/// (`ControllerRef::ParentTargetController`) — Fear, Fire, Foes! ("1 damage to
+/// each other creature with the same controller"), Glamer Spinners ("another
+/// permanent with the same controller"). A word boundary must follow so
+/// "with the same controllers" / "with the same controllerate" never match.
+fn parse_same_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("with the same controller"),
+        peek(alt((
+            value((), eof::<_, OracleError<'_>>),
+            value((), one_of(" ,.")),
+        ))),
+    )
+        .parse(trimmed)
+        .ok()?;
+    Some((
+        ControllerRef::ParentTargetController,
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
 }
 
 fn parse_ownership_or_controller_suffix(
@@ -14029,6 +14065,29 @@ mod tests {
             }]))
         );
     }
+
+    /// Issue #7021 — bare "with the same controller" binds ParentTargetController
+    /// (Fear, Fire, Foes!; Glamer Spinners destination).
+    #[test]
+    fn same_controller_suffix_binds_parent_target_controller() {
+        let (f, rest) =
+            parse_type_phrase_folding("each other creature with the same controller");
+        assert!(rest.trim().is_empty(), "suffix must be fully consumed, left {rest:?}");
+        let TargetFilter::Typed(tf) = f else {
+            panic!("expected Typed filter, got {f:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::ParentTargetController));
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "leading other must stamp Another at the type-phrase layer, got {:?}",
+            tf.properties
+        );
+        assert!(tf
+            .type_filters
+            .iter()
+            .any(|t| matches!(t, TypeFilter::Creature)));
+    }
+
 
     #[test]
     fn card_with_mana_value_equal_to_that_cards_mana_value() {
