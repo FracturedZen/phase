@@ -1384,7 +1384,7 @@ fn faiths_shield_fateful_hour_branch_chooses_its_own_color() {
         runner.state().objects[&opponents].keywords
     );
 
-    // Player-level colour protection is not asserted: `player_protection_from_object` has no coloured-transient authority.
+    // Player-level colour protection is covered by #10234 unit tests in static_abilities.rs.
 }
 
 /// T6's non-fateful sibling — same construction, life kept above 5 so the

@@ -13,7 +13,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
-    GiftKind, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
+    GiftKind, HexproofFilter, Keyword, KeywordKind, ProtectionColorSet, ProtectionTarget,
 };
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -698,6 +698,75 @@ pub fn source_matches_protection_target(
         // resolve_granted_protection before any match; an unexpanded set (a printed
         // keyword, never produced by a card today) matches nothing.
         ProtectionTarget::EachColor(_) => false,
+    }
+}
+
+/// CR 702.16 + CR 702.16k: Match a protection quality granted to a *player*
+/// against a source object. Unlike [`source_matches_protection_target`], there is
+/// no protected permanent whose chosen attributes can be read — chosen qualities
+/// resolve from `grant_source` (the permanent or spell that created the grant),
+/// and `FromPlayer` is evaluated relative to `protected_player`.
+///
+/// Used by Seht's Tiger / Faith's Shield (color), Absolute Virtue (from a player),
+/// and printed `PlayerProtection(Color(_))` statics that previously returned false
+/// for every non-Everything quality at the player level (#10234).
+pub fn source_matches_player_protection_target(
+    state: &GameState,
+    protection: &ProtectionTarget,
+    protected_player: PlayerId,
+    source: &GameObject,
+    grant_source: Option<&GameObject>,
+    grant_controller: PlayerId,
+) -> bool {
+    let source_colors = source.effective_colors();
+    match protection {
+        ProtectionTarget::Color(color) => source_colors.contains(color),
+        ProtectionTarget::CardType(type_name) => source_matches_card_type(source, type_name),
+        ProtectionTarget::Quality(quality) => source_matches_quality(source, quality),
+        ProtectionTarget::Multicolored => source_colors.len() > 1,
+        ProtectionTarget::Everything => true,
+        ProtectionTarget::Filter(filter) => source_matches_protection_filter(source, filter),
+        // CR 702.16 + CR 608.2h: chosen color latches on the granting source.
+        ProtectionTarget::ChosenColor => grant_source
+            .and_then(|g| g.chosen_color())
+            .is_some_and(|color| source_colors.contains(&color)),
+        ProtectionTarget::ChosenCardType => grant_source
+            .and_then(|g| g.chosen_card_type())
+            .and_then(|ct| ct.protection_quality_str())
+            .is_some_and(|quality| source_matches_card_type(source, quality)),
+        ProtectionTarget::ChosenPlayer => grant_source
+            .and_then(|g| g.chosen_player())
+            .is_some_and(|player| source.controller_or_owner() == player),
+        // CR 702.16k: protection from [a player] relative to the protected player.
+        ProtectionTarget::FromPlayer(scope) => match scope {
+            crate::types::ability::ControllerRef::Opponent => source.controller != protected_player,
+            crate::types::ability::ControllerRef::You => source.controller == protected_player,
+            _ => false,
+        },
+        // CR 702.16i: expand the set relative to the grant controller ("you").
+        ProtectionTarget::EachColor(set) => {
+            let members = protection_color_set_members(state, set, grant_controller);
+            members.iter().any(|c| source_colors.contains(c))
+        }
+    }
+}
+
+/// CR 702.11d: Match a "hexproof from [quality]" filter against a source.
+/// `ChosenColor` resolves from `grant_source` (the object that chose), not the
+/// targeting source — mirrors the player-protection ChosenColor latch (#10234).
+pub fn source_matches_hexproof_filter(
+    filter: &HexproofFilter,
+    source: &GameObject,
+    grant_source: Option<&GameObject>,
+) -> bool {
+    let source_colors = source.effective_colors();
+    match filter {
+        HexproofFilter::Color(color) => source_colors.contains(color),
+        HexproofFilter::CardType(type_name) => source_matches_card_type(source, type_name),
+        HexproofFilter::Quality(quality) => source_matches_quality(source, quality),
+        HexproofFilter::ChosenColor => grant_source
+            .and_then(|g| g.chosen_color())
+            .is_some_and(|color| source_colors.contains(&color)),
     }
 }
 

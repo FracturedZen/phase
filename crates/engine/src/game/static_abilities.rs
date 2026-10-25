@@ -1783,6 +1783,11 @@ pub fn player_cannot_be_targeted_by(
     {
         return true;
     }
+    // CR 702.11d + CR 702.11c: "hexproof from [quality]" on a player (Veil of
+    // Summer) — opponent sources matching the quality cannot target the player.
+    if player_hexproof_from_blocks(state, player_id, source_id, source_controller) {
+        return true;
+    }
     // CR 702.16b + CR 702.16j: protection from the source.
     player_protection_from(state, player_id, Some(source_id))
 }
@@ -1819,14 +1824,18 @@ pub fn player_protection_from(
 /// holds the pre-entry component — must be read from its projection instead of
 /// from `state.objects`. `None` means "no concrete source object", for which only
 /// the CR 702.16j `Everything` short-circuit can fire.
+///
+/// Issue #10234: coloured / quality player-protection (Seht's Tiger, Faith's
+/// Shield, Absolute Virtue's colour class) and transient `AddKeyword(Protection)`
+/// grants are read here — previously only `Everything` and a few static arms
+/// returned true, so a correctly-installed player transient was ignored.
 pub fn player_protection_from_object(
     state: &GameState,
     player_id: PlayerId,
     source: Option<&crate::game::game_object::GameObject>,
 ) -> bool {
-    use crate::game::keywords::source_matches_card_type;
-    use crate::types::ability::ControllerRef;
-    use crate::types::keywords::ProtectionTarget;
+    use crate::game::keywords::source_matches_player_protection_target;
+    use crate::types::keywords::{Keyword, ProtectionTarget};
 
     // CR 702.16j: protection from everything covers every source.
     if player_has_protection_from_everything(state, player_id) {
@@ -1864,44 +1873,107 @@ pub fn player_protection_from_object(
             ) {
                 continue;
             }
-            let protects = match target {
-                // CR 702.16j: handled by the short-circuit above.
-                ProtectionTarget::Everything => false,
-                // CR 702.16 + CR 205.2: protection from the card type
-                // chosen as the granting permanent (e.g. Serra's Emissary) entered.
-                ProtectionTarget::ChosenCardType => src_obj
-                    .chosen_card_type()
-                    .and_then(|ct| ct.protection_quality_str())
-                    .is_some_and(|quality| source_matches_card_type(source_obj, quality)),
-                // CR 702.16k: "Protection from [a player]" at the player level — the
-                // protected player has protection from each object the specified
-                // player(s) control. "Each of your opponents" (CR 702.16i) → the
-                // `Opponent` scope: any source NOT controlled by the protected
-                // player is an opponent's object in 1v1 and free-for-all. Mirrors the
-                // object-level arm in `game/keywords.rs::source_matches_protection_target`.
-                ProtectionTarget::FromPlayer(scope) => match scope {
-                    ControllerRef::Opponent => source_obj.controller != player_id,
-                    ControllerRef::You => source_obj.controller == player_id,
-                    // Target/chosen player refs have no static context here —
-                    // fail closed (the parser never emits them for protection).
-                    _ => false,
-                },
-                // Truly inert at the player level — no card grants these qualities to
-                // a player; object-level grants of these qualities flow through the
-                // `AddKeyword(Protection)` continuous path, not `PlayerProtection`.
-                ProtectionTarget::ChosenColor
-                | ProtectionTarget::ChosenPlayer
-                | ProtectionTarget::Color(_)
-                | ProtectionTarget::Multicolored
-                | ProtectionTarget::Quality(_)
-                | ProtectionTarget::CardType(_)
-                | ProtectionTarget::Filter(_) => false,
-                // CR 702.16i: no card grants a color-set protection to a player;
-                // inert like the arms above. Object-level sets expand through
-                // `keywords::resolve_granted_protection`.
-                ProtectionTarget::EachColor(_) => false,
+            // CR 702.16j Everything is already covered by the short-circuit above.
+            if matches!(target, ProtectionTarget::Everything) {
+                continue;
+            }
+            if source_matches_player_protection_target(
+                state,
+                target,
+                player_id,
+                source_obj,
+                Some(src_obj),
+                src_obj.controller,
+            ) {
+                return true;
+            }
+        }
+    }
+    // CR 702.16 + CR 611.2c: resolution-created player grants (Seht's Tiger,
+    // Faith's Shield fateful half, Perch Protection colour cousins) install
+    // `AddKeyword(Protection(..))` on a SpecificPlayer TCE. Scan those here —
+    // `player_has_protection_from_everything` only matches Everything.
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        // CR 611.2b + CR 611.3a: every gate of a resolution-created effect must hold.
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
+        }
+        let grant_source = state.objects.get(&tce.source_id);
+        for m in &tce.modifications {
+            let ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ref pt),
+            } = m
+            else {
+                continue;
             };
-            if protects {
+            // Everything already short-circuited above; skip to avoid double work.
+            if matches!(pt, ProtectionTarget::Everything) {
+                continue;
+            }
+            if source_matches_player_protection_target(
+                state,
+                pt,
+                player_id,
+                source_obj,
+                grant_source,
+                tce.controller,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// CR 702.11d + CR 702.11c: Whether `player_id` currently has "hexproof from
+/// [quality]" that matches `source_id`, granted as a player-scoped transient
+/// (Veil of Summer). Opponent-only, like plain player hexproof — own sources
+/// still get through. Plain [`player_has_hexproof`] does not cover HexproofFrom.
+pub fn player_hexproof_from_blocks(
+    state: &GameState,
+    player_id: PlayerId,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+) -> bool {
+    use crate::game::keywords::source_matches_hexproof_filter;
+    use crate::types::keywords::Keyword;
+
+    // CR 702.11c / CR 102.2: hexproof-from only blocks opponents' sources.
+    if !crate::game::players::is_opponent(state, player_id, source_controller) {
+        return false;
+    }
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    for tce in &state.transient_continuous_effects {
+        let TargetFilter::SpecificPlayer { id: affected_id } = tce.affected else {
+            continue;
+        };
+        if affected_id != player_id {
+            continue;
+        }
+        if !crate::game::layers::transient_gate_conditions(tce)
+            .all(|condition| evaluate_condition(state, condition, tce.controller, tce.source_id))
+        {
+            continue;
+        }
+        let grant_source = state.objects.get(&tce.source_id);
+        for m in &tce.modifications {
+            let ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(ref filter),
+            } = m
+            else {
+                continue;
+            };
+            if source_matches_hexproof_filter(filter, source_obj, grant_source) {
                 return true;
             }
         }
@@ -3537,10 +3609,10 @@ mod tests {
         assert!(!player_has_static_other(&state, PlayerId(0), "CantShuffle"));
     }
 
-    /// CR 702.16j: Only `Protection(Everything)` triggers the query. Other
-    /// protection qualities (color, card type) on a player do NOT satisfy
-    /// `player_has_protection_from_everything` — they would have their own
-    /// dedicated queries (deferred from this batch).
+    /// CR 702.16j: Only `Protection(Everything)` triggers the Everything query.
+    /// Other qualities (color, card type) on a player do NOT satisfy
+    /// `player_has_protection_from_everything` — they are read by
+    /// `player_protection_from_object` instead (#10234).
     #[test]
     fn player_protection_query_rejects_non_everything_qualities() {
         use crate::types::ability::{ContinuousModification, Duration};
@@ -3661,6 +3733,237 @@ mod tests {
         assert!(
             !player_protection_from(&state, PlayerId(1), Some(own_source)),
             "the opponent gains no protection — affected is the controller only"
+        );
+    }
+
+    /// Issue #10234 + CR 702.16: A transient `AddKeyword(Protection(Color))` on a
+    /// player (Seht's Tiger class) must make `player_protection_from` true against
+    /// a matching-colour source and false against a non-matching one.
+    #[test]
+    fn player_transient_color_protection_matches_source_color() {
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Seht's Tiger".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Color(ManaColor::Red)),
+            }],
+            None,
+        );
+
+        let red_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Red Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&red_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        let blue_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Blue Bolt".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blue_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        assert!(
+            player_protection_from(&state, PlayerId(0), Some(red_source)),
+            "player with protection from red must be protected from a red source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(0), Some(blue_source)),
+            "protection from red must not cover a blue source"
+        );
+        assert!(
+            !player_protection_from(&state, PlayerId(1), Some(red_source)),
+            "the grant must not protect the other player"
+        );
+        // Still not "everything".
+        assert!(!player_has_protection_from_everything(&state, PlayerId(0)));
+    }
+
+    /// Issue #10234 + CR 702.16: Printed `PlayerProtection(Color(_))` static
+    /// ("You have protection from red.") must match red sources — previously
+    /// the Color arm was inert.
+    #[test]
+    fn player_protection_static_color_matches_source() {
+        use crate::types::keywords::ProtectionTarget;
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "You Have Protection From Red".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&grantor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::PlayerProtection(ProtectionTarget::Color(
+                    ManaColor::Red,
+                )))
+                .affected(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+            );
+
+        let red_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Red Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&red_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        let green_source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Green Source".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&green_source)
+            .unwrap()
+            .color
+            .push(ManaColor::Green);
+
+        assert!(player_protection_from(
+            &state,
+            PlayerId(0),
+            Some(red_source)
+        ));
+        assert!(!player_protection_from(
+            &state,
+            PlayerId(0),
+            Some(green_source)
+        ));
+    }
+
+    /// Issue #10234 + CR 702.11d: Veil of Summer–class player `HexproofFrom`
+    /// blocks opponent sources of matching quality, not own sources or
+    /// non-matching colours.
+    #[test]
+    fn player_hexproof_from_blocks_matching_opponent_sources() {
+        use crate::types::ability::{ContinuousModification, Duration};
+        use crate::types::keywords::{HexproofFilter, Keyword};
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let grantor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Veil of Summer".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            grantor,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            vec![
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+                },
+            ],
+            None,
+        );
+
+        let blue_opp = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blue Opp Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blue_opp)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        let red_opp = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Red Opp Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&red_opp)
+            .unwrap()
+            .color
+            .push(ManaColor::Red);
+
+        let blue_own = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Blue Own Spell".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&blue_own)
+            .unwrap()
+            .color
+            .push(ManaColor::Blue);
+
+        assert!(
+            player_cannot_be_targeted_by(&state, PlayerId(0), blue_opp, PlayerId(1)),
+            "hexproof from blue must block an opponent's blue source"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), red_opp, PlayerId(1)),
+            "hexproof from blue/black must not block a red opponent source"
+        );
+        assert!(
+            !player_cannot_be_targeted_by(&state, PlayerId(0), blue_own, PlayerId(0)),
+            "own blue sources are not blocked by hexproof from"
         );
     }
 

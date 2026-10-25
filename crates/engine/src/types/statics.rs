@@ -1472,8 +1472,9 @@ pub enum StaticMode {
     /// `CantGainLife`); `ProtectionTarget` is the canonical protection-quality
     /// axis. Data-carrying variant — not registry-registered (see
     /// `coverage::is_data_carrying_static`); consumed by direct pattern-match
-    /// in `player_protection_from`. Only the `ChosenCardType` arm is
-    /// runtime-implemented; other arms are inert.
+    /// in `player_protection_from`. Colour / quality / from-player arms are
+    /// runtime-implemented (#10234); `Everything` is short-circuited via
+    /// `player_has_protection_from_everything`.
     PlayerProtection(super::keywords::ProtectionTarget),
     MustAttack,
     /// CR 508.1d: This creature must attack a *specific* defender if able. Per
