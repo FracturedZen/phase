@@ -14391,6 +14391,14 @@ pub enum ParsedCondition {
     },
     /// CR 702.131a: True when the activating player has the city's blessing.
     HasCityBlessing,
+    /// CR 725.1 + CR 602.5b: True when the activating player has the monarch
+    /// designation ("if you're the monarch"). Restriction-layer reading of the
+    /// same printed clause that `StaticCondition::IsMonarch { Controller }` and
+    /// `AbilityCondition::IsMonarch` already read; all three delegate to
+    /// `game::conditions::eval_is_monarch`. Controller-scoped only — a
+    /// non-controller monarch subject has no `ParsedCondition` axis and stays
+    /// unsupported (same as `AbilityCondition`).
+    IsMonarch,
     /// CR 702.195b: True when the activating player has the enduring story designation.
     HasEnduringStory,
     /// CR 309.7 + CR 602.5b: "Activate only if you've completed a dungeon"

@@ -1143,6 +1143,7 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::PlayerCountAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        | ParsedCondition::IsMonarch
         | ParsedCondition::HasEnduringStory
         // CR 309.7: reads `state.dungeon_progress` for the scoped player (via
         // `game::dungeon`) — a per-player completion set that only a dungeon

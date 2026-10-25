@@ -30667,6 +30667,7 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
         | ParsedCondition::YouHadArtifactEnterThisTurn
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        | ParsedCondition::IsMonarch
         | ParsedCondition::HasEnduringStory
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed

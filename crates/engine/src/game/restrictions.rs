@@ -1770,6 +1770,11 @@ fn evaluate_condition_for_granter(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 725.1 + CR 602.5b: same leaf as AbilityCondition::IsMonarch /
+        // StaticCondition::IsMonarch { Controller }. Equip self-cost-reduction
+        // ("This ability costs {N} less if you're the monarch") reads this path
+        // through CostReduction.condition.
+        ParsedCondition::IsMonarch => crate::game::conditions::eval_is_monarch(state, player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
@@ -2656,6 +2661,23 @@ mod tests {
         assert!(!evaluate_condition(&state, player, source_id, &condition));
         state.city_blessing.insert(player);
         assert!(evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// CR 725.1 + CR 602.5b + #10268: `ParsedCondition::IsMonarch` reads the
+    /// monarch designation on the activating player — same leaf as
+    /// AbilityCondition::IsMonarch / StaticCondition::IsMonarch { Controller }.
+    #[test]
+    fn evaluate_is_monarch_condition() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let source_id = ObjectId(10);
+        let condition = ParsedCondition::IsMonarch;
+
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
+        state.monarch = Some(player);
+        assert!(evaluate_condition(&state, player, source_id, &condition));
+        state.monarch = Some(PlayerId(1));
+        assert!(!evaluate_condition(&state, player, source_id, &condition));
     }
 
     /// CR 309.7 + CR 602.5b: Sarevok's Tome's "Activate only if you've completed

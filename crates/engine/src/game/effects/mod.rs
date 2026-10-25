@@ -10533,6 +10533,7 @@ fn parsed_condition_reads_filter_population(
         | ParsedCondition::YouHadArtifactEnterThisTurn
         | ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { .. }
         | ParsedCondition::HasCityBlessing
+        | ParsedCondition::IsMonarch
         | ParsedCondition::HasEnduringStory
         | ParsedCondition::CompletedDungeon { .. }
         | ParsedCondition::HasMaxSpeed

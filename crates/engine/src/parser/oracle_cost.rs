@@ -4489,7 +4489,34 @@ mod tests {
     /// the activate and cast verb axes and both turn-plurality forms. This is the
     /// building-block test behind Hylda's Crown of Winter.
     #[test]
-    fn cost_reduction_during_your_turn_maps_to_is_your_turn() {
+    /// CR 725.1 + CR 602.2b + CR 601.2f + #10268: Crown of Gondor equip
+    /// discount — "This ability costs {3} less to activate if you're the
+    /// monarch" — must convert `StaticCondition::IsMonarch { Controller }` into
+    /// `ParsedCondition::IsMonarch` so the Equip ability carries a gated
+    /// CostReduction instead of Swallow:Condition_If.
+    #[test]
+    fn cost_reduction_if_youre_the_monarch() {
+        use crate::types::ability::ParsedCondition;
+        let r = try_parse_cost_reduction(
+            "this ability costs {3} less to activate if you're the monarch",
+        )
+        .expect("monarch equip discount must parse");
+        assert_eq!(r.amount_per, 3);
+        assert_eq!(r.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            r.condition,
+            Some(ParsedCondition::IsMonarch),
+            "cost reduction must gate on IsMonarch"
+        );
+        // Spell-verb twin (same condition leaf).
+        let spell = try_parse_cost_reduction(
+            "this spell costs {2} less to cast if you're the monarch",
+        )
+        .expect("spell monarch discount must parse");
+        assert_eq!(spell.condition, Some(ParsedCondition::IsMonarch));
+    }
+
+        fn cost_reduction_during_your_turn_maps_to_is_your_turn() {
         use crate::types::ability::ParsedCondition;
         for text in [
             "this ability costs {1} less to activate during your turn",

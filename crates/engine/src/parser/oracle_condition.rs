@@ -298,6 +298,14 @@ fn static_condition_to_restriction_condition(
         }),
         // Player-state leaves with an exact restriction evaluator.
         StaticCondition::HasCityBlessing => Some(ParsedCondition::HasCityBlessing),
+        // CR 725.1 + CR 109.5 + CR 602.5b: only the controller-scoped monarch
+        // gate converts. `ParsedCondition` has no player axis, so a scoped
+        // monarch gate must NOT be lowered — dropping the scope would silently
+        // rebind "that player is the monarch" to the activator (same honesty
+        // rule as AbilityCondition conversion).
+        StaticCondition::IsMonarch {
+            player: crate::types::ability::PlayerScope::Controller,
+        } => Some(ParsedCondition::IsMonarch),
         // CR 702.179e: max speed is a player-state leaf in the same sense as the
         // city's blessing — a designation read off the scoped player, with no
         // filter or quantity to approximate. Both readings call
@@ -917,6 +925,7 @@ mod tests {
             "there are seven or more cards in your graveyard",
             "you've played a land this turn",
             "you have the city's blessing",
+            "you're the monarch",
             "~ is attacking",
             "~ is blocked",
             "~ entered this turn",
@@ -1367,6 +1376,48 @@ mod tests {
                 "{text:?} must be an honest gap, not a confidently wrong restriction"
             );
         }
+    }
+
+    /// CR 725.1 + CR 109.5 + CR 602.5b + #10268: controller-scoped "you're the
+    /// monarch" converts to `ParsedCondition::IsMonarch`. A non-controller
+    /// monarch subject stays Unsupported — `ParsedCondition` has no player axis,
+    /// and lowering it would silently rebind the gate to the activator.
+    #[test]
+    fn youre_the_monarch_converts_scoped_player_rejected() {
+        assert_eq!(
+            parse_restriction_condition("you're the monarch"),
+            Some(ParsedCondition::IsMonarch)
+        );
+        assert_eq!(
+            parse_restriction_condition("you are the monarch"),
+            Some(ParsedCondition::IsMonarch)
+        );
+        // Non-controller scopes must stay honest gaps.
+        assert_eq!(
+            parse_restriction_condition("an opponent is the monarch"),
+            None,
+            "opponent-scoped monarch has no ParsedCondition axis"
+        );
+        assert_eq!(
+            static_condition_to_restriction_condition(StaticCondition::IsMonarch {
+                player: crate::types::ability::PlayerScope::Controller,
+            }),
+            Some(ParsedCondition::IsMonarch)
+        );
+        assert_eq!(
+            static_condition_to_restriction_condition(StaticCondition::IsMonarch {
+                player: crate::types::ability::PlayerScope::ScopedPlayer,
+            }),
+            None,
+            "ScopedPlayer-bound IsMonarch must stay Unsupported"
+        );
+        assert_eq!(
+            static_condition_to_restriction_condition(StaticCondition::IsMonarch {
+                player: crate::types::ability::PlayerScope::DefendingPlayer,
+            }),
+            None,
+            "DefendingPlayer-bound IsMonarch must stay Unsupported"
+        );
     }
 
     #[test]

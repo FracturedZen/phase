@@ -26456,6 +26456,54 @@ fn equip_once_per_turn_constraint_strips_from_cost() {
 }
 
 #[test]
+/// CR 702.6a + CR 725.1 + CR 601.2f + #10268: Crown of Gondor —
+/// "Equip {4}. This ability costs {3} less to activate if you're the monarch."
+/// must attach a `CostReduction` gated on `ParsedCondition::IsMonarch` to the
+/// Equip ability (previously Swallow:Condition_If because IsMonarch could not
+/// convert to ParsedCondition).
+#[test]
+fn crown_of_gondor_equip_monarch_cost_reduction() {
+    let result = parse(
+        "Equipped creature gets +1/+1 for each creature in your party.\n\
+         At the beginning of your end step, if you're the monarch, create two 1/1 white Soldier creature tokens.\n\
+         Equip {4}. This ability costs {3} less to activate if you're the monarch.",
+        "Crown of Gondor",
+        &[Keyword::Equip(ManaCost::Cost {
+            generic: 4,
+            shards: vec![],
+        })],
+        &["Legendary", "Artifact"],
+        &["Equipment"],
+    );
+
+    let equip = result
+        .abilities
+        .iter()
+        .find(|a| a.cost_reduction.is_some())
+        .expect("equip ability must carry the monarch cost reduction");
+    assert_eq!(
+        equip.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 4,
+                shards: vec![],
+            },
+        })
+    );
+    let reduction = equip.cost_reduction.as_ref().unwrap();
+    assert_eq!(reduction.amount_per, 3);
+    assert_eq!(
+        reduction.count,
+        QuantityExpr::Fixed { value: 1 },
+        "flat conditional discount, not for-each"
+    );
+    assert_eq!(
+        reduction.condition,
+        Some(crate::types::ability::ParsedCondition::IsMonarch),
+        "discount must gate on IsMonarch"
+    );
+}
+
 fn plate_armor_equip_cost_reduction_stays_on_equip_ability() {
     let result = parse(
             "Equipped creature gets +3/+3 and has ward {1}.\n\
