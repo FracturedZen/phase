@@ -1265,6 +1265,7 @@ mod necrobloom_dredge;
 mod necrodominance_pay_any_life_draw;
 mod negated_turn_spell_cost_reduction;
 mod nether_spirit_only_creature_card_intervening_if;
+mod nettling_nuisance_goad_9607;
 mod nettling_imp_continuity_target;
 mod niko_light_of_hope;
 mod ninjutsu_cluster;
