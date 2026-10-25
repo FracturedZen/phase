@@ -49666,10 +49666,13 @@ enum UnlessCostRider<'a> {
 
 /// CR 118.12a: "[do X] unless [a player pays a cost]" — the cost is everything
 /// after the unless mana symbols. CR 608.2h: a per-counter multiplier is read from
-/// the source when the unless resolves.
+/// the source when the unless resolves. CR 119.4: "{N} and M life" is an AND of
+/// mana and life (`AbilityCost::Composite`), not a flat mana cost that drops the
+/// conjugant (Mundungu #9843).
 ///
 /// Single authority for the tail of a single (non-disjunctive) unless mana cost.
-/// A cost with no "for each" / "plus an additional" rider stays flat; a
+/// A cost with no "for each" / "plus an additional" / "and … life" rider stays
+/// flat; an "and N life" conjugant becomes `Composite[Mana, PayLife]`; a
 /// "for each <kind> counter on <self>" rider becomes `AbilityCost::PerCounter`
 /// (any base cost); a generic-only base with any other for-each or
 /// "plus an additional … for each" rider keeps its dynamic-mana shape. A for-each
@@ -49692,7 +49695,22 @@ pub(crate) fn parse_unless_mana_cost_tail(
     .parse(after_cost)
     .ok()?;
     match rider {
-        None => Some(AbilityCost::Mana { cost: cost.clone() }),
+        None => {
+            // CR 118.12a + CR 119.4: "{N} and M life" (Mundungu) — AND of mana
+            // and life. Recognized before the flat-Mana fallback so the life
+            // conjugant is never dropped. Trailing sentence text (". if they
+            // do, …") is not an "and … life" conjugant and still lowers to flat
+            // Mana.
+            if let Some(amount) = parse_unless_and_life_conjugant(after_cost) {
+                return Some(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana { cost: cost.clone() },
+                        AbilityCost::PayLife { amount },
+                    ],
+                });
+            }
+            Some(AbilityCost::Mana { cost: cost.clone() })
+        }
         Some(UnlessCostRider::ForEach(clause)) => match parse_for_each_clause(clause.trim())? {
             QuantityRef::CountersOn {
                 scope: ObjectScope::Source,
@@ -49709,6 +49727,26 @@ pub(crate) fn parse_unless_mana_cost_tail(
         Some(UnlessCostRider::PlusAdditional(after)) => {
             unless_plus_additional_per_each(after, cost)
         }
+    }
+}
+
+
+/// CR 119.4: the "and N life" conjugant that follows mana symbols in a compound
+/// unless payment (`pays {1} and 1 life`). Returns `None` when the tail is not
+/// exactly that conjugant (modulo leading whitespace and a trailing period).
+fn parse_unless_and_life_conjugant(after_cost: &str) -> Option<QuantityExpr> {
+    let trimmed = after_cost.trim_start();
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ")
+        .parse(trimmed)
+        .ok()?;
+    let life_text = after_and.trim_end().trim_end_matches('.').trim_end();
+    let (rest, n) = nom_primitives::parse_number(life_text).ok()?;
+    let rest = rest.trim_start();
+    let (leftover, _) = tag::<_, _, OracleError<'_>>("life").parse(rest).ok()?;
+    if leftover.trim().is_empty() {
+        Some(QuantityExpr::Fixed { value: n as i32 })
+    } else {
+        None
     }
 }
 

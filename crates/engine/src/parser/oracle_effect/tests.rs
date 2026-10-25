@@ -8926,6 +8926,49 @@ fn effect_counter_unless_rider_merge_preserves_real_cards() {
     }
 }
 
+/// Issue #9843 — Mundungu: "pays {1} and 1 life" is an AND of mana and life
+/// (`AbilityCost::Composite`), not a flat `{1}` that drops the conjugant.
+#[test]
+fn effect_counter_unless_mana_and_life_is_composite() {
+    let def = parse_effect_chain(
+        "Counter target spell unless its controller pays {1} and 1 life.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Counter { .. }),
+        "expected Counter, got {:?}",
+        def.effect
+    );
+    let cost = def
+        .unless_pay
+        .expect("Mundungu must keep an unless_pay")
+        .cost;
+    match cost {
+        AbilityCost::Composite { costs } => {
+            assert_eq!(costs.len(), 2, "{costs:?}");
+            assert!(
+                matches!(
+                    &costs[0],
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost { generic: 1, shards }
+                    } if shards.is_empty()
+                ),
+                "mana arm: {costs:?}"
+            );
+            assert!(
+                matches!(
+                    &costs[1],
+                    AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: 1 }
+                    }
+                ),
+                "life arm: {costs:?}"
+            );
+        }
+        other => panic!("expected Composite[Mana, PayLife], got {other:?}"),
+    }
+}
+
 /// The "pays " gate is anchored to the payer subject: every currently
 /// supported mana / energy / life subject form still parses.
 #[test]
@@ -9646,6 +9689,38 @@ fn unless_mana_cost_tail_cells() {
         parse_unless_mana_cost_tail(". if they do, surveil 2.", &ManaCost::generic(2)),
         Some(AbilityCost::Mana {
             cost: ManaCost::generic(2)
+        })
+    );
+
+    // CR 118.12a + CR 119.4: "{N} and M life" → Composite[Mana, PayLife]
+    // (Mundungu #9843). Trailing period is oracle punctuation, not a second rider.
+    let mana_and_life = |generic: u32, life: i32| AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(generic),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: life },
+            },
+        ],
+    };
+    assert_eq!(
+        parse_unless_mana_cost_tail(" and 1 life", &ManaCost::generic(1)),
+        Some(mana_and_life(1, 1))
+    );
+    assert_eq!(
+        parse_unless_mana_cost_tail(" and 1 life.", &ManaCost::generic(1)),
+        Some(mana_and_life(1, 1))
+    );
+    assert_eq!(
+        parse_unless_mana_cost_tail(" and 3 life", &ManaCost::generic(2)),
+        Some(mana_and_life(2, 3))
+    );
+    // Non-life "and …" leftovers are not conjugants → still flat Mana.
+    assert_eq!(
+        parse_unless_mana_cost_tail(" and discards a card", &ManaCost::generic(1)),
+        Some(AbilityCost::Mana {
+            cost: ManaCost::generic(1)
         })
     );
 
