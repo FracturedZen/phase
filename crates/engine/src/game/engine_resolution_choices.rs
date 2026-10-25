@@ -8022,6 +8022,8 @@ pub(super) fn handle_resolution_choice(
                 options,
                 destination,
                 tapped,
+                face_down,
+                enter_with_counters,
             },
             GameAction::SubmitSpellbookDraft { card },
         ) => {
@@ -8033,6 +8035,8 @@ pub(super) fn handle_resolution_choice(
                 &card,
                 destination,
                 tapped,
+                face_down,
+                enter_with_counters,
                 events,
             )
             .map_err(|e| EngineError::InvalidAction(format!("spellbook draft: {e:?}")))?;

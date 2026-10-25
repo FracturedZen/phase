@@ -21,6 +21,7 @@ use rand::Rng;
 use crate::types::ability::{
     ConjureCard, ConjureSource, Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::zones::Zone;
@@ -37,6 +38,8 @@ pub fn resolve(
         destination,
         tapped,
         random,
+        face_down,
+        enter_with_counters,
     } = &ability.effect
     else {
         return Err(EffectError::MissingParam("DraftFromSpellbook".to_string()));
@@ -78,6 +81,8 @@ pub fn resolve(
             &card,
             *destination,
             *tapped,
+            *face_down,
+            enter_with_counters.clone(),
             events,
         );
     }
@@ -90,6 +95,8 @@ pub fn resolve(
         options: spellbook,
         destination: *destination,
         tapped: *tapped,
+        face_down: *face_down,
+        enter_with_counters: enter_with_counters.clone(),
     };
     Ok(())
 }
@@ -106,6 +113,8 @@ pub fn complete_draft(
     card: &str,
     destination: Zone,
     tapped: bool,
+    face_down: bool,
+    enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if !options.iter().any(|name| name == card) {
@@ -133,5 +142,38 @@ pub fn complete_draft(
         source_id,
         controller,
     );
-    super::conjure::resolve(state, &conjure, events)
+    super::conjure::resolve(state, &conjure, events)?;
+
+    // Digital-only Alchemy riders (Darigaaz, Shivan Champion #9871): apply
+    // face-down concealment and entry counters to the just-conjured card(s).
+    // `last_created_token_ids` is the chain referent Conjure just assigned.
+    let created = state.last_created_token_ids.clone();
+    if face_down {
+        for id in &created {
+            if let Some(obj) = state.objects.get_mut(id) {
+                obj.face_down = true;
+            }
+        }
+    }
+    for (counter_type, count_expr) in &enter_with_counters {
+        let count = match count_expr {
+            QuantityExpr::Fixed { value } if *value >= 0 => *value as u32,
+            _ => continue,
+        };
+        if count == 0 {
+            continue;
+        }
+        for id in &created {
+            let _ = super::counters::add_counter_with_replacement(
+                state,
+                controller,
+                *id,
+                counter_type.clone(),
+                count,
+                events,
+            );
+        }
+    }
+
+    Ok(())
 }

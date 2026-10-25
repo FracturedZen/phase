@@ -21913,6 +21913,16 @@ pub enum Effect {
         tapped: bool,
         #[serde(default)]
         random: bool,
+        /// Digital-only Alchemy: "... into exile face down" (Darigaaz, Shivan
+        /// Champion). Concealment on the conjured card; independent of the
+        /// battlefield FaceDownProfile path (CR 708.2a).
+        #[serde(default)]
+        face_down: bool,
+        /// Digital-only Alchemy: "... with N <type> counters on it" entry
+        /// counters on the conjured card (Darigaaz egg counters). Mirrors
+        /// `Effect::Token.enter_with_counters`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(CounterType, QuantityExpr)>,
     },
     /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
     /// [effect B]" — the configured chooser scope chooses at resolution which

@@ -20,6 +20,8 @@ fn draft_ability(
             destination,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         },
         Vec::new(),
         source,
@@ -141,6 +143,8 @@ fn complete_draft_conjures_the_chosen_card_into_the_destination() {
         "Lion Sash",
         Zone::Hand,
         false,
+        false,
+        vec![],
         &mut events,
     )
     .expect("the chosen card is conjured");
@@ -168,6 +172,8 @@ fn complete_draft_rejects_a_card_not_in_the_offered_list() {
         "Black Lotus",
         Zone::Hand,
         false,
+        false,
+        vec![],
         &mut events,
     );
     assert!(result.is_err(), "a card outside the spellbook is illegal");
@@ -183,6 +189,8 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             destination: Zone::Hand,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         }
     ));
     assert!(matches!(
@@ -193,6 +201,8 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             destination: Zone::Battlefield,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         }
     ));
     assert!(matches!(
@@ -201,6 +211,8 @@ fn parser_maps_draft_clauses_to_the_right_destination() {
             destination: Zone::Exile,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         }
     ));
 }
@@ -216,6 +228,8 @@ fn parser_honours_the_tapped_rider() {
             destination: Zone::Battlefield,
             tapped: true,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         }
     ));
 }
@@ -264,6 +278,8 @@ fn spellbook_pick_drives_the_draft_and_conjures_the_chosen_card() {
                     destination: Zone::Hand,
                     tapped: false,
                     random: false,
+                    face_down: false,
+                    enter_with_counters: vec![],
                 },
             )
             .cost(AbilityCost::Tap),
@@ -329,6 +345,8 @@ fn random_spellbook_draft_conjures_without_pausing() {
                     destination: Zone::Hand,
                     tapped: false,
                     random: true,
+                    face_down: false,
+                    enter_with_counters: vec![],
                 },
             )
             .cost(AbilityCost::Tap),
@@ -382,6 +400,8 @@ fn spellbook_draft_offers_only_the_activated_sources_list() {
                 destination: Zone::Hand,
                 tapped: false,
                 random: false,
+                face_down: false,
+                enter_with_counters: vec![],
             },
         )
         .cost(AbilityCost::Tap)

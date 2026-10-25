@@ -16895,6 +16895,10 @@ pub enum WaitingFor {
         destination: Zone,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         tapped: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        face_down: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(crate::types::counter::CounterType, crate::types::ability::QuantityExpr)>,
     },
     /// CR 609.7a: Player must choose a source of damage from currently
     /// represented legal source objects.

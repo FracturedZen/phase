@@ -3930,10 +3930,16 @@ fn parse_trailing_where_x_quantity(tail: &str) -> Option<QuantityExpr> {
 ///    `state.last_created_token_ids` into the delayed ability's targets.
 pub(super) fn resolve_populated_token_anaphors(defs: &mut [AbilityDefinition]) {
     for i in 0..defs.len() {
+        // CR 608.2c: created-referent publishers are indistinguishable to a
+        // following same-chain anaphor — Token creators AND OtherProducers
+        // (Conjure, DraftFromSpellbook, face-down entry). Keying only on
+        // is_token_creator left conjure "It gains …" grants on SelfRef
+        // (Darigaaz #9871). Attachable-token detection still reads the
+        // Token-only shape.
         let Some(nearest_creator) = defs[..i]
             .iter()
             .rev()
-            .find(|d| is_token_creating_effect(&d.effect))
+            .find(|d| publishes_chain_created_referent(&d.effect))
         else {
             continue;
         };

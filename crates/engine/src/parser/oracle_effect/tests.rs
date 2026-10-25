@@ -49023,6 +49023,7 @@ fn conjure_of_your_choice_from_spellbook_onto_battlefield() {
             destination,
             tapped,
             random,
+            ..
         } => {
             assert_eq!(destination, Zone::Battlefield);
             assert!(!tapped);
@@ -49044,7 +49045,8 @@ fn conjure_of_your_choice_from_spellbook_apostrophe_source() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: false
+            random: false,
+            ..
         }
     ));
 }
@@ -49058,7 +49060,8 @@ fn conjure_of_your_choice_from_spellbook_into_library() {
         Effect::DraftFromSpellbook {
             destination: Zone::Library,
             tapped: false,
-            random: false
+            random: false,
+            ..
         }
     ));
 }
@@ -49073,7 +49076,8 @@ fn conjure_a_random_card_from_spellbook_onto_battlefield() {
         Effect::DraftFromSpellbook {
             destination: Zone::Battlefield,
             tapped: false,
-            random: true
+            random: true,
+            ..
         }
     ));
 }
@@ -49086,7 +49090,8 @@ fn conjure_a_random_card_from_spellbook_into_hand() {
         Effect::DraftFromSpellbook {
             destination: Zone::Hand,
             tapped: false,
-            random: true
+            random: true,
+            ..
         }
     ));
 }
@@ -49219,9 +49224,65 @@ fn conjure_random_from_spellbook_into_exile() {
         Effect::DraftFromSpellbook {
             destination: Zone::Exile,
             tapped: false,
-            random: true
+            random: true,
+            ..
         }
     ));
+}
+
+/// Darigaaz, Shivan Champion (#9871): "conjure a random card from ~'s
+/// spellbook into exile face down with three egg counters on it. It gains
+/// …". The grant's AffectedObject "It" must bind to the just-conjured card
+/// (`LastCreated`), not SelfRef (Darigaaz). Also models the face-down +
+/// entry-counter riders on `DraftFromSpellbook` so the conjure clause itself
+/// parses (otherwise the grant never sees `token_created_in_chain`).
+#[test]
+fn darigaaz_conjured_grant_binds_last_created_9871() {
+    let def = parse_effect_chain(
+        "conjure a random card from ~'s spellbook into exile face down with three egg counters on it. It gains \"At the beginning of your upkeep, if this card is exiled, remove an egg counter from it. Then if it has no egg counters on it, put it onto the battlefield.\"",
+        AbilityKind::Spell,
+    );
+    match &*def.effect {
+        Effect::DraftFromSpellbook {
+            destination: Zone::Exile,
+            tapped: false,
+            random: true,
+            face_down: true,
+            enter_with_counters,
+        } => {
+            assert_eq!(
+                enter_with_counters,
+                &vec![(
+                    CounterType::Generic("egg".to_string()),
+                    QuantityExpr::Fixed { value: 3 }
+                )],
+                "egg-counter rider must land on DraftFromSpellbook"
+            );
+        }
+        other => panic!("expected face-down random DraftFromSpellbook into exile, got {other:?}"),
+    }
+    let grant = def
+        .sub_ability
+        .as_ref()
+        .expect("the quoted grant must remain chained to the conjure");
+    match &*grant.effect {
+        Effect::GenericEffect {
+            affected: TargetFilter::LastCreated,
+            modifications,
+            ..
+        } => {
+            assert!(
+                modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::GrantTrigger { .. }
+                )),
+                "expected GrantTrigger on the conjured card, got {modifications:?}"
+            );
+        }
+        other => panic!(
+            "expected GenericEffect grant on LastCreated (not SelfRef), got {other:?}"
+        ),
+    }
 }
 
 #[test]

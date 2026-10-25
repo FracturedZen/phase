@@ -14147,6 +14147,8 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
             destination: Zone::Hand,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         });
     }
 
@@ -14162,6 +14164,8 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
             destination: Zone::Battlefield,
             tapped,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         });
     }
 
@@ -14172,6 +14176,8 @@ fn try_parse_spellbook_draft(tp: TextPair) -> Option<Effect> {
             destination: Zone::Exile,
             tapped: false,
             random: false,
+            face_down: false,
+            enter_with_counters: vec![],
         });
     }
 
@@ -14231,12 +14237,38 @@ fn try_parse_conjure_from_spellbook(tp: TextPair) -> Option<Effect> {
     } else {
         (zone_rest, false)
     };
-    // Fully consume the tail (nothing or a trailing period) so an unmodeled rider falls
-    // through to `Unimplemented` rather than being silently dropped.
-    (tail.is_empty() || tail == ".").then_some(Effect::DraftFromSpellbook {
+    // Digital-only Alchemy (Darigaaz, Shivan Champion #9871): optional
+    // "face down" concealment, then optional "with N <type> counters on it"
+    // entry counters. Both must be fully consumed (or leave only ".") so an
+    // unmodeled trailing rider still falls through to Unimplemented.
+    let (tail, face_down) = match tag::<_, _, OracleError<'_>>(" face down").parse(tail) {
+        Ok((tail, _)) => (tail, true),
+        Err(_) => (tail, false),
+    };
+    let (enter_with_counters, counter_span) =
+        parse_with_counters_suffix_spanned(tail);
+    // After optional face-down and an optional counter rider, nothing (or a
+    // trailing period) may remain — any other residual is an unmodeled rider.
+    let residual = match &counter_span {
+        Some(span) => {
+            let left = tail[..span.start].trim();
+            let right = tail[span.end..].trim().trim_end_matches('.');
+            // Counter clause must sit at the head of the remaining tail
+            // (" with three egg counters on it"); a leading residual means a
+            // different rider we do not model.
+            if !left.is_empty() {
+                return None;
+            }
+            right
+        }
+        None => tail.trim().trim_end_matches('.'),
+    };
+    residual.is_empty().then_some(Effect::DraftFromSpellbook {
         destination,
         tapped,
         random,
+        face_down,
+        enter_with_counters,
     })
 }
 

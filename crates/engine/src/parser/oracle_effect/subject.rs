@@ -3899,6 +3899,26 @@ fn parse_subject_application_for(
     // be reinterpreted as some unrelated typed referent). See
     // `chunk_subject`/`prior_typed_referent` in `parse_effect_chain_ir`.
     if lower == "it" {
+        // CR 608.2c + CR 111.1 + CR 707.2: an object this chain created (token,
+        // face-down entry, conjured card — see Effect::publishes_created_referent)
+        // is the nearer antecedent for an AffectedObject grant. Mirrors the
+        // plural "they" arm below. Without this, "It gains …" after Conjure /
+        // DraftFromSpellbook falls through to SelfRef (Darigaaz #9871; Agent of
+        // Raffine's non-perpetual siblings) — the post-token rewrite only
+        // rebinds after is_token_creator heads, not OtherProducer conjures.
+        if consumer == AnaphorConsumer::AffectedObject
+            && ctx.token_created_in_chain
+            && ctx.chain_prior_mass_population.is_none()
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::LastCreated,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+                player_anaphor: None,
+            });
+        }
         // CR 608.2c + CR 601.2c: a bare "it" whose nearest antecedent in this
         // ability is an earlier declared object target (or that target's own bound
         // anaphor) names that target when it is the affected object of a grant,
