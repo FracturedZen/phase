@@ -4596,21 +4596,25 @@ fn strip_constraint_sentences(text: &str) -> String {
     }
     // CR 603.2h + CR 603.4 (#9694): strip "triggers only twice/N times each turn"
     // so the frequency sentence does not become unrecognized_clause_head.
+    // `scan_preceded` advances past the prefix so the count combinator sees
+    // "twice" / "three times", matching the parse_trigger_constraint path.
     let lower = result.to_lowercase();
-    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        alt((
-            tag::<_, _, OracleError<'_>>("this ability triggers only "),
-            tag("triggers only "),
-            tag("do this only "),
-        ))
+    if let Some((before, (), after_prefix)) = scan_preceded(&lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("this ability triggers only "),
+                tag("triggers only "),
+                tag("do this only "),
+            )),
+        )
         .parse(i)
     }) {
-        let start = prefix_text.len();
-        if let Ok((after_count, _n)) = parse_frequency_count_each_turn(matched_start) {
+        if let Ok((after_count, _n)) = parse_frequency_count_each_turn(after_prefix) {
             let after = after_count.trim_start();
             if let Ok((after_turn, _)) = tag::<_, _, OracleError<'_>>("each turn").parse(after) {
-                let consumed = matched_start.len() - after_turn.len();
-                let mut end_pos = start + consumed;
+                let start = before.len();
+                let mut end_pos = lower.len() - after_turn.len();
                 if after_turn.starts_with('.') {
                     end_pos += 1;
                 }
