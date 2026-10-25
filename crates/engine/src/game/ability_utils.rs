@@ -5023,6 +5023,22 @@ fn collect_target_slots_inner(
 /// surfaces none either. See the plan's §Newly Reachable Descent: all nine
 /// paired-with-sub_ability corpus chains were MEASURED to surface the same
 /// slot set before and after this extraction.
+
+/// CR 601.2c + CR 614.15: a self-replacement `ConditionInstead` parks the base
+/// (non-override) instruction on `else_ability` (`apply_self_replacement_override`).
+/// That base often carries the spell's printed target (Faith's Shield: "Target
+/// permanent you control gains …"; Stave Off twin puts the same leaf on
+/// `sub_ability`). Slot collection / assignment must walk that else branch so
+/// the target is announced when the spell is cast — otherwise the leaf stays
+/// empty, `ParentTarget` resolves to nothing, and the non-fateful branch
+/// installs zero continuous effects (backlog F12 / #10235).
+fn condition_instead_else_announces_stack_targets(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.condition,
+        Some(AbilityCondition::ConditionInstead { .. })
+    ) && ability.else_ability.is_some()
+}
+
 fn collect_sub_chain_slots(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -5030,6 +5046,7 @@ fn collect_sub_chain_slots(
 ) -> Result<(), TargetSlotBuildError> {
     if defers_sub_ability_target_selection(&ability.effect) {
         collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), acc)?;
+        collect_condition_instead_else_slots(state, ability, acc)?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -5051,7 +5068,27 @@ fn collect_sub_chain_slots(
             collect_target_slots(state, sub_ability, acc)?;
         }
     }
+    collect_condition_instead_else_slots(state, ability, acc)?;
     Ok(())
+}
+
+/// CR 601.2c + CR 614.15: surface the base branch parked on a `ConditionInstead`
+/// node's `else_ability` (see [`condition_instead_else_announces_stack_targets`]).
+fn collect_condition_instead_else_slots(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    acc: &mut SlotAccumulator,
+) -> Result<(), TargetSlotBuildError> {
+    if !condition_instead_else_announces_stack_targets(ability) {
+        return Ok(());
+    }
+    let Some(else_ability) = ability.else_ability.as_deref() else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(else_ability) {
+        return Ok(());
+    }
+    collect_target_slots(state, else_ability, acc)
 }
 
 fn no_legal_target_slots() -> TargetSlotBuildError {
@@ -7981,6 +8018,7 @@ fn collect_sub_chain_slot_specs(
             specs,
             next_instance,
         );
+        collect_condition_instead_else_slot_specs(state, ability, specs, next_instance);
         return;
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -7994,6 +8032,26 @@ fn collect_sub_chain_slot_specs(
             collect_target_slot_specs(state, sub_ability, specs, next_instance);
         }
     }
+    collect_condition_instead_else_slot_specs(state, ability, specs, next_instance);
+}
+
+/// Spec-side mirror of [`collect_condition_instead_else_slots`].
+fn collect_condition_instead_else_slot_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &mut Vec<TargetSlotSpec>,
+    next_instance: &mut usize,
+) {
+    if !condition_instead_else_announces_stack_targets(ability) {
+        return;
+    }
+    let Some(else_ability) = ability.else_ability.as_deref() else {
+        return;
+    };
+    if defers_conditional_target_selection(else_ability) {
+        return;
+    }
+    collect_target_slot_specs(state, else_ability, specs, next_instance);
 }
 
 /// CR 601.2c / CR 602.2b: Targets are chosen before costs are paid. This
@@ -10708,6 +10766,7 @@ fn assign_sub_chain_targets(
             targets,
             next_target,
         )?;
+        assign_condition_instead_else_targets(state, ability, targets, next_target)?;
         return Ok(());
     }
     let inherits_parent_creature_target = ability
@@ -10720,9 +10779,9 @@ fn assign_sub_chain_targets(
     });
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         if defers_conditional_target_selection(sub_ability) {
-            return Ok(());
-        }
-        if inherits_parent_creature_target {
+            // Still assign a ConditionInstead else branch below — that base
+            // target is independent of a deferred conditional sub.
+        } else if inherits_parent_creature_target {
             if let Some(creature) = parent_creature_target {
                 sub_ability.push_target(creature);
             }
@@ -10731,7 +10790,28 @@ fn assign_sub_chain_targets(
             assign_targets_recursive(state, sub_ability, targets, next_target)?;
         }
     }
+    assign_condition_instead_else_targets(state, ability, targets, next_target)?;
     Ok(())
+}
+
+/// CR 601.2c + CR 614.15: bind announced targets into a `ConditionInstead`
+/// node's `else_ability` (see [`condition_instead_else_announces_stack_targets`]).
+fn assign_condition_instead_else_targets(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    targets: &[TargetRef],
+    next_target: &mut usize,
+) -> Result<(), EngineError> {
+    if !condition_instead_else_announces_stack_targets(ability) {
+        return Ok(());
+    }
+    let Some(else_ability) = ability.else_ability.as_deref_mut() else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(else_ability) {
+        return Ok(());
+    }
+    assign_targets_recursive(state, else_ability, targets, next_target)
 }
 
 /// CR 601.2c: the slot-wise announcement assigner; same raw-append contract as
@@ -11209,6 +11289,7 @@ fn assign_sub_chain_selected_slots(
             selected_slots,
             next_slot,
         )?;
+        assign_condition_instead_else_selected_slots(state, ability, selected_slots, next_slot)?;
         return Ok(());
     }
     let inherits_parent_creature_target = ability
@@ -11221,9 +11302,8 @@ fn assign_sub_chain_selected_slots(
     });
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         if defers_conditional_target_selection(sub_ability) {
-            return Ok(());
-        }
-        if inherits_parent_creature_target {
+            // Still assign a ConditionInstead else branch below.
+        } else if inherits_parent_creature_target {
             if let Some(creature) = parent_creature_target {
                 sub_ability.push_target(creature);
             }
@@ -11232,7 +11312,27 @@ fn assign_sub_chain_selected_slots(
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
         }
     }
+    assign_condition_instead_else_selected_slots(state, ability, selected_slots, next_slot)?;
     Ok(())
+}
+
+/// Slot-walk mirror of [`assign_condition_instead_else_targets`].
+fn assign_condition_instead_else_selected_slots(
+    state: &GameState,
+    ability: &mut ResolvedAbility,
+    selected_slots: &[Option<TargetRef>],
+    next_slot: &mut usize,
+) -> Result<(), EngineError> {
+    if !condition_instead_else_announces_stack_targets(ability) {
+        return Ok(());
+    }
+    let Some(else_ability) = ability.else_ability.as_deref_mut() else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(else_ability) {
+        return Ok(());
+    }
+    assign_selected_slots_recursive(state, else_ability, selected_slots, next_slot)
 }
 
 fn assign_targets_after_deferred_effect(

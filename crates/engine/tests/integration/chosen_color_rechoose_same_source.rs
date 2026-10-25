@@ -1390,15 +1390,10 @@ fn faiths_shield_fateful_hour_branch_chooses_its_own_color() {
 /// T6's non-fateful sibling — same construction, life kept above 5 so the
 /// BASE ability (not the override) applies.
 ///
-/// Asserts the counted single prompt and the recorded colour, but
-/// DELIBERATELY DOES NOT assert protection: the non-fateful branch installs
-/// ZERO transient continuous effects, measured identically at
-/// `PHASE_BASE_SHA`, on the candidate, and with U2 reverted — this is
-/// PRE-EXISTING and OUT OF SCOPE for this phase. Filed as backlog F12; its
-/// mechanism (an announced-but-unbound target on the base ability's own
-/// node) is a hypothesis, not diagnosed to the line. Asserting protection
-/// here would misrepresent an undiagnosed pre-existing gap as something this
-/// phase pinned.
+/// CR 614.15 + CR 601.2c + CR 608.2d (#10235 / backlog F12): the base branch
+/// parked on `ConditionInstead.else_ability` must announce its permanent
+/// target at cast and install protection on that permanent when fateful hour
+/// does not apply.
 #[test]
 fn faiths_shield_non_fateful_branch_still_chooses_its_own_color() {
     let mut scenario = GameScenario::new();
@@ -1406,6 +1401,7 @@ fn faiths_shield_non_fateful_branch_still_chooses_its_own_color() {
     scenario.with_life(P0, 20);
 
     let targeted = scenario.add_creature(P0, "Targeted Bear", 2, 2).id();
+    let bystander = scenario.add_creature(P0, "Bystander Bear", 2, 2).id();
 
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Faith's Shield", true, FAITHS_SHIELD)
@@ -1442,6 +1438,22 @@ fn faiths_shield_non_fateful_branch_still_chooses_its_own_color() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+
+    // F12 fix: non-fateful branch installs exactly one protection TCE on the
+    // announced target, not on every controlled permanent.
+    assert_eq!(
+        runner.state().transient_continuous_effects.len(),
+        1,
+        "non-fateful Faith's Shield must install exactly one continuous effect"
+    );
+    assert!(
+        has_protection_from(&runner.state().objects[&targeted], ManaColor::Red),
+        "the targeted permanent must gain protection from the chosen colour"
+    );
+    assert!(
+        !has_protection_from(&runner.state().objects[&bystander], ManaColor::Red),
+        "an untargeted controlled permanent must NOT gain protection on the narrow branch"
+    );
 }
 
 // ---------------------------------------------------------------------------

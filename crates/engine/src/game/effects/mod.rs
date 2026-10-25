@@ -24164,6 +24164,20 @@ fn resolve_chain_body(
                         effect_context_object.as_ref(),
                         state,
                     );
+                    // CR 608.2c + CR 614.15: Faith's Shield–class self-replacement
+                    // parks the base (targeted) instruction on `else_ability`.
+                    // Cast-time collection now announces that slot, but if it is
+                    // still empty here (no legal target was bound, or an older
+                    // stack object), bind at resolution like the other else
+                    // runners — otherwise ParentTarget installs zero TCEs
+                    // (backlog F12 / #10235).
+                    if try_begin_deferred_else_branch_target_selection(
+                        state,
+                        &mut resolved,
+                        events,
+                    )? {
+                        return Ok(ResolutionProgress::Waiting);
+                    }
                     // CR 608.2c: only unfinished parent work delays this chain;
                     // an enclosing caller's prompt does not suspend this instruction.
                     if progress.is_pending() {
