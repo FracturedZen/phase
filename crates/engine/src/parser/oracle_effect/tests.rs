@@ -80312,14 +80312,15 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
     );
 }
 
-/// CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from that
-/// player's graveyard" (Wrexial, the Risen Deep) chooses its card in the
-/// graveyard of the player the trigger's event names, so the cast target
-/// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
-/// from that player's graveyard" (Sorcerous Squall, where "that player" is the
-/// spell's target opponent) is not bound this way, nor is the targeted
-/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
-/// mentions that player's graveyard only later.
+/// CR 400.3 + CR 115.1: in a triggered ability, "cast [target] … from that
+/// player's graveyard" (Wrexial, the Risen Deep; Whispersteel Dagger's
+/// untargeted "a creature spell") chooses its card in the graveyard of the
+/// player the trigger's event names, so the cast target carries
+/// `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell from that
+/// player's graveyard" (Sorcerous Squall, where "that player" is the spell's
+/// target opponent) is not bound this way, nor is the targeted sentence
+/// outside a trigger, nor a "from a graveyard" origin whose clause mentions
+/// that player's graveyard only later.
 #[test]
 fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     fn cast_target(parsed: &crate::parser::oracle::ParsedAbilities) -> TypedFilter {
@@ -80358,6 +80359,22 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     assert!(
         wrexial.properties.contains(&owned_by_triggering_player),
         "{wrexial:?}"
+    );
+    // #9334: Whispersteel Dagger — untargeted "cast a creature spell from that
+    // player's graveyard this turn" is the same trigger-event referent; the
+    // printed word "target" is not required for the Owned binding.
+    let whispersteel = cast_target(&parse_oracle_text(
+        "Equipped creature gets +2/+0.\nWhenever equipped creature deals combat damage to a \
+         player, you may cast a creature spell from that player's graveyard this turn, and you \
+         may spend mana as though it were mana of any color to cast that spell.\nEquip {3}",
+        "Whispersteel Dagger",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    ));
+    assert!(
+        whispersteel.properties.contains(&owned_by_triggering_player),
+        "{whispersteel:?}"
     );
     // The owner is read off the origin phrase itself: a triggered "from a
     // graveyard" stays unbound even when a later part of the same clause

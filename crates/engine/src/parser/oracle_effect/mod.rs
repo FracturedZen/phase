@@ -33696,18 +33696,23 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     });
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
-        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
+        // CR 400.3 + CR 115.1: in a triggered ability, "cast [target] … from
         // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
-        // Risen Deep) chooses the card as the trigger goes on the stack, in the
-        // graveyard of the player its event names — and a graveyard holds only
-        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
-        // `InZone { Graveyard }`, so the owner is bound here, read off the same
-        // origin phrase the zone came from; without it any graveyard's card is a
-        // legal target. (`relative_player_scope` does not name that player here:
-        // `relative_player_scope_for_condition` reads a "~ deals combat damage
-        // to a player" head as `TargetPlayer`.)
+        // Risen Deep; Whispersteel Dagger's untargeted "a creature spell")
+        // chooses the card in the graveyard of the player its event names —
+        // and a graveyard holds only its owner's cards. `scan_zone_phrase`
+        // reads the possessive as a bare `InZone { Graveyard }`, so the owner
+        // is bound here, read off the same origin phrase the zone came from;
+        // without it any graveyard's card is a legal choice. The printed word
+        // "target" is not required: Whispersteel grants an untargeted lingering
+        // permission into that same graveyard. (`relative_player_scope` does not
+        // name that player here: `relative_player_scope_for_condition` reads a
+        // "~ deals combat damage to a player" head as `TargetPlayer`.) Untargeted
+        // spell clauses with the same origin (Sorcerous Squall) are not triggers
+        // and stay unbound here — their "that player" is the spell's target
+        // opponent (#9334).
         if ctx.in_trigger
-            && cast_target_is_chosen_graveyard_card(rest, &filter)
+            && cast_filter_every_leaf_in_a_graveyard(&filter)
             && cast_origin_is_that_players_graveyard(rest)
         {
             add_cast_target_props(
@@ -33926,32 +33931,36 @@ fn cast_origin_is_that_players_graveyard(rest: &str) -> bool {
     })
 }
 
+/// Every typed leaf of `filter` carries `InZone { Graveyard }` (a type list
+/// such as "red instant or sorcery card" is an `Or` of leaves, each with the
+/// zone). Shared by the Owned-binding and the chosen-card driver signal.
+fn cast_filter_every_leaf_in_a_graveyard(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty() && filters.iter().all(cast_filter_every_leaf_in_a_graveyard)
+        }
+        _ => false,
+    }
+}
+
 /// CR 601.2c + CR 115.1: A "cast TARGET <card> from [a|your|…] graveyard"
 /// clause names one chosen card in a graveyard — the printed word "target"
 /// on the head and an `InZone { Graveyard }` property on every leaf of the
-/// filter (a type list such as "red instant or sorcery card" is an `Or` of
-/// leaves, each carrying the zone). Mirrors `cast_target_is_hand_origin` for
-/// the graveyard axis; the target-word test is the same
-/// `strip_cast_target_prefix` the Branch-2 producer uses.
+/// filter. Mirrors `cast_target_is_hand_origin` for the graveyard axis; the
+/// target-word test is the same `strip_cast_target_prefix` the Branch-2
+/// producer uses. Untargeted lingering permissions (Whispersteel Dagger) are
+/// graveyard-origin but not chosen-card casts, so they stay out of this signal.
 fn cast_target_is_chosen_graveyard_card(rest: &str, target: &TargetFilter) -> bool {
-    fn every_leaf_in_a_graveyard(filter: &TargetFilter) -> bool {
-        match filter {
-            TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
-                matches!(
-                    prop,
-                    FilterProp::InZone {
-                        zone: Zone::Graveyard
-                    }
-                )
-            }),
-            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-                !filters.is_empty() && filters.iter().all(every_leaf_in_a_graveyard)
-            }
-            _ => false,
-        }
-    }
     let names_a_target = strip_cast_target_prefix(rest).len() != rest.len();
-    names_a_target && every_leaf_in_a_graveyard(target)
+    names_a_target && cast_filter_every_leaf_in_a_graveyard(target)
 }
 
 fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstraint> {
