@@ -5753,17 +5753,21 @@ pub(super) fn apply_clause_continuation(
                 // their own from-among clause.
                 if !reorder_all {
                     if let Some(host) = dig_intervening_cost_host(env, defs, bound_index) {
-                        if let Some(consumer) = defs[host].sub_ability.as_deref_mut().filter(|c| {
-                            matches!(
-                                &*c.effect,
-                                Effect::Dig {
-                                    source: DigSource::PriorLook,
-                                    ..
-                                }
-                            )
-                        }) {
+                        // Preferred Selection (#10189) fuses PayCost under the
+                        // optional Sacrifice before the PriorLook Dig; patch
+                        // walks sub + else so both accept and decline Digs get
+                        // the PutRest rest_order / destination.
+                        if let Some(sub) = defs[host].sub_ability.as_deref_mut() {
                             patch_rest_destination_recursively(
-                                consumer,
+                                sub,
+                                destination,
+                                false,
+                                rest_order,
+                            );
+                        }
+                        if let Some(else_def) = defs[host].else_ability.as_deref_mut() {
+                            patch_rest_destination_recursively(
+                                else_def,
                                 destination,
                                 false,
                                 rest_order,
@@ -5880,8 +5884,11 @@ pub(super) fn apply_clause_continuation(
 
                         // 4. Choice Dig: reads private_look_ids, evaluates
                         // CMC filter with sacrifice snapshot in context.
-                        // CR 701.20e: "put the rest on the bottom" is
-                        // unconditional — route unchosen cards to Library.
+                        // CR 701.20e + Preferred Selection (#10189): keep the
+                        // printed rest destination. `None` means leave unkept
+                        // looked-at cards in place (DigChoice leave-on-top);
+                        // a later PutRest patches Some(Library) when the text
+                        // says "put the rest on the bottom" (Birthing Ritual).
                         let mut from_prior_look_dig = AbilityDefinition::new(
                             kind,
                             Effect::Dig {
@@ -5892,7 +5899,7 @@ pub(super) fn apply_clause_continuation(
                                 up_to: choice_up_to,
                                 filter: card_filter,
                                 destination: kept_dest,
-                                rest_destination: Some(rest_dest.unwrap_or(Zone::Library)),
+                                rest_destination: rest_dest,
                                 rest_split_top_count: None,
                                 rest_order: continuation_rest_order,
                                 reveal: false,
@@ -14978,6 +14985,97 @@ mod tests {
         );
     }
 
+    /// Preferred Selection (#10189): optional sacrifice+pay compound, accept Dig
+    /// leave-on-top (`rest_destination: None`), decline Dig choose-one-to-bottom
+    /// (Library/Library keep 1), Preserve rest order (no PutRest clause).
+    #[test]
+    fn preferred_selection_optional_compound_cost_and_decline_choose_one() {
+        let def = parse_effect_chain(
+            "look at the top two cards of your library. You may sacrifice this enchantment and              pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put              one of those cards on the bottom of your library.",
+            AbilityKind::Spell,
+        );
+
+        let mut node = Some(&def);
+        let mut sacrifice = None;
+        while let Some(d) = node {
+            if matches!(d.effect.as_ref(), Effect::Sacrifice { .. }) {
+                sacrifice = Some(d);
+                break;
+            }
+            node = d.sub_ability.as_deref();
+        }
+        let sacrifice = sacrifice.expect("chain must contain the optional Sacrifice");
+        assert!(sacrifice.optional, "Sacrifice must be optional");
+
+        // Sac → PayCost → Dig(hand, rest None)
+        let pay = sacrifice
+            .sub_ability
+            .as_deref()
+            .expect("Sacrifice must host PayCost");
+        assert!(
+            matches!(&*pay.effect, Effect::PayCost { .. }),
+            "optional cost fuses PayCost under Sacrifice, got {:?}",
+            pay.effect
+        );
+        let accept = pay
+            .sub_ability
+            .as_deref()
+            .expect("PayCost must host PriorLook Dig");
+        let Effect::Dig {
+            destination,
+            keep_count,
+            rest_destination,
+            rest_order,
+            source,
+            ..
+        } = accept.effect.as_ref()
+        else {
+            panic!("expected PriorLook Dig under PayCost, got {:?}", accept.effect);
+        };
+        assert_eq!(*source, DigSource::PriorLook);
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert_eq!(*keep_count, Some(1));
+        assert_eq!(
+            *rest_destination,
+            None,
+            "accept Dig leaves unkept on top (rest None)"
+        );
+        assert_eq!(*rest_order, DigRestOrder::Preserve);
+        assert_eq!(
+            accept.condition,
+            Some(AbilityCondition::effect_performed()),
+            "accept Dig gated on OptionalEffectPerformed"
+        );
+
+        // Decline on Sacrifice.else: choose one to bottom.
+        let decline = sacrifice
+            .else_ability
+            .as_deref()
+            .expect("Sacrifice must carry decline Dig on else_ability");
+        let Effect::Dig {
+            destination: d_dest,
+            keep_count: d_keep,
+            rest_destination: d_rest,
+            rest_order: d_order,
+            source: d_src,
+            ..
+        } = decline.effect.as_ref()
+        else {
+            panic!("decline else must be Dig, got {:?}", decline.effect);
+        };
+        assert_eq!(*d_src, DigSource::PriorLook);
+        assert_eq!(*d_keep, Some(1), "decline chooses one to bottom");
+        assert_eq!(*d_dest, Some(Zone::Library));
+        assert_eq!(*d_rest, Some(Zone::Library));
+        assert_eq!(*d_order, DigRestOrder::Preserve);
+
+        // No stray Not(OEP) PutAt under the accept path.
+        assert!(
+            accept.sub_ability.is_none(),
+            "decline PutAt must be absorbed, not nested under accept Dig"
+        );
+    }
+
     /// Regression guard for the DigFromAmong intervening-cost restructure: with
     /// no trailing "put the rest … in a random order" clause (Preferred
     /// Selection's effect text), the PriorLook consumers keep the restructure's
@@ -15028,6 +15126,9 @@ mod tests {
         let mut prior_look_digs = Vec::new();
         if let Some(sub) = sacrifice.sub_ability.as_deref() {
             collect_prior_look_digs(sub, &mut prior_look_digs);
+        }
+        if let Some(else_def) = sacrifice.else_ability.as_deref() {
+            collect_prior_look_digs(else_def, &mut prior_look_digs);
         }
         assert!(
             !prior_look_digs.is_empty(),

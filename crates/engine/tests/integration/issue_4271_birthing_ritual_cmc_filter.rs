@@ -31,7 +31,7 @@ use engine::types::ability::{DigRestOrder, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -629,14 +629,13 @@ fn advance_to_upkeep_of(runner: &mut GameRunner, player: PlayerId) {
     panic!("did not reach {player:?}'s upkeep");
 }
 
-/// CR 701.20e + CR 701.20a (#7163 R8): the look window is kept only while a
-/// parked continuation still holds a PriorLook reader. Answering a PriorLook
-/// `DigChoice` whose parked tail reads nothing from the look ends the window.
+/// CR 701.20e + CR 701.20a (#7163 R8) + Preferred Selection (#10189): answering
+/// a PriorLook `DigChoice` whose parked tail (if any) no longer holds a
+/// PriorLook reader ends the private look window. After #10189 the optional
+/// sacrifice+pay is fused before Dig, so DigChoice is the leaf — look still
+/// clears once the choice is answered.
 #[test]
 fn private_look_ends_when_no_parked_prior_look_reader_remains() {
-    // Depends on Preferred Selection's current misparse: the parked
-    // `PayCost → PutAtLibraryPosition` tail exists only because of it; when that
-    // misparse is fixed, move this row to a durable fixture.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_enchantment_from_oracle(P0, "Preferred Selection", PREFERRED_SELECTION_ORACLE);
@@ -647,6 +646,25 @@ fn private_look_ends_when_no_parked_prior_look_reader_remains() {
     scenario.with_library_top(
         P0,
         &["Top Card 0", "Top Card 1", "Deep 0", "Deep 1", "Deep 2"],
+    );
+    // Mana for the fused PayCost ({2}{G}{G}).
+    scenario.with_mana_pool(
+        P0,
+        {
+            let mut mana = Vec::new();
+            for _ in 0..2 {
+                mana.push(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+            }
+            for _ in 0..2 {
+                mana.push(ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                ));
+            }
+            mana
+        },
     );
     let mut runner = scenario.build();
     advance_to_upkeep_of(&mut runner, P0);
@@ -666,6 +684,29 @@ fn private_look_ends_when_no_parked_prior_look_reader_remains() {
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accept the optional cost");
 
+    // Pay the fused mana cost if prompted (pool already holds {2}{G}{G}).
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { .. } => break,
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("finalize fused mana payment");
+            }
+            WaitingFor::PayCost { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("advance fused PayCost");
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass during payment");
+            }
+            other => panic!("unexpected prompt after accepting optional: {other:?}"),
+        }
+    }
+
     let WaitingFor::DigChoice { cards, .. } = runner.state().waiting_for.clone() else {
         panic!(
             "reach guard: PriorLook DigChoice; got {:?}",
@@ -673,10 +714,6 @@ fn private_look_ends_when_no_parked_prior_look_reader_remains() {
         );
     };
     assert_eq!(runner.state().private_look_ids.len(), 2);
-    assert!(
-        runner.state().active_ability_continuation().is_some(),
-        "reach guard: a continuation is parked behind the DigChoice"
-    );
 
     runner
         .act(GameAction::SelectCards {

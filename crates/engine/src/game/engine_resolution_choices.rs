@@ -4674,12 +4674,15 @@ pub(super) fn handle_resolution_choice(
                         delivery_stage: crate::types::game_state::DigDeliveryStage::Kept,
                         player,
                         source_id: dig_source_id,
-                        rest_cards: if defer_rest_routing {
+                        // Preferred Selection (#10189): `rest_destination: None`
+                        // means leave unkept looked-at cards in the library
+                        // (no rest routing). Empty rest_cards skips the mover.
+                        rest_cards: if defer_rest_routing || rest_destination.is_none() {
                             Vec::new()
                         } else {
                             unkept
                         },
-                        rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                        rest_destination: rest_destination.unwrap_or(Zone::Library),
                         rest_order,
                         // CR 401.2 + CR 701.20e: carry the Telling Time-class
                         // remainder split onto the kept delivery. The split

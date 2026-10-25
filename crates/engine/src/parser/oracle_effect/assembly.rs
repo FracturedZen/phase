@@ -27,10 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, DigSource, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, LibraryPosition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    RepeatContinuation, ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition,
+    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -4260,6 +4260,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 chain = prev;
                 continue;
             }
+            // Preferred Selection (#10189): "you may sacrifice … and pay …"
+            // emits Sacrifice then PayCost as siblings. DigFromAmong nests the
+            // PriorLook Dig under Sacrifice first; fuse PayCost between them so
+            // the optional cost is sacrifice+pay and decline can stay on
+            // Sacrifice.else_ability (optional_decline_branch prefers else).
+            if fuse_intervening_paycost_under_optional_sacrifice(&mut prev, &mut chain) {
+                chain = prev;
+                continue;
+            }
+            // Preferred Selection (#10189): "If you don't, put one … on the
+            // bottom" arrives as PutAtLibraryPosition{Not(OEP)}. Absorb it into
+            // the PriorLook decline Dig (choose one to bottom) instead of
+            // nesting a never-firing Not(OEP) under the accept Dig.
+            if absorb_decline_put_one_on_bottom(&mut prev, &chain) {
+                chain = prev;
+                continue;
+            }
             // CR 608.2c: an independent sentence after an if/otherwise choice
             // resolves after either branch (for example, Wedding Announcement's
             // three-counter transform also follows its Human-token branch).
@@ -4661,6 +4678,147 @@ fn merge_search_tail_into_additional_cost_else(
                 append_to_deepest_sub_ability(base_chain, chain.sub_ability.clone());
                 return true;
             }
+        }
+    }
+    false
+}
+
+/// Preferred Selection (#10189): fuse a trailing `PayCost` under an optional
+/// `Sacrifice` that already hosts a PriorLook Dig from DigFromAmong.
+///
+/// Moves Dig's `else_ability` onto the Sacrifice so
+/// `optional_decline_branch` finds the decline without walking PayCost.
+fn is_decline_put_one_on_bottom(def: &AbilityDefinition) -> bool {
+    let Effect::PutAtLibraryPosition {
+        target,
+        count,
+        position: LibraryPosition::Bottom,
+    } = &*def.effect
+    else {
+        return false;
+    };
+    matches!(count, QuantityExpr::Fixed { value: 1 })
+        && matches!(target, TargetFilter::TrackedSet { .. })
+        && matches!(
+            def.condition.as_ref(),
+            Some(AbilityCondition::Not { condition })
+                if condition.is_optional_effect_performed()
+        )
+}
+
+fn fuse_intervening_paycost_under_optional_sacrifice(
+    sacrifice: &mut AbilityDefinition,
+    pay: &mut AbilityDefinition,
+) -> bool {
+    if !sacrifice.optional {
+        return false;
+    }
+    if !matches!(&*sacrifice.effect, Effect::Sacrifice { .. }) {
+        return false;
+    }
+    if !matches!(&*pay.effect, Effect::PayCost { .. }) {
+        return false;
+    }
+    if pay.else_ability.is_some() {
+        return false;
+    }
+    // Reverse chaining may have already nested the decline PutAt under PayCost
+    // (PutAt is popped first). Strip it and upgrade the PriorLook decline Dig.
+    let mut upgrade_decline = false;
+    if let Some(sub) = pay.sub_ability.as_deref() {
+        if is_decline_put_one_on_bottom(sub) && sub.sub_ability.is_none() {
+            pay.sub_ability = None;
+            upgrade_decline = true;
+        } else {
+            return false;
+        }
+    }
+    let Some(dig) = sacrifice.sub_ability.as_mut() else {
+        return false;
+    };
+    if !matches!(
+        &*dig.effect,
+        Effect::Dig {
+            source: DigSource::PriorLook,
+            ..
+        }
+    ) {
+        return false;
+    }
+    // Prefer decline on Sacrifice (optional_decline_branch checks else first).
+    if sacrifice.else_ability.is_none() {
+        sacrifice.else_ability = dig.else_ability.take();
+    }
+    // Sac → PayCost → Dig(hand)
+    pay.sub_ability = sacrifice.sub_ability.take();
+    sacrifice.sub_ability = Some(Box::new(pay.clone()));
+    if upgrade_decline {
+        let _ = upgrade_prior_look_decline_choose_one_bottom(sacrifice);
+    }
+    true
+}
+
+/// Preferred Selection (#10189): replace keep-0 PriorLook decline with
+/// "choose one to put on the bottom" (keep 1 on top / rest bottom) and drop
+/// the redundant Not(OEP) PutAtLibraryPosition sibling.
+fn absorb_decline_put_one_on_bottom(
+    host: &mut AbilityDefinition,
+    put_at: &AbilityDefinition,
+) -> bool {
+    if !is_decline_put_one_on_bottom(put_at) {
+        return false;
+    }
+    upgrade_prior_look_decline_choose_one_bottom(host)
+}
+
+fn upgrade_prior_look_decline_choose_one_bottom(def: &mut AbilityDefinition) -> bool {
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        if let Effect::Dig {
+            source: DigSource::PriorLook,
+            keep_count,
+            destination,
+            rest_destination,
+            ..
+        } = &mut *else_def.effect
+        {
+            if *keep_count == Some(0) {
+                *keep_count = Some(1);
+                *destination = Some(Zone::Library);
+                *rest_destination = Some(Zone::Library);
+                return true;
+            }
+        }
+        if upgrade_prior_look_decline_choose_one_bottom(else_def) {
+            return true;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        // Dig under Sac may still hold else (Birthing Ritual / pre-fuse).
+        if let Effect::Dig {
+            source: DigSource::PriorLook,
+            ..
+        } = &*sub.effect
+        {
+            if let Some(else_def) = sub.else_ability.as_deref_mut() {
+                if let Effect::Dig {
+                    source: DigSource::PriorLook,
+                    keep_count,
+                    destination,
+                    rest_destination,
+                    ..
+                } = &mut *else_def.effect
+                {
+                    if *keep_count == Some(0) {
+                        *keep_count = Some(1);
+                        *destination = Some(Zone::Library);
+                        *rest_destination = Some(Zone::Library);
+                        return true;
+                    }
+                }
+            }
+        }
+        if upgrade_prior_look_decline_choose_one_bottom(sub) {
+            return true;
         }
     }
     false
