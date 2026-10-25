@@ -26376,6 +26376,64 @@ fn rite_of_replication_kicker_creates_five_copies() {
 }
 
 #[test]
+fn call_up_emrakul_kicked_instead_replaces_token_not_grant() {
+    // CR 608.2c (#10227): "If … was kicked, instead create a token that's a
+    // copy of …" must Cow-swap the Scion create, not the "It has …" grant that
+    // follows it. The override hangs under Token with the grant as else_ability.
+    let ability = parse_effect_chain(
+        "Exile target nonland permanent. Create a 1/1 colorless Eldrazi Scion creature token.          It has \"Sacrifice this creature: Add {C}.\" If this spell was kicked, instead create          a token that's a copy of Emrakul, the Promised End.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*ability.effect, Effect::ChangeZone { .. }),
+        "exile is the unconditional head, got {:?}",
+        ability.effect
+    );
+    let token = ability
+        .sub_ability
+        .as_ref()
+        .expect("exile continues into the token create");
+    assert!(
+        matches!(&*token.effect, Effect::Token { .. }),
+        "Scion create is the swap target, got {:?}",
+        token.effect
+    );
+    let instead = token
+        .sub_ability
+        .as_ref()
+        .expect("kicked create must be Token's immediate sub");
+    assert_eq!(
+        instead.condition,
+        Some(AbilityCondition::AdditionalCostPaidInstead),
+        "kicker override must use AdditionalCostPaidInstead"
+    );
+    assert!(
+        matches!(&*instead.effect, Effect::CopyTokenOf { .. }),
+        "override body is CopyTokenOf Emrakul, got {:?}",
+        instead.effect
+    );
+    let grant = instead
+        .else_ability
+        .as_ref()
+        .expect("It has grant runs only when not kicked");
+    assert!(
+        matches!(
+            &*grant.effect,
+            Effect::GenericEffect {
+                target: Some(TargetFilter::LastCreated),
+                ..
+            }
+        ),
+        "else_ability keeps the LastCreated grant, got {:?}",
+        grant.effect
+    );
+    assert!(
+        grant.sub_ability.is_none(),
+        "grant must not still own the instead node"
+    );
+}
+
+#[test]
 fn general_condition_leading_instead_strips_prefix() {
     // CR 608.2c: Ability-word / general condition with leading "instead"
     // (cross-line pattern like Traverse the Ulvenwald's delirium).

@@ -4437,6 +4437,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     rewrite_that_type_mana_instead(&mut result);
 
     fold_token_it_has_grants_into_token_statics(&mut result);
+    // CR 608.2c (#10227 Call Up Emrakul to Help): a kicked "instead create …"
+    // that currently hangs under an "It has …" LastCreated grant must replace
+    // the token creation itself. GrantTrigger "It has" grants do not fold into
+    // token statics, so the override would otherwise Cow-swap the grant and the
+    // Scion would still be created. Reattach onto the Token / CopyTokenOf with
+    // the grant as else_ability (runs only when the kicker was not paid).
+    reattach_create_instead_past_last_created_grant(&mut result);
     fold_copy_spell_gains_haste_and_quoted_grant(&mut result);
     nest_whenever_this_turn_token_cleanup_delayed_trigger(&mut result);
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
@@ -4612,6 +4619,70 @@ pub(super) fn bind_repeat_directives(root: &mut AbilityDefinition) -> bool {
             None => return survives,
         }
     }
+}
+
+
+/// CR 608.2c: kicked "instead create …" after an "It has …" LastCreated grant.
+///
+/// Call Up Emrakul to Help (#10227) lowers to
+/// `ChangeZone > Token > GenericEffect(LastCreated) > CopyTokenOf[AdditionalCostPaidInstead]`.
+/// The runtime Cow-swap replaces only the immediate parent of the override, so
+/// the grant is swapped away while the Scion is still created. Promote the
+/// override to hang directly under the Token / CopyTokenOf, parking the grant
+/// in `else_ability` so it runs only when the kicker was not paid (same shape
+/// ReplaceMeaning::Instead builds for multi-clause bases).
+fn reattach_create_instead_past_last_created_grant(node: &mut AbilityDefinition) {
+    if let Some(sub) = node.sub_ability.as_mut() {
+        reattach_create_instead_past_last_created_grant(sub);
+    }
+    if let Some(els) = node.else_ability.as_mut() {
+        reattach_create_instead_past_last_created_grant(els);
+    }
+
+    if !is_token_create_effect(node.effect.as_ref()) {
+        return;
+    }
+    let Some(grant) = node.sub_ability.as_ref() else {
+        return;
+    };
+    let is_last_created_grant = matches!(
+        grant.effect.as_ref(),
+        Effect::GenericEffect {
+            target: Some(TargetFilter::LastCreated),
+            ..
+        }
+    );
+    if !is_last_created_grant {
+        return;
+    }
+    let Some(instead) = grant.sub_ability.as_ref() else {
+        return;
+    };
+    if !instead
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_instead_override)
+    {
+        return;
+    }
+    if !is_token_create_effect(instead.effect.as_ref()) {
+        return;
+    }
+
+    let mut grant = *node.sub_ability.take().expect("grant checked above");
+    let mut instead = *grant.sub_ability.take().expect("instead checked above");
+    if instead.else_ability.is_none() {
+        instead.else_ability = Some(Box::new(grant));
+    } else {
+        let existing_else = instead.else_ability.take().expect("checked above");
+        append_to_deepest_sub_ability(&mut grant, Some(Box::new(existing_else)));
+        instead.else_ability = Some(Box::new(grant));
+    }
+    node.sub_ability = Some(Box::new(instead));
+}
+
+fn is_token_create_effect(effect: &Effect) -> bool {
+    matches!(effect, Effect::Token { .. } | Effect::CopyTokenOf { .. })
 }
 
 // ===========================================================================
