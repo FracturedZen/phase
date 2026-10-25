@@ -31630,6 +31630,77 @@ fn stensia_generic_damage_trigger_constrained() {
     assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
 }
 
+/// Issue #9624 — Danny Pink class: self-`CounterAdded` "for the first time each
+/// turn" is a per-object event qualifier (`FirstTimeObjectCountersAddedThisTurn`),
+/// not a trigger-definition `OncePerTurn` fire count. Mid-turn grants must not
+/// fire on a later placement when the object already received counters earlier.
+#[test]
+fn danny_pink_self_counter_first_time_each_turn_is_object_condition() {
+    let def = parse_trigger_line(
+        "Whenever one or more counters are put on this creature for the first time each turn, draw a card.",
+        "Danny Pink",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterAdded);
+    assert!(def.batched, "kind-agnostic one-or-more counters is batched");
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn),
+        "event-position first-time must lower to the per-object condition, got {:?}",
+        def.condition
+    );
+    assert_eq!(
+        def.constraint, None,
+        "must not also install OncePerTurn; got {:?}",
+        def.constraint
+    );
+}
+
+/// Non-self counter watchers keep the source-level OncePerTurn reading of
+/// "for the first time each turn" (sibling of Stensia's damage form).
+#[test]
+fn non_self_counter_first_time_each_turn_stays_once_per_turn() {
+    let def = parse_trigger_line(
+        "Whenever one or more counters are put on a creature you control for the first time each turn, draw a card.",
+        "Synthetic Counter Watcher",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterAdded);
+    assert_ne!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_ne!(
+        def.condition,
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn),
+    );
+}
+
+/// Danny Pink's granted quote must carry the same object-condition shape.
+#[test]
+fn danny_pink_granted_trigger_uses_object_first_time_condition() {
+    let parsed = parse_oracle_text(
+        "Mentor\nCreatures you control have \"Whenever one or more counters are put on this creature for the first time each turn, draw a card.\"",
+        "Danny Pink",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let grant = parsed
+        .statics
+        .iter()
+        .flat_map(|s| s.modifications.iter())
+        .find_map(|m| match m {
+            ContinuousModification::GrantTrigger { trigger } => Some(trigger.as_ref()),
+            _ => None,
+        })
+        .expect("Danny Pink must grant a trigger");
+    assert_eq!(grant.mode, TriggerMode::CounterAdded);
+    assert_eq!(grant.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        grant.condition,
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn),
+    );
+    assert_eq!(grant.constraint, None);
+}
+
 // SOC Tier 2.6: "Whenever you create one or more creature tokens" —
 // batched token-creation trigger with type + controller filters.
 #[test]

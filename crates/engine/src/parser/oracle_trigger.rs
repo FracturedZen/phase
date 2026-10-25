@@ -2717,7 +2717,31 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
         }
     }
 
-    def.constraint = lowered_trigger_constraint(modifiers, def.constraint.take());
+    // CR 122.1 + CR 603.2h + CR 603.4: "counters are put on <this object> for
+    // the first time each turn" qualifies the EVENT on the triggering object
+    // (Danny Pink #9624), not the trigger definition's fire count. Mapping it
+    // to `OncePerTurn` fires on a later placement after the ability is granted
+    // mid-turn — wrong when the object already received counters earlier.
+    // Route to the same per-object condition the intervening-if form already
+    // uses (`FirstTimeObjectCountersAddedThisTurn`, Stalwart Successor). Scoped
+    // to `CounterAdded` + `SelfRef` so source-level "for the first time each
+    // turn" on other modes (and on non-self counter watchers) keeps OncePerTurn.
+    let mut first_time_limit = modifiers.first_time_limit;
+    if def.mode == TriggerMode::CounterAdded
+        && matches!(first_time_limit, Some(FirstTimeLimit::EachTurn))
+        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+    {
+        def.condition = Some(and_trigger_conditions(
+            def.condition.take(),
+            TriggerCondition::FirstTimeObjectCountersAddedThisTurn,
+        ));
+        first_time_limit = None;
+    }
+    def.constraint = lowered_trigger_constraint_with_limit(
+        modifiers,
+        def.constraint.take(),
+        first_time_limit,
+    );
     constrain_triggering_spell_with_nth_filter(&mut def);
 
     // Preserve original oracle text for coverage/UI annotation.
@@ -4302,13 +4326,29 @@ fn lowered_trigger_constraint(
     modifiers: &TriggerModifiers,
     condition_constraint: Option<TriggerConstraint>,
 ) -> Option<TriggerConstraint> {
+    lowered_trigger_constraint_with_limit(
+        modifiers,
+        condition_constraint,
+        modifiers.first_time_limit,
+    )
+}
+
+/// Same authority as [`lowered_trigger_constraint`], but the caller may suppress
+/// or rewrite the `"for the first time ..."` event-limit arm (Danny Pink #9624
+/// folds a self-`CounterAdded` limit into
+/// `FirstTimeObjectCountersAddedThisTurn` instead of `OncePerTurn`).
+fn lowered_trigger_constraint_with_limit(
+    modifiers: &TriggerModifiers,
+    condition_constraint: Option<TriggerConstraint>,
+    first_time_limit: Option<FirstTimeLimit>,
+) -> Option<TriggerConstraint> {
     modifiers
         .constraint
         .clone()
         .or(condition_constraint)
         .or_else(|| {
             // CR 603.2: Apply trigger-event frequency limits as a fallback.
-            modifiers.first_time_limit.map(|limit| match limit {
+            first_time_limit.map(|limit| match limit {
                 FirstTimeLimit::EachTurn => TriggerConstraint::OncePerTurn,
                 FirstTimeLimit::EachOpponentTurn => TriggerConstraint::OncePerOpponentPerTurn,
             })
