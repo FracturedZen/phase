@@ -17761,6 +17761,56 @@ fn parse_for_each_one_life_changed_full_cards() {
     );
 }
 
+/// CR 608.2c + CR 119.3 (#7416): Blood Tyrant's upkeep trigger loses 1 life from
+/// each player, then puts +1/+1 counters equal to the life lost THIS WAY. That
+/// look-back is `PreviousEffectAmount` (summed LifeChanged from the preceding
+/// LoseLife), not `TrackedSetSize` — life loss publishes no ObjectIds, so the
+/// object-count axis always resolved 0.
+#[test]
+fn parse_blood_tyrant_life_lost_this_way_is_previous_effect_amount() {
+    use crate::types::ability::{
+        AggregateFunction, DamageChannel, Effect, QuantityExpr, QuantityRef,
+    };
+
+    let r = parse(
+        "Flying, trample\nAt the beginning of your upkeep, each player loses 1 life.          Put a +1/+1 counter on this creature for each 1 life lost this way.\n         Whenever a player loses the game, put five +1/+1 counters on this creature.",
+        "Blood Tyrant",
+        &[],
+        &["Creature"],
+        &[],
+    );
+
+    let put = r
+        .triggers
+        .iter()
+        .filter_map(|t| t.execute.as_ref())
+        .find_map(|exec| {
+            let mut cur = Some(exec.as_ref());
+            while let Some(def) = cur {
+                if matches!(def.effect.as_ref(), Effect::PutCounter { .. }) {
+                    return Some(def.effect.as_ref());
+                }
+                cur = def.sub_ability.as_deref();
+            }
+            None
+        })
+        .expect("Blood Tyrant upkeep must chain a PutCounter");
+
+    let Effect::PutCounter { count, .. } = put else {
+        unreachable!()
+    };
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        },
+        "Blood Tyrant PutCounter.count must be PreviousEffectAmount, not TrackedSetSize"
+    );
+}
+
 #[test]
 fn parse_harmonize_wild_ride() {
     // Harmonize with lower cost

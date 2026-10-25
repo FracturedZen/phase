@@ -3645,6 +3645,20 @@ fn parse_for_each_clause_with_they_controller(
                 aggregate: AggregateFunction::Sum,
             });
         }
+        // CR 608.2c + CR 119.3: "1 life lost this way" / "the life lost this way"
+        // / "damage dealt this way" — numeric amount from the preceding chain
+        // step, NOT an object count. Blood Tyrant (#7416) stamps
+        // `last_effect_amount` from summed LifeChanged events under
+        // `player_scope: All`; falling through to `TrackedSetSize` always
+        // resolved 0 because life loss publishes no ObjectIds. Same
+        // combinator `parse_event_context_quantity` already uses for the
+        // equal-to/"the … this way" spelling.
+        if let Ok((_, channel)) = parse_previous_effect_amount_this_way(&lower) {
+            return Some(QuantityRef::PreviousEffectAmount {
+                channel,
+                aggregate: AggregateFunction::Sum,
+            });
+        }
         // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
         // destroyed this way" — tracked set members matching the filter prefix.
         // Use terminated(take_until(suffix), tag(suffix)) to split the clause
@@ -4834,6 +4848,50 @@ mod tests {
                 panic!("expected PlayerCount PlayerAttribute land-entry filter, got {other:?}")
             }
         }
+    }
+
+    /// CR 608.2c + CR 119.3 (#7416): Blood Tyrant's "for each 1 life lost this
+    /// way" is a life-amount look-back at the preceding `LoseLife` step, not an
+    /// object-set count. `TrackedSetSize` always read 0 because life loss emits
+    /// no ObjectIds. Same channel as "the life lost this way" /
+    /// counters-removed-this-way.
+    #[test]
+    fn for_each_life_lost_this_way_is_previous_effect_amount() {
+        let expected = QuantityRef::PreviousEffectAmount {
+            channel: crate::types::ability::DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
+        };
+        for phrase in [
+            "1 life lost this way",
+            "one life lost this way",
+            "life lost this way",
+            "the life lost this way",
+            "1 life paid this way",
+            "the amount of life paid this way",
+            "damage dealt this way",
+            "the damage dealt this way",
+            "excess damage dealt this way",
+        ] {
+            let qty = parse_for_each_clause(phrase)
+                .unwrap_or_else(|| panic!("{phrase:?} must parse as PreviousEffectAmount"));
+            if phrase.contains("excess") {
+                assert_eq!(
+                    qty,
+                    QuantityRef::PreviousEffectAmount {
+                        channel: crate::types::ability::DamageChannel::Excess,
+                        aggregate: AggregateFunction::Sum,
+                    },
+                    "{phrase:?}"
+                );
+            } else {
+                assert_eq!(qty, expected, "{phrase:?}");
+            }
+        }
+        // Reach-guard: object-set "this way" clauses stay on TrackedSetSize.
+        assert_eq!(
+            parse_for_each_clause("card put into a graveyard this way"),
+            Some(QuantityRef::TrackedSetSize)
+        );
     }
 
     /// Every counter-removed for-each phrase lowers to the same

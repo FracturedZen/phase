@@ -3824,8 +3824,8 @@ fn parse_for_each_one_life_changed_this_turn(input: &str) -> OracleResult<'_, Qu
 /// The leading "1 "/"one " disambiguates from the duration class "life you
 /// gained/lost this turn" (`LifeGainedThisTurn`/`LifeLostThisTurn`), whose
 /// "for each 1 life ... this turn" form `parse_for_each_one_life_changed_this_turn`
-/// claims first, and from Blood Tyrant's "1 life lost or gained this way" (no
-/// "you"; handled by the `TrackedSetSize` "this way" block). The subject is
+/// claims first, and from Blood Tyrant's "1 life lost this way" (no "you";
+/// handled by the for-each `PreviousEffectAmount` "this way" arm, #7416). The subject is
 /// the triggering player either way: "you" on the controller's own trigger,
 /// the anaphoric "they" on a trigger about another player ("that player loses
 /// 2 life for each 1 life they gained" — False Cure).
