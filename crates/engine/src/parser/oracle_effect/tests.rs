@@ -94303,3 +94303,83 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         assert!(unimplemented, "{text}: {def:?}");
     }
 }
+
+/// CR 115.1c + CR 115.10a + CR 608.2d + CR 701.17 (issue #9847): Teferi,
+/// Temporal Pilgrim −12 — "Target opponent chooses a permanent they control and
+/// returns it to its owner's hand." The ability targets ONLY the opponent; the
+/// permanent is that opponent's untargeted resolution pick (Bounce AtResolution
+/// + ScopedPlayer), not a caster-announced Permanent{You} stack target from the
+/// degraded `is_choose_as_targeting` fallback.
+#[test]
+fn teferi_temporal_pilgrim_opponent_chooses_permanent_bounce_9847() {
+    let def = parse_effect_chain(
+        "Target opponent chooses a permanent they control and returns it to its owner's hand.",
+        AbilityKind::Activated,
+    );
+    let Effect::TargetOnly {
+        target: player_target,
+    } = &*def.effect
+    else {
+        panic!("expected TargetOnly opponent wrapper, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            player_target,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }) | TargetFilter::Opponent
+        ),
+        "wrapper must announce the opponent, got {player_target:?}"
+    );
+    let sub = def
+        .sub_ability
+        .as_ref()
+        .expect("bounce must nest under the opponent TargetOnly");
+    assert_eq!(
+        sub.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "permanent is chosen at resolution by the targeted opponent"
+    );
+    let Effect::Bounce {
+        target,
+        selection,
+        ..
+    } = sub.effect.as_ref()
+    else {
+        panic!("expected Bounce in sub-ability, got {:?}", sub.effect);
+    };
+    assert!(
+        matches!(selection, BounceSelection::AtResolution),
+        "no 'target' keyword → AtResolution; got {selection:?}"
+    );
+    let TargetFilter::Typed(typed) = target else {
+        panic!("expected typed permanent filter, got {target:?}");
+    };
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::ScopedPlayer),
+        "must rebind seed → ScopedPlayer so the targeted opponent chooses — got {typed:?}"
+    );
+}
+
+/// CR 115.1 + CR 109.5 preservation: Sothera's each-opponent exile edict still
+/// reparses to `you control` under the player_scope driver (not "they control").
+#[test]
+fn sothera_each_opponent_exile_edict_preserved_after_9847() {
+    use crate::types::ability::PlayerFilter;
+
+    let def = parse_effect_chain(
+        "Each opponent chooses a creature they control and exiles it.",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+}

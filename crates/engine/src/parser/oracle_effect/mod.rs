@@ -28771,6 +28771,11 @@ fn lower_subject_predicate_ast_body(
                     Effect::ChangeZone { .. }
                         | Effect::ChangeZoneAll { .. }
                         | Effect::PutAtLibraryPosition { .. }
+                        // CR 701.17 + CR 115.10a (issue #9847): bounce edict
+                        // under a declared player subject (Teferi −12 —
+                        // "returns it to its owner's hand") is the same
+                        // TargetOnly + Resolution-pick class as ChangeZone.
+                        | Effect::Bounce { .. }
                 ) {
                     // CR 115.1c + CR 115.10a + CR 608.2d (issues #6505 / #6446):
                     // reuse `change_zone_target_choice_timing` so battlefield
@@ -28803,6 +28808,12 @@ fn lower_subject_predicate_ast_body(
                         Effect::PutAtLibraryPosition { .. } => {
                             !nom_primitives::scan_contains(&pred_lower, "target ")
                         }
+                        // CR 115.1 + Whitemane Lion + issue #9847: Bounce already
+                        // carries AtResolution when the filter has no "target"
+                        // keyword (controller-scoped "a permanent they control").
+                        Effect::Bounce { selection, .. } => {
+                            matches!(selection, BounceSelection::AtResolution)
+                        }
                         _ => false,
                     };
                     // CR 115.1c / CR 115.10a / CR 608.2d (issue #6446): Relic-class
@@ -28830,7 +28841,8 @@ fn lower_subject_predicate_ast_body(
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. }
-                            | Effect::PutAtLibraryPosition { target, .. } => {
+                            | Effect::PutAtLibraryPosition { target, .. }
+                            | Effect::Bounce { target, .. } => {
                                 rebind_controller_scope(
                                     target,
                                     seed.clone(),
@@ -28843,7 +28855,8 @@ fn lower_subject_predicate_ast_body(
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. }
-                            | Effect::PutAtLibraryPosition { target, .. } => {
+                            | Effect::PutAtLibraryPosition { target, .. }
+                            | Effect::Bounce { target, .. } => {
                                 rebind_owned_scope(target, ControllerRef::TargetPlayer);
                             }
                             _ => {}

@@ -4533,20 +4533,33 @@ fn parse_choose_discard_rest_of_hand(text: &str, lower: &str) -> Option<Targeted
 /// CR 701.13a + CR 109.5 + CR 608.2c: "choose a[n] <type> they control and
 /// [verb]s it" — the per-actor edict where the chooser both selects and acts on
 /// one of their own permanents (Sothera, the Supervoid: "each opponent chooses a
-/// creature they control and exiles it"). The "each opponent" subject and its
+/// creature they control and exiles it"; Teferi, Temporal Pilgrim −12: "Target
+/// opponent chooses a permanent they control and returns it to its owner's
+/// hand" — issue #9847). The "each opponent" / "Target opponent" subject and its
 /// leading verb are already stripped / de-inflected to "choose" by the
-/// player-scope layer, so this operates on the post-"choose " body; the inner
-/// verb keeps its third-person "-s" inflection ("exiles it").
+/// player-scope / subject-predicate layer, so this operates on the post-"choose "
+/// body; the inner verb keeps its third-person "-s" inflection ("exiles it" /
+/// "returns it …").
 ///
-/// Reparses to the controller-scoped edict ("exile a creature you control",
-/// controller `You`). `You` is CORRECT at parse time: the each-actor driver
-/// rebinds `ability.controller` to each iterated player at runtime
-/// (`set_controller_recursive`), and `FilterContext::from_ability` resolves the
-/// reparsed filter's `ControllerRef::You` to the ITERATING actor — so each actor
-/// exiles from their OWN permanents (CR 109.5). The verb axis is a single
-/// `alt()`, covering the edict class (exile / sacrifice / destroy) without
-/// proliferating recognizers.
-fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperativeAst> {
+/// Reparses to a controller-scoped edict. Controller phrase is context-sensitive:
+/// - Under the each-actor `player_scope` driver (Sothera): `"you control"`.
+///   `You` is CORRECT at parse time — the driver rebinds `ability.controller` to
+///   each iterated player at runtime (`set_controller_recursive`), and
+///   `FilterContext::from_ability` resolves `ControllerRef::You` to the ITERATING
+///   actor (CR 109.5).
+/// - Under a stack-declared player subject (`prior_player_declaration`, Teferi
+///   −12 / Strategic Betrayal class): `"they control"`. The subject-predicate
+///   TargetOnly wrap then rebinds the seed → `ScopedPlayer` so the targeted
+///   player chooses at resolution (CR 115.10a + CR 608.2d). An explicit
+///   `"you control"` would never match the seed and would leave the caster as
+///   the chooser — the #9847 misparse.
+///
+/// The verb axis is a single `alt()`, covering the edict class (exile /
+/// sacrifice / destroy / return-to-hand) without proliferating recognizers.
+fn try_parse_choose_and_verb_it_edict(
+    rest_lower: &str,
+    ctx: &ParseContext,
+) -> Option<ChooseImperativeAst> {
     let they_control_and = || {
         (
             tag::<_, _, OracleError<'_>>(" "),
@@ -4554,16 +4567,33 @@ fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperati
             tag(" and "),
         )
     };
-    let (_, (_, type_text, _, verb, _, _, _)) = (
+    let (_, (_, type_text, _, (verb, dest_suffix), _, _)) = (
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))),
         recognize(many_till(anychar, peek(they_control_and()))),
         they_control_and(),
         alt((
-            value("exile", tag::<_, _, OracleError<'_>>("exiles")),
-            value("sacrifice", tag("sacrifices")),
-            value("destroy", tag("destroys")),
+            map(
+                (
+                    value("exile", tag::<_, _, OracleError<'_>>("exiles")),
+                    tag(" it"),
+                ),
+                |(v, _)| (v, None::<&str>),
+            ),
+            map(
+                (value("sacrifice", tag("sacrifices")), tag(" it")),
+                |(v, _)| (v, None),
+            ),
+            map(
+                (value("destroy", tag("destroys")), tag(" it")),
+                |(v, _)| (v, None),
+            ),
+            // CR 701.17 + CR 608.2c (issue #9847): bounce edict sibling —
+            // "returns it to its owner's hand" (Teferi, Temporal Pilgrim −12).
+            map(
+                value("return", tag("returns it to its owner's hand")),
+                |v| (v, Some("to its owner's hand")),
+            ),
         )),
-        tag::<_, _, OracleError<'_>>(" it"),
         opt(tag::<_, _, OracleError<'_>>(".")),
         eof,
     )
@@ -4576,9 +4606,16 @@ fn try_parse_choose_and_verb_it_edict(rest_lower: &str) -> Option<ChooseImperati
     if !filter_rem.trim().is_empty() || matches!(filter, TargetFilter::Any) {
         return None;
     }
-    Some(ChooseImperativeAst::Reparse {
-        text: format!("{verb} a {type_text} you control"),
-    })
+    let controller_phrase = if ctx.prior_player_declaration {
+        "they control"
+    } else {
+        "you control"
+    };
+    let text = match dest_suffix {
+        Some(dest) => format!("{verb} a {type_text} {controller_phrase} {dest}"),
+        None => format!("{verb} a {type_text} {controller_phrase}"),
+    };
+    Some(ChooseImperativeAst::Reparse { text })
 }
 
 /// CR 115.1 + CR 110.1: Is this filter a battlefield-object CLASS filter —
@@ -4890,7 +4927,7 @@ pub(super) fn parse_choose_ast(
         // whole conjoined body (parse_effect fails → `Effect::Unimplemented`)
         // and drop the exile. Operates on `rest_lower` (the "choose " strip has
         // de-inflected the leading actor verb; the inner "exiles" keeps its -s).
-        if let Some(ast) = try_parse_choose_and_verb_it_edict(rest_lower) {
+        if let Some(ast) = try_parse_choose_and_verb_it_edict(rest_lower, ctx) {
             return Some(ast);
         }
 
@@ -18587,17 +18624,35 @@ mod tests {
 
     #[test]
     fn choose_and_verb_it_edict_marker() {
+        let default_ctx = ParseContext::default();
         assert_eq!(
-            try_parse_choose_and_verb_it_edict("a creature they control and exiles it."),
+            try_parse_choose_and_verb_it_edict(
+                "a creature they control and exiles it.",
+                &default_ctx,
+            ),
             Some(ChooseImperativeAst::Reparse {
                 text: "exile a creature you control".to_string(),
             })
         );
+        // CR 115.10a + CR 608.2d (issue #9847): under a declared player subject,
+        // keep "they control" so the TargetOnly wrap rebinds seed → ScopedPlayer.
+        let mut declared = ParseContext::default();
+        declared.prior_player_declaration = true;
+        assert_eq!(
+            try_parse_choose_and_verb_it_edict(
+                "a permanent they control and returns it to its owner's hand.",
+                &declared,
+            ),
+            Some(ChooseImperativeAst::Reparse {
+                text: "return a permanent they control to its owner's hand".to_string(),
+            })
+        );
         for declined in NOT_THEY_CONTROL {
             assert_eq!(
-                try_parse_choose_and_verb_it_edict(&format!(
-                    "a creature {declined} and exiles it."
-                )),
+                try_parse_choose_and_verb_it_edict(
+                    &format!("a creature {declined} and exiles it."),
+                    &default_ctx,
+                ),
                 None,
                 "{declined:?}"
             );
