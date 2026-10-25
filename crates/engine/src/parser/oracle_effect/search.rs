@@ -101,13 +101,22 @@ pub(super) fn parse_search_library_details(
         .parse(input)
     });
 
-    // Fallback: "for N cards" / "for X cards" without "up to".
+    // Fallback: "for N cards" / "for X cards" / "for exactly N cards" without
+    // "up to". CR 701.23d: "exactly N" is a fixed count (Burning-Rune Demon),
+    // not an up-to ceiling — the optional "exactly " sits between "for " and
+    // the numeral; without it the clause fell through to Fixed(1) (#10246).
     let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
-        scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
-            // Require a word break after the number (" cards" / " creature ...").
-            // Guards against matching "for a", "for an", etc. where parse_number fails
-            // (good) but also avoids partial matches like "for the".
-            .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
+        scan_preceded(lower, "for ", |input| {
+            preceded(
+                opt(tag::<_, _, OracleError<'_>>("exactly ")),
+                nom_quantity::parse_quantity_expr_number,
+            )
+            .parse(input)
+        })
+        // Require a word break after the number (" cards" / " creature ...").
+        // Guards against matching "for a", "for an", etc. where parse_number fails
+        // (good) but also avoids partial matches like "for the".
+        .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
     } else {
         None
     };
@@ -3294,6 +3303,36 @@ mod tests {
         );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
     }
+
+    /// CR 701.23d (#10246): "for exactly N cards" is a fixed count of N — the
+    /// same as "for N cards". Burning-Rune Demon ("search your library for
+    /// exactly two cards … that have different names") used to drop the
+    /// "exactly" numeral and fall through to Fixed(1).
+    #[test]
+    fn search_for_exactly_n_cards_emits_fixed_count() {
+        let details = parse_search_library_details(
+            "search your library for exactly two cards not named burning-rune demon \
+             that have different names",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            details.count,
+            QuantityExpr::Fixed { value: 2 },
+            "exactly two must be Fixed(2), not the Fixed(1) default: {details:?}"
+        );
+        assert!(
+            !details.up_to,
+            "exactly N is a required count, not an up-to ceiling"
+        );
+        // "for two cards" without "exactly" stays Fixed(2) (reach-guard).
+        let plain = parse_search_library_details(
+            "search your library for two cards",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(plain.count, QuantityExpr::Fixed { value: 2 });
+        assert!(!plain.up_to);
+    }
+
 
     #[test]
     fn action_chain_continuation_does_not_warn() {
