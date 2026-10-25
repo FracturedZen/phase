@@ -1977,13 +1977,14 @@ fn def_tree_has_conditional_mana_spell_grant(def: &AbilityDefinition) -> bool {
     {
         return true;
     }
+    // CR 106.6 / CR 106.6a: every `ManaSpellGrant` is a spend-conditional rider
+    // folded onto the produced mana ("If that mana is spent on …"). Matching only
+    // `AddKeywordUntilEndOfTurn` (Arena of Glory) left Boseiju / Cavern-class
+    // `CantBeCountered`, Opal Palace-class `EntersWithCounters`, and Path of
+    // Ancestry-class `TriggerOnSpend` riders flagged as swallowed `Condition_If`
+    // even though the grants are present and executed (#10267).
     if let Effect::Mana { grants, .. } = &*def.effect {
-        if grants.iter().any(|grant| {
-            matches!(
-                grant,
-                crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn { .. }
-            )
-        }) {
+        if !grants.is_empty() {
             return true;
         }
     }
@@ -7256,6 +7257,90 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             parsed.parse_warnings
         );
     }
+
+    /// CR 106.6 + CR 608.2c (#10267): Boseiju, Who Shelters All folds
+    /// "If that mana is spent on an instant or sorcery spell, that spell can't
+    /// be countered" onto `ManaSpellGrant::CantBeCountered`. Detector G must
+    /// NOT flag that rider as a swallowed `Condition_If` — the grant is present
+    /// and executed (`issue_6981_mana_spend_provenance`). Reverting the
+    /// `ManaSpellGrant` match to only `AddKeywordUntilEndOfTurn` re-fires the
+    /// swallow and the deck builder falsely reports Boseiju unsupported.
+    #[test]
+    fn boseiju_mana_spend_cant_be_countered_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "Boseiju enters tapped.\n{T}, Pay 2 life: Add {C}. If that mana is spent on an \
+             instant or sorcery spell, that spell can't be countered.",
+            "Boseiju, Who Shelters All",
+            &["Legendary", "Land"],
+        );
+        // Reach-guard: the CantBeCountered grant must actually be present, or a
+        // broad Suppression / Unimplemented skip could silence Condition_If while
+        // the rider is still missing.
+        let mana = parsed
+            .abilities
+            .iter()
+            .find(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+            .expect("Boseiju must parse a mana ability");
+        let Effect::Mana { grants, .. } = &*mana.effect else {
+            unreachable!("mana ability search must produce Effect::Mana");
+        };
+        assert!(
+            matches!(
+                grants.as_slice(),
+                [crate::types::mana::ManaSpellGrant::CantBeCountered { .. }]
+            ),
+            "Boseiju's spend rider must lower to CantBeCountered, got {grants:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Boseiju's folded CantBeCountered rider must not surface as a swallowed \
+             Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 106.6a sibling of the Boseiju case: Opal Palace's
+    /// "If you spend this mana to cast your commander, it enters with …"
+    /// folds to `EntersWithCounters`. Same suppressor; same false-positive risk.
+    #[test]
+    fn opal_palace_enters_with_counters_is_not_a_swallowed_condition_if() {
+        let parsed = parse_named(
+            "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's color \
+             identity. If you spend this mana to cast your commander, it enters with a number \
+             of additional +1/+1 counters on it equal to the number of times it's been cast \
+             from the command zone this game.",
+            "Opal Palace",
+            &["Land"],
+        );
+        let mana = parsed
+            .abilities
+            .iter()
+            .find(|ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::Mana { grants, .. } if !grants.is_empty()
+                )
+            })
+            .expect("Opal Palace must parse a mana ability with a spend grant");
+        let Effect::Mana { grants, .. } = &*mana.effect else {
+            unreachable!("mana ability search must produce Effect::Mana");
+        };
+        assert!(
+            matches!(
+                grants.as_slice(),
+                [crate::types::mana::ManaSpellGrant::EntersWithCounters { .. }]
+            ),
+            "Opal Palace's spend rider must lower to EntersWithCounters, got {grants:?}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "Condition_If"),
+            "Opal Palace's folded EntersWithCounters rider must not surface as a swallowed \
+             Condition_If: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+
 
     /// CR 603.4 + CR 700.4 + CR 120.1: Hawkeye, Avenging Archer's death-trigger
     /// intervening-if "if Hawkeye dealt damage to it this turn" is now hoisted to
