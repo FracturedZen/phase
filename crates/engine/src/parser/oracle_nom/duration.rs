@@ -307,6 +307,12 @@ fn parse_controller_possessive_pronoun(input: &str) -> OracleResult<'_, PlayerSc
     // CR 109.5 + CR 608.2c: in this shared duration parser, "your" and
     // third-person "their" are both resolved by the caller's controller/grantee
     // binding; runtime pruning currently arms Controller-scoped durations.
+    //
+    // Deliberately omits "that player's": that anaphor is Target-scoped and
+    // belongs only on the turn-deadline arms (`parse_until_next_turn` /
+    // `parse_until_end_of_next_turn`). Sharing it here would let
+    // `parse_next_step_possessor` accept "until that player's next end step"
+    // as AbilityController and silently mis-scope the prune (#10223).
     alt((
         value(PlayerScope::Controller, tag("your")),
         value(PlayerScope::Controller, tag("their")),
@@ -459,21 +465,43 @@ fn parse_next_step_name(input: &str) -> OracleResult<'_, Phase> {
     .parse(input)
 }
 
+fn parse_that_player_possessive(input: &str) -> OracleResult<'_, PlayerScope> {
+    // CR 109.4 + CR 608.2c: "that player's" — first player target of the
+    // resolving ability (Teferi's Reproach after "Choose target opponent").
+    value(
+        PlayerScope::Target,
+        alt((
+            tag("that player\u{2019}s"),
+            tag("that player's"),
+            tag("that players"),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_until_next_turn_possessor(input: &str) -> OracleResult<'_, PlayerScope> {
+    alt((
+        parse_that_player_possessive,
+        parse_controller_possessive_pronoun,
+    ))
+    .parse(input)
+}
+
 fn parse_until_end_of_next_turn(input: &str) -> OracleResult<'_, Duration> {
-    // CR 514.2: "until the end of [your/their] next turn" persists through the
-    // whole next turn (cleanup), distinct from "until [your/their] next turn"
+    // CR 514.2: "until the end of [your/their/that player's] next turn" persists
+    // through the whole next turn (cleanup), distinct from "until … next turn"
     // (beginning of next turn). CR 108.3: third-person "their" appears in
     // grants whose grantee is not the ability's controller (Suspend
     // Aggression, Expedited Inheritance); the grantee binding resolves the
-    // Controller scope at prune time.
+    // Controller scope at prune time. CR 109.4: "that player's" is Target.
     let (rest, _) = tag("the end of ").parse(input)?;
-    let (rest, player) = parse_controller_possessive_pronoun(rest)?;
+    let (rest, player) = parse_until_next_turn_possessor(rest)?;
     let (rest, _) = tag(" next turn").parse(rest)?;
     Ok((rest, Duration::UntilEndOfNextTurnOf { player }))
 }
 
 fn parse_until_next_turn(input: &str) -> OracleResult<'_, Duration> {
-    let (rest, player) = parse_controller_possessive_pronoun(input)?;
+    let (rest, player) = parse_until_next_turn_possessor(input)?;
     let (rest, _) = tag(" next turn").parse(rest)?;
     Ok((rest, Duration::UntilNextTurnOf { player }))
 }

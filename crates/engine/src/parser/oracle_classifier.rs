@@ -280,6 +280,14 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         && scan_contains(lower, "damage"))
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
+        // CR 611.2a + CR 608.2c: Teferi's Reproach — "Until that player's next
+        // turn, they gain protection …". Same one-shot continuous-effect class as
+        // "until your next turn" (Teferi's Protection); without this arm Priority 7
+        // claims the line via the life-lock static pattern and drops target,
+        // protection, duration, and phase-out (#10223).
+        || scan_contains(lower, "until that player's next turn")
+        || scan_contains(lower, "until that player’s next turn")
+        || scan_contains(lower, "until their next turn")
         || scan_contains(lower, "this turn")
 }
 
