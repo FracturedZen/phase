@@ -31941,6 +31941,33 @@ fn create_token_and_attach_equipment_lowers_attach_to_last_created() {
 }
 
 #[test]
+fn create_token_and_suspect_it_lowers_suspect_to_last_created() {
+    // Case of the Stashed Skeleton (#8106): "create a 2/1 black Skeleton creature
+    // token and suspect it." The fused "and suspect it" conjunct must survive as
+    // a Suspect sub-ability on LastCreated — without the "suspect " clause starter
+    // the conjunct is dropped and the Case solves vacuously on the next end step.
+    let def = parse_effect_chain(
+        "Create a 2/1 black Skeleton creature token and suspect it.",
+        AbilityKind::Spell,
+    );
+
+    fn find_suspect_target(def: &AbilityDefinition) -> Option<&TargetFilter> {
+        match def.effect.as_ref() {
+            Effect::Suspect { target, .. } => Some(target),
+            _ => def.sub_ability.as_deref().and_then(find_suspect_target),
+        }
+    }
+
+    let target = find_suspect_target(&def)
+        .expect("expected a Suspect sub-ability for the fused token+suspect clause");
+    assert_eq!(
+        *target,
+        TargetFilter::LastCreated,
+        "suspect anaphor must rebind to the just-created token"
+    );
+}
+
+#[test]
 fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
     // CR 702.148a: Cleave's bracketed text is removed at build time, so the
     // parser receives the bracket-stripped (KeepContent) base text — the

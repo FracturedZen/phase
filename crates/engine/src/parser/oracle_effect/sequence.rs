@@ -2976,6 +2976,10 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("copy ")),
         value((), tag("double ")),
         value((), tag("goad ")),
+        // CR 701.60a (#8106): "suspect " as a clause starter so
+        // "create a … token and suspect it" splits at "and" and reaches the
+        // existing SuspectLastCreated continuation (Case of the Stashed Skeleton).
+        value((), tag("suspect ")),
         value((), tag("manifest ")),
         value((), tag("populate")),
         // CR 608.2c (issue #534): "choose " as a clause starter so chains
@@ -11570,6 +11574,24 @@ mod tests {
     }
 
     #[test]
+    fn bare_and_splits_create_token_and_suspect() {
+        // CR 701.60a (#8106): Case of the Stashed Skeleton — "create a 2/1 black
+        // Skeleton creature token and suspect it". Without "suspect " as a clause
+        // starter the conjunct stays glued to the Token clause and is dropped;
+        // with the split, SuspectLastCreated chains onto LastCreated.
+        let chunks = clause_texts(
+            "create a 2/1 black Skeleton creature token and suspect it",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "create a 2/1 black Skeleton creature token",
+                "suspect it"
+            ]
+        );
+    }
+
+    #[test]
     fn bare_and_keeps_chosen_name_search_exile_compound() {
         // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
         // them" is one search compound, not a SearchLibrary followed by a second
@@ -12852,6 +12874,59 @@ mod tests {
                 panic!("expected GenericEffect goad sub, got Unimplemented({name})")
             }
             other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+    }
+
+    /// CR 701.60a (#8106): "suspect it" after CreateToken is SuspectLastCreated.
+    #[test]
+    fn suspect_it_continuation_after_create_token() {
+        let token_effect = Effect::Token {
+            name: "Skeleton".to_string(),
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Skeleton".to_string()],
+            colors: vec![crate::types::mana::ManaColor::Black],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert_eq!(
+            parse_followup_continuation_ast(
+                "suspect it",
+                &token_effect,
+                &mut ParseContext::default(),
+            ),
+            Some(ContinuationAst::SuspectLastCreated)
+        );
+    }
+
+    /// CR 701.60a (#8106): Case of the Stashed Skeleton — create+suspect chain.
+    #[test]
+    fn create_token_and_suspect_it_chains_suspect_on_last_created() {
+        use super::super::parse_effect_chain;
+
+        let def = parse_effect_chain(
+            "create a 2/1 black Skeleton creature token and suspect it",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(def.effect.as_ref(), Effect::Token { .. }),
+            "head must be Token, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.as_ref().expect("suspect sub_ability");
+        match sub.effect.as_ref() {
+            Effect::Suspect { target, scope } => {
+                assert_eq!(*target, TargetFilter::LastCreated);
+                assert_eq!(*scope, EffectScope::Single);
+            }
+            other => panic!("expected Suspect{{LastCreated}}, got {other:?}"),
         }
     }
 
