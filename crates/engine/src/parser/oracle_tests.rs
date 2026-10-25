@@ -16437,6 +16437,52 @@ fn modal_target_opponent_chooses_one_emdash_is_not_pool_choose() {
     }
 }
 
+
+#[test]
+fn thran_tome_reveal_then_target_opponent_chooses_of_those() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+    let chain = parse_effect_chain(
+        "Reveal the top three cards of your library. Target opponent chooses one of those cards. Put that card into your graveyard, then draw two cards.",
+        AbilityKind::Activated,
+    );
+    let mut n = Some(&chain);
+    let mut found = false;
+    while let Some(d) = n {
+        if let Effect::ChooseFromZone { count, chooser, .. } = &*d.effect {
+            assert_eq!(*count, 1);
+            assert_eq!(*chooser, ZoneChoiceChooser::Opponent, "got {:?}", chooser);
+            found = true;
+            break;
+        }
+        n = d.sub_ability.as_deref();
+    }
+    assert!(found, "expected ChooseFromZone, chain head {:?}", chain.effect);
+}
+
+#[test]
+fn gifts_given_that_player_chooses_two_of_those_is_opponent() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+    let chain = parse_effect_chain(
+        "Search target opponent\'s library for four cards with different names and reveal them. That player chooses two of those cards. Put the chosen cards into the player\'s graveyard and the rest into your hand. Then that player shuffles their library.",
+        AbilityKind::Spell,
+    );
+    let choose = chain.sub_ability.as_ref().expect("search → choose");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "That player chooses two of those → Opponent, got {:?}",
+        choose.effect
+    );
+}
+
 #[test]
 fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
     use crate::parser::oracle_effect::parse_effect_chain;
