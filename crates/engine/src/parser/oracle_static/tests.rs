@@ -26355,6 +26355,74 @@ fn compound_cost_tax_line_splits_into_cast_and_ability_statics() {
     );
 }
 
+/// CR 611.3 + CR 602.2 + CR 702.6a + CR 604.1 (#9776 Nahiri, the Unforgiving):
+/// "During your turn, creatures you control have first strike and equip abilities
+/// you activate cost {1} less to activate." must emit BOTH a Continuous FirstStrike
+/// grant AND a ReduceAbilityCost{equip,1} static, each carrying DuringYourTurn.
+/// Regression for the combinator-driven `parse_compound_keyword_grant_and_ability_cost`
+/// split: the single-return path claims the whole line as Continuous and mis-parses
+/// "equip abilities …" as a phantom Equip{0} keyword (dropping the cost reduction).
+#[test]
+fn compound_keyword_grant_and_equip_ability_cost_splits_nahiri() {
+    let defs = parse_static_line_multi(
+        "During your turn, creatures you control have first strike and equip abilities you activate cost {1} less to activate.",
+    );
+    assert_eq!(
+        defs.len(),
+        2,
+        "Nahiri compound line must split into grant + equip-cost statics, got {defs:?}",
+    );
+
+    let grant = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::Continuous))
+        .expect("keyword-grant half");
+    assert_eq!(grant.condition, Some(StaticCondition::DuringYourTurn));
+    assert!(
+        grant.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::FirstStrike,
+            }
+        )),
+        "grant half must carry FirstStrike, got {:?}",
+        grant.modifications
+    );
+    assert!(
+        !grant.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(_),
+            }
+        )),
+        "grant half must NOT absorb phantom Equip{{0}}, got {:?}",
+        grant.modifications
+    );
+
+    let ability = defs
+        .iter()
+        .find(|d| matches!(d.mode, StaticMode::ReduceAbilityCost { .. }))
+        .expect("equip-ability-cost half");
+    assert_eq!(
+        ability.condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading condition must propagate to the activate half",
+    );
+    match &ability.mode {
+        StaticMode::ReduceAbilityCost {
+            mode,
+            keyword,
+            amount,
+            ..
+        } => {
+            assert_eq!(*mode, CostModifyMode::Reduce);
+            assert_eq!(keyword, "equip");
+            assert_eq!(*amount, 1);
+        }
+        other => panic!("expected ReduceAbilityCost, got {other:?}"),
+    }
+}
+
 #[test]
 fn static_possessive_equip_ability_cost_reduction_self_ref() {
     // Firion, Wild Rose Warrior's granted equip-cost reduction leaf:

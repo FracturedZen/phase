@@ -2990,6 +2990,98 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
     Some(vec![cast_def, activate_def])
 }
 
+/// CR 611.3 + CR 602.2 + CR 702.6a + CR 604.1: Compound "[<timing>,] <subject>
+/// has/get <keywords|P/T> and <equip|activated|…> abilities you activate cost
+/// {N} <less|more> to activate". The marquee member is Nahiri, the Unforgiving
+/// (#9776): "During your turn, creatures you control have first strike and equip
+/// abilities you activate cost {1} less to activate."
+///
+/// The single-return pipeline claims the whole line as one Continuous keyword
+/// grant and mis-parses the "equip abilities …" conjunct as a phantom
+/// `AddKeyword{Equip(0)}` (dropping the cost reduction entirely). This splits
+/// the conjunction at the grant/activate boundary and emits BOTH halves as
+/// independent statics. CR 604.1: a leading timing condition ("During your
+/// turn,") scopes the whole conjunction — the grant half already carries it, so
+/// it is propagated onto the otherwise-conditionless activate half.
+///
+/// The split is adopted ONLY when the grant half resolves to a `Continuous`
+/// static (with no phantom Equip keyword) AND the activate half to a
+/// `ReduceAbilityCost` static, so any other "… and …" line falls through
+/// untouched. Combinator-pure: `scan_preceded` walks word boundaries looking for
+/// `"and "` immediately followed by an ability-cost activate head.
+fn parse_compound_keyword_grant_and_ability_cost(text: &str) -> Option<Vec<StaticDefinition>> {
+    let lower = text.to_lowercase();
+    // Gate: ability-cost activate phrase present (word-boundary scan; probe must
+    // start on a word, not a leading space).
+    if !nom_primitives::scan_contains(&lower, "abilities you activate cost ") {
+        return None;
+    }
+
+    // Split at the first "and " whose remainder opens an ability-cost activate
+    // head — optional keyword word ("equip" / "activated" / "power-up" / …)
+    // then the shared "abilities you activate cost " marker. `scan_preceded`
+    // resumes at word boundaries; we consume "and " then VERIFY the head without
+    // consuming it so the returned remainder is the full activate clause.
+    let (grant_raw, (), activate_clause) = nom_primitives::scan_preceded(&lower, |i| {
+        let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(i)?;
+        let (_, _) = preceded(
+            opt(terminated(
+                take_while1(|c: char| c.is_ascii_alphanumeric() || c == '-'),
+                tag(" "),
+            )),
+            tag("abilities you activate cost "),
+        )
+        .parse(after_and)?;
+        Ok((after_and, ()))
+    })?;
+
+    let grant_trimmed = grant_raw.trim().trim_end_matches('.');
+    if grant_trimmed.is_empty() {
+        return None;
+    }
+    // Reconstitute a complete sentence so the reused single-line parsers see a
+    // well-formed clause (trailing period matches Oracle orthography).
+    let grant_clause = format!("{grant_trimmed}.");
+    let activate_clause = activate_clause.trim();
+    if activate_clause.is_empty() {
+        return None;
+    }
+
+    let mut grant_def = parse_static_line(&grant_clause)?;
+    let mut activate_def = parse_static_line(activate_clause)?;
+
+    // Adopt only when shapes match: Continuous grant + ReduceAbilityCost activate.
+    if !matches!(grant_def.mode, StaticMode::Continuous)
+        || grant_def.modifications.is_empty()
+        || !matches!(activate_def.mode, StaticMode::ReduceAbilityCost { .. })
+    {
+        return None;
+    }
+    // Refuse a grant half that still absorbed a phantom Equip keyword — that
+    // means the split landed too late and the cost-reduction conjunct leaked
+    // into the keyword list (the exact bug this handler exists to prevent).
+    let has_phantom_equip = grant_def.modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Equip(_),
+            }
+        )
+    });
+    if has_phantom_equip {
+        return None;
+    }
+
+    // CR 604.1: propagate the shared leading condition to the conditionless
+    // activate half so the cost reduction is gated identically.
+    if activate_def.condition.is_none() {
+        activate_def.condition = grant_def.condition.clone();
+    }
+    grant_def.description = Some(text.to_string());
+    activate_def.description = Some(text.to_string());
+    Some(vec![grant_def, activate_def])
+}
+
 fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -3109,6 +3201,16 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // timing condition. Must precede the single-return fallback, which keeps the
     // cast half and silently drops the "and abilities …" activate half.
     if let Some(defs) = parse_compound_spell_and_ability_cost_tax(&stripped) {
+        return defs;
+    }
+
+    // CR 611.3 + CR 602.2 + CR 702.6a: "[<timing>,] <subject> has/get <X> and
+    // <equip|…> abilities you activate cost {N} <less|more> to activate"
+    // (Nahiri, the Unforgiving #9776) — one Continuous keyword/P/T grant + one
+    // ReduceAbilityCost static, both under the shared leading timing condition.
+    // Must precede the single-return fallback, which claims the whole line as a
+    // Continuous grant and mis-parses "equip abilities …" as phantom Equip{0}.
+    if let Some(defs) = parse_compound_keyword_grant_and_ability_cost(&stripped) {
         return defs;
     }
 
