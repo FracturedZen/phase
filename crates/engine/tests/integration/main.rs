@@ -359,6 +359,7 @@ mod diluvian_primordial_6754;
 mod dina_noff_turn5_loader;
 mod disjunctive_state_change_head_coverage_honesty;
 mod disorder_in_the_court_5955;
+mod displacer_kitten_firesinger_loop;
 mod divine_gambit_metamorphose_prompt_8257;
 mod divine_visitation_token_substitution;
 mod djinn_most_common_color_static;
