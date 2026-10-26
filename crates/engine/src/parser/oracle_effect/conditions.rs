@@ -904,25 +904,24 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
 
     match body {
         Some(body) => {
-            let body_lower = body.to_lowercase();
-            let (body, condition) = if let Some(stripped) = body_lower
-                .strip_suffix(" instead")
-                .map(|_| &body[..body.len() - " instead".len()])
-            {
-                (
-                    stripped.to_string(),
-                    AbilityCondition::AdditionalCostPaidInstead,
-                )
-            } else {
-                let stripped = strip_leading_instead(&body);
-                if stripped.len() < body.len() {
+            // CR 614.15: trailing "instead" OR "instead of <N>" is the same
+            // replacement marker (Reclaim the Wastes: "... two basic land cards
+            // instead of one"). Bare strip_suffix(" instead") missed the of-<N>
+            // form and left AdditionalCostPaid + a leftover "instead of one"
+            // swallow, so the kicked search became a SequentialSibling.
+            let (body, condition) =
+                if let Some(stripped) = strip_trailing_replacement_instead(&body) {
                     (stripped, AbilityCondition::AdditionalCostPaidInstead)
-                } else if alternative_mana_cost_conditional {
-                    (body, AbilityCondition::AlternativeManaCostPaid)
                 } else {
-                    (body, AbilityCondition::additional_cost_paid_any())
-                }
-            };
+                    let stripped = strip_leading_instead(&body);
+                    if stripped.len() < body.len() {
+                        (stripped, AbilityCondition::AdditionalCostPaidInstead)
+                    } else if alternative_mana_cost_conditional {
+                        (body, AbilityCondition::AlternativeManaCostPaid)
+                    } else {
+                        (body, AbilityCondition::additional_cost_paid_any())
+                    }
+                };
             (Some(condition), body)
         }
         None => (None, text.to_string()),
@@ -5518,28 +5517,22 @@ fn split_forward_instead_clause(text: &str) -> Option<(String, String, InsteadCl
 
     let trimmed_body = raw_body.trim_end_matches('.').trim();
     let trimmed_lower = trimmed_body.to_lowercase();
-    let trailing_instead = nom_on_lower(trimmed_body, &trimmed_lower, |i| {
-        map(
-            all_consuming(terminated(take_until(" instead"), tag(" instead"))),
-            str::len,
-        )
-        .parse(i)
-    });
-    let (effect_text, order) = if let Some((stripped_len, _)) = trailing_instead {
-        (
-            trimmed_body[..stripped_len].trim().to_string(),
-            InsteadClauseOrder::ForwardTrailingInstead,
-        )
-    } else if let Some((_, rest)) = nom_on_lower(trimmed_body, &trimmed_lower, |i| {
-        value((), tag("instead ")).parse(i)
-    }) {
-        (
-            rest.trim().to_string(),
-            InsteadClauseOrder::ForwardLeadingInstead,
-        )
-    } else {
-        return None;
-    };
+    // CR 614.15: trailing "instead" and "instead of <N>" are the same marker.
+    // all_consuming(tag(" instead")) rejected "... instead of one" and forced
+    // the clause off the instead path entirely. Reuse the shared strip helper.
+    let (effect_text, order) =
+        if let Some(stripped) = strip_trailing_replacement_instead(trimmed_body) {
+            (stripped, InsteadClauseOrder::ForwardTrailingInstead)
+        } else if let Some((_, rest)) = nom_on_lower(trimmed_body, &trimmed_lower, |i| {
+            value((), tag("instead ")).parse(i)
+        }) {
+            (
+                rest.trim().to_string(),
+                InsteadClauseOrder::ForwardLeadingInstead,
+            )
+        } else {
+            return None;
+        };
 
     Some((cond_text, effect_text, order))
 }
@@ -5715,6 +5708,29 @@ fn is_replacement_marker_tail(after_instead_lower: &str) -> bool {
         all_consuming(preceded(tag("of "), nom_primitives::parse_number)).parse(input)
     })
     .is_some()
+}
+
+/// CR 614.15: strip a trailing replacement marker — bare `" instead"` or
+/// `" instead of <N>"` — from an effect body. Returns the body without the
+/// marker, or `None` when no replacement marker is present (including when
+/// `"instead of <non-quantity>"` names a different replacement axis).
+fn strip_trailing_replacement_instead(body: &str) -> Option<String> {
+    let body_lower = body.to_lowercase();
+    let tp = TextPair::new(body, &body_lower);
+    // Prefer the LAST " instead" so an earlier in-body occurrence cannot steal
+    // the marker (none of today's printings put "instead" mid-body before a
+    // trailing marker, but rsplit keeps the seam honest).
+    let (before, after) = tp.rsplit_around(" instead")?;
+    if !is_replacement_marker_tail(after.lower) {
+        return None;
+    }
+    // Own the slice before body_lower drops — TextPair ties both halves to the
+    // lowercased borrow, so returning `&str` into `body` alone is not enough.
+    let stripped = before.original.trim_end().to_string();
+    if stripped.is_empty() {
+        return None;
+    }
+    Some(stripped)
 }
 
 /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" — conditional
@@ -11887,6 +11903,50 @@ mod tests {
             strip_additional_cost_conditional("If it was kicked, it deals 2 damage to any target.");
         assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
         assert_eq!(body, "it deals 2 damage to any target.");
+    }
+
+    /// CR 614.15 + CR 608.2c (#10030 Reclaim the Wastes): trailing
+    /// "instead of <N>" is the same replacement marker as bare "instead".
+    /// Must fold to `AdditionalCostPaidInstead` and strip the of-<N> tail so
+    /// the body is a clean search (not a SequentialSibling with a leftover
+    /// Swallow:Replacement_Instead).
+    #[test]
+    fn kicked_instead_of_n_emits_additional_cost_paid_instead() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If this spell was kicked, search your library for two basic land cards instead of one.",
+        );
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaidInstead));
+        assert_eq!(body, "search your library for two basic land cards");
+    }
+
+    /// CR 614.15: bare trailing "instead" still folds (regression).
+    #[test]
+    fn kicked_bare_instead_still_emits_additional_cost_paid_instead() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If this spell was kicked, search your library for a basic land card and a Shrine card instead.",
+        );
+        assert_eq!(cond, Some(AbilityCondition::AdditionalCostPaidInstead));
+        assert_eq!(
+            body,
+            "search your library for a basic land card and a Shrine card"
+        );
+    }
+
+    /// CR 614.15: "instead of putting …" names a non-quantity axis and must
+    /// NOT be treated as the quantity-replacement marker.
+    #[test]
+    fn kicked_instead_of_putting_is_not_quantity_marker() {
+        let (cond, body) = strip_additional_cost_conditional(
+            "If this spell was kicked, exile it instead of putting it into your hand.",
+        );
+        // Not AdditionalCostPaidInstead via the of-<N> strip — body still carries
+        // "instead of putting…". Bare AdditionalCostPaid (no Instead) is honest
+        // until that axis is modeled; never silently strip the named part.
+        assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
+        assert!(
+            body.to_lowercase().contains("instead of putting"),
+            "non-quantity instead-of must remain on the body, got {body:?}"
+        );
     }
 
     #[test]

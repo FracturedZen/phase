@@ -2748,6 +2748,22 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 } else {
                     None
                 };
+                // CR 608.2c + #10030: Reclaim the Wastes prints reveal/put/shuffle
+                // BEFORE the kicked "instead of one" clause, so those delivery nodes
+                // already sit after the base SearchLibrary. A plain `defs.push`
+                // would nest the kicked search under Shuffle and break instead_swap
+                // (which requires AdditionalCostPaidInstead as the immediate sub of
+                // the base search — Aang's Journey / Grow from the Ashes order).
+                // Park trailing siblings, push the kicked search next to its
+                // antecedent, apply its own destination continuation while it is
+                // still `defs.last()`, then restore the parked delivery/shuffle.
+                let search_idx = defs
+                    .iter()
+                    .rposition(|d| matches!(*d.effect, Effect::SearchLibrary { .. }));
+                let mut trailing = match search_idx {
+                    Some(idx) => defs.split_off(idx + 1),
+                    None => Vec::new(),
+                };
                 defs.push(def);
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
                 if let Some(absorbed) = absorbed {
@@ -2766,6 +2782,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 if let Some(continuation) = intrinsic {
                     apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
+                }
+                if !trailing.is_empty() {
+                    defs.append(&mut trailing);
+                    env.observe(&defs, None, NodeRole::Unknown);
                 }
                 true
             } else if let ClauseDisposition::DrawnThisTurnFollowup { life_payment } =

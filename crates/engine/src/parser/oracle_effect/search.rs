@@ -145,10 +145,14 @@ pub(super) fn parse_search_library_details(
         match (any_number_tail, up_to_match, for_match, for_that_many_match) {
             (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
             (None, Some((expr, off)), _, _) => (expr, Some(off), true),
-            (None, None, Some((expr, _)), _) => (expr, None, false),
+            // CR 701.23a + #10030: keep the offset after a bare count word so
+            // "for two basic land cards" still feeds the trailing type phrase to
+            // the filter parser. Dropping it forced filter=Any (Grow from the
+            // Ashes kicked arm, Reclaim the Wastes, Planar Engineering, Signal
+            // the Clans). Same retention as the "up to N" / "that many" arms.
+            (None, None, Some((expr, off)), _) => (expr, Some(off), false),
             // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
-            // phrase is parsed into the filter (unlike the numeric `for` path, whose
-            // pre-existing filter handling is intentionally left unchanged here).
+            // phrase is parsed into the filter.
             (None, None, None, Some((expr, off))) => (expr, Some(off), false),
             (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
         };
@@ -2792,7 +2796,9 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
+    use crate::types::ability::{
+        Comparator, Effect, QuantityRef, SharedQuality, SharedQualityRelation,
+    };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
@@ -5829,5 +5835,66 @@ mod tests {
                 "CR 202.3: the {label} leg must inherit the mana value suffix: {typed:?}"
             );
         }
+    }
+
+    /// CR 608.2c + CR 614.15 (#10030): Reclaim the Wastes kicked count override
+    /// is the immediate AdditionalCostPaidInstead sub of the base SearchLibrary
+    /// (same instead_swap topology as Aang's Journey / Grow from the Ashes) —
+    /// not a SequentialSibling nested under Shuffle, and not filter=Any.
+    #[test]
+    fn reclaim_the_wastes_kicked_count_is_instead_sub_not_sibling() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Kicker {3}
+Search your library for a basic land card, reveal it, put it into your hand, then shuffle. If this spell was kicked, search your library for two basic land cards instead of one.",
+            "Reclaim the Wastes",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.additional_cost.is_some(),
+            "kicker must lower as additional_cost, got {:?}",
+            parsed.additional_cost
+        );
+        let search = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(*a.effect, Effect::SearchLibrary { .. }))
+            .expect("base SearchLibrary must parse");
+        let instead = search
+            .sub_ability
+            .as_ref()
+            .expect("kicked override must be immediate sub_ability for instead_swap");
+        assert_eq!(
+            instead.condition,
+            Some(crate::types::ability::AbilityCondition::AdditionalCostPaidInstead),
+            "kicked arm must be AdditionalCostPaidInstead, got {:?}",
+            instead.condition
+        );
+        match instead.effect.as_ref() {
+            Effect::SearchLibrary { count, filter, .. } => {
+                assert!(
+                    matches!(count, QuantityExpr::Fixed { value: 2 }),
+                    "instead search count must be 2, got {count:?}"
+                );
+                let filter_dbg = format!("{filter:?}");
+                assert!(
+                    filter_dbg.to_lowercase().contains("basic")
+                        || filter_dbg.contains("Land")
+                        || filter_dbg.contains("Basic"),
+                    "instead search must keep basic-land filter, got {filter:?}"
+                );
+            }
+            other => panic!("instead sub must be SearchLibrary, got {other:?}"),
+        }
+        let top_searches = parsed
+            .abilities
+            .iter()
+            .filter(|a| matches!(*a.effect, Effect::SearchLibrary { .. }))
+            .count();
+        assert_eq!(
+            top_searches, 1,
+            "exactly one top-level SearchLibrary; kicked arm lives in sub_ability"
+        );
     }
 }

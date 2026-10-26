@@ -47270,14 +47270,14 @@ fn parse_effect_chain_ir_body(
         ) && matches!(clause.effect, Effect::SearchLibrary { .. })
             && !builder.is_empty()
         {
-            // Find the last non-absorbed clause — it should be a SearchLibrary with
-            // a SearchDestination(Hand) intrinsic continuation.
-            let prev_non_absorbed = builder
-                .clauses()
-                .iter()
-                .rev()
-                .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }));
-            let previous_is_search_with_hand_dest = prev_non_absorbed.is_some_and(|c| {
+            // Find a prior SearchLibrary with a SearchDestination(Hand) intrinsic.
+            // Skip Continue AND delivery Emit siblings (ChangeZone / Shuffle) that the
+            // antecedent search already published — Reclaim the Wastes prints
+            // "reveal … put … shuffle" before the kicked "instead of one" clause, so
+            // the immediately-previous non-Continue node is Shuffle, not the search.
+            // Gate on AdditionalCostPaidInstead (above) keeps independent later searches
+            // from folding (#10030).
+            let previous_is_search_with_hand_dest = builder.clauses().iter().rev().any(|c| {
                 matches!(c.parsed.effect, Effect::SearchLibrary { .. })
                     && matches!(
                         c.disposition.intrinsic(),

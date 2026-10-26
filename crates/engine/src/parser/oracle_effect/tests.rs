@@ -65964,6 +65964,60 @@ fn dance_of_the_manse_targets_graveyard_not_battlefield() {
 // producing the disposition (or drops its payload), they fail even though the
 // lowered tree might still look plausible.
 
+/// CR 608.2c + CR 614.15 (#10030 Reclaim the Wastes): trailing "instead of one"
+/// is a quantity-replacement marker. The kicked clause must FoldSearchIntoElse
+/// (not SequentialSibling) and keep the basic-land filter at count 2.
+#[test]
+fn reclaim_the_wastes_kicked_instead_of_one_folds_search() {
+    let mut ctx = ParseContext::default();
+    let ir = parse_effect_chain_ir(
+        "Search your library for a basic land card, reveal it, put it into your hand, then shuffle. If this spell was kicked, search your library for two basic land cards instead of one.",
+        AbilityKind::Spell,
+        &mut ctx,
+    );
+    let fold = ir
+        .clauses
+        .iter()
+        .find(|c| matches!(c.disposition, ClauseDisposition::FoldSearchIntoElse { .. }))
+        .expect("kicked 'instead of one' search must FoldSearchIntoElse, not SequentialSibling");
+    match &fold.parsed.effect {
+        Effect::SearchLibrary {
+            filter,
+            count,
+            target_player,
+            ..
+        } => {
+            assert!(
+                target_player.is_none(),
+                "Reclaim searches the caster's library, got target_player={target_player:?}"
+            );
+            assert!(
+                matches!(count, QuantityExpr::Fixed { value: 2 }),
+                "kicked override count must be 2, got {count:?}"
+            );
+            // Basic land restriction must survive (not widen to Any).
+            let filter_dbg = format!("{filter:?}");
+            assert!(
+                filter_dbg.contains("Basic")
+                    || filter_dbg.contains("Land")
+                    || filter_dbg.contains("basic"),
+                "kicked search must retain basic-land filter, got {filter:?}"
+            );
+        }
+        other => panic!("FoldSearchIntoElse body must be SearchLibrary, got {other:?}"),
+    }
+    // No second top-level SearchLibrary sitting as a SequentialSibling.
+    let search_count = ir
+        .clauses
+        .iter()
+        .filter(|c| matches!(c.parsed.effect, Effect::SearchLibrary { .. }))
+        .count();
+    assert_eq!(
+        search_count, 2,
+        "base search + folded override only, got {search_count} SearchLibrary clauses"
+    );
+}
+
 /// CR 608.2c + CR 601.2b: Aang's Journey's "instead, search …" clause must land
 /// on `FoldSearchIntoElse` AND carry its own `SearchDestination` intrinsic. The
 /// intrinsic is the load-bearing part: it is the SECOND search's self-patch
