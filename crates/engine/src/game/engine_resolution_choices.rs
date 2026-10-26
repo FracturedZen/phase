@@ -7901,6 +7901,19 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            // CR 608.2d: a chosen card name is public information; surface it for
+            // every naming (resolving instruction or as-enters choice) so the log
+            // shows what was named.
+            if matches!(choice_type, ChoiceType::CardName) {
+                events.push(GameEvent::CardNamed {
+                    player_id: player,
+                    source_id: source
+                        .as_ref()
+                        .map(|source| source.prompt.identity.reference.object_id),
+                    name: choice.clone(),
+                });
+            }
+
             // CR 614.12a: a pre-entry as-enters choice answers the parked
             // battlefield entry, not a resolving ability — no object binding and
             // no continuation.
@@ -7938,10 +7951,17 @@ pub(super) fn handle_resolution_choice(
             effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .update_trigger_source_context_in_resolution_segment(context);
+                    if matches!(choice_type, ChoiceType::CardName) {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_through_chain(context);
+                    } else {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_in_resolution_segment(context);
+                    }
                 }
             }
             if choice_type.is_card_predicate_guess() {
