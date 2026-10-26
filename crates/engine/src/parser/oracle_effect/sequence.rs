@@ -3607,6 +3607,26 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), tag("you untap ")),
         value((), tag("that player ")),
     )))
+    // CR 701.20a + CR 701.9a (issue #9840): "reveals <N> cards from their hand
+    // and you choose one of them" — Blackmail, Hollow Specter, Cabal
+    // Interrogator, Mire's Toll, Taster of Wares. Without this arm the fused
+    // choose stays glued to the counted reveal noun, `all_consuming` on that
+    // noun fails, and the whole clause fails closed to Unimplemented. "you
+    // choose" is a subject+imperative boundary (same safety class as "you
+    // draw" / "you gain" / "may choose"), never a relative clause — unlike a
+    // blanket "you <PREDICATE_VERB>" rule, which would wrongly split "and you
+    // control". Splitting routes the chooser through `RevealHandFilter` ("one
+    // of them" → card_filter Any on the counted RevealHand) so the controller
+    // picks among the revealed cards; the hand owner still chooses which N to
+    // reveal (`CardSelectionMode::Chosen`). Whole-hand fused wording ("reveals
+    // their hand and you choose a nonland card from it") takes the same split
+    // → continuation path as the separate-sentence form (Thoughtseize),
+    // matching the Biting-Palm / Brain Maggot AST.
+    //
+    // Singleton `.or(value(...))` rather than another arm inside the you-group
+    // `alt()` above: that tuple is already at nom's 21-arm `Choice` limit
+    // (same reason `puts `/`untaps ` sit in the `.or()` chain).
+    .or(value((), tag("you choose ")))
     .or(alt((
         // CR 608.2k: "it [conjugated-verb]" is always subject + predicate, never a
         // noun phrase. "doesn't"/"can't"/"cannot" are restriction predicates; "gains"/

@@ -92021,15 +92021,104 @@ fn counted_hand_reveal_shapes() {
         "{single:?}"
     );
 
+    // CR 701.20a + CR 701.9a (#9840): fused "and you choose one of them" splits
+    // at the bare-and starter, then RevealHandFilter parks card_filter=Any so
+    // the controller chooses among the revealed cards (hand owner still picks
+    // which three to reveal via CardSelectionMode::Chosen).
     let chooser = count_slot_effects(
         "Target player reveals three cards from their hand and you choose one of them.",
     );
-    assert!(is_gap(&chooser[0]), "{chooser:?}");
     assert!(
-        !chooser
-            .iter()
-            .any(|e| matches!(e, Effect::RevealHand { .. })),
+        matches!(
+            &chooser[0],
+            Effect::RevealHand {
+                count: Some(QuantityExpr::Fixed { value: 3 }),
+                selection: CardSelectionMode::Chosen,
+                card_filter: TargetFilter::Any,
+                ..
+            }
+        ),
         "{chooser:?}"
+    );
+    assert!(
+        !chooser.iter().any(is_gap),
+        "fused chooser must not leave an Unimplemented gap: {chooser:?}"
+    );
+}
+
+/// CR 701.20a + CR 701.9a (#9840): Blackmail — counted reveal fused with
+/// "and you choose one of them", then discard of the controller's choice.
+/// Same grammar as Hollow Specter / Cabal Interrogator / Mire's Toll.
+#[test]
+fn blackmail_fused_reveal_choose_one_discards() {
+    let def = parse_effect_chain(
+        "Target player reveals three cards from their hand and you choose one of them. That player discards that card.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealHand {
+        count,
+        selection,
+        card_filter,
+        choice_optional,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealHand root, got {:?}", def.effect);
+    };
+    assert_eq!(*count, Some(QuantityExpr::Fixed { value: 3 }));
+    assert_eq!(*selection, CardSelectionMode::Chosen);
+    assert_eq!(*card_filter, TargetFilter::Any);
+    assert!(!*choice_optional, "Blackmail's choose-one is mandatory");
+    assert!(
+        def.sub_ability.is_some(),
+        "discard continuation must remain attached"
+    );
+    // Walk the chain: discard of the parked reveal choice must be present
+    // with no Unimplemented gap.
+    let mut gaps = Vec::new();
+    let mut saw_discard = false;
+    let mut cur = Some(&def);
+    while let Some(node) = cur {
+        if is_gap(&node.effect) {
+            gaps.push(format!("{:?}", node.effect));
+        }
+        if matches!(&*node.effect, Effect::Discard { .. }) {
+            saw_discard = true;
+        }
+        cur = node.sub_ability.as_deref();
+    }
+    assert!(gaps.is_empty(), "no Unimplemented gap: {gaps:?}");
+    assert!(saw_discard, "expected Discard of that card on the chain");
+}
+
+/// CR 701.20a (#9840): Cabal Interrogator / Hollow Specter X-count fused form.
+#[test]
+fn cabal_interrogator_x_fused_reveal_you_choose_one() {
+    let def = parse_effect_chain(
+        "Target player reveals X cards from their hand and you choose one of them. That player discards that card.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealHand {
+        count: Some(count),
+        selection: CardSelectionMode::Chosen,
+        card_filter: TargetFilter::Any,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected counted RevealHand with Any chooser, got {:?}", def.effect);
+    };
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name }
+            } if name == "X"
+        ),
+        "X-count must survive: {count:?}"
+    );
+    assert!(
+        def.sub_ability.is_some(),
+        "discard continuation required"
     );
 }
 

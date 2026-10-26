@@ -4224,8 +4224,10 @@ fn is_counted_hand_reveal(after_reveal_lower: &str) -> bool {
 }
 
 /// CR 701.20a + CR 701.20b: "reveals <count> card(s) [at random] from <owner's>
-/// hand [at random]" through the shared count position. A noun the reveal
-/// cannot read ("… and you choose one of them") fails closed.
+/// hand [at random]" through the shared count position. The fused chooser
+/// ("… and you choose one of them", issue #9840) is peeled by the bare-and
+/// clause starter in `sequence.rs` before this noun is read; a noun the reveal
+/// still cannot read fails closed.
 fn parse_counted_hand_reveal(
     after_reveal: &str,
     ctx: &mut ParseContext,
