@@ -4874,7 +4874,7 @@ mod tests {
         ] {
             let qty = parse_for_each_clause(phrase)
                 .unwrap_or_else(|| panic!("{phrase:?} must parse as PreviousEffectAmount"));
-            if phrase.contains("excess") {
+            if phrase.contains("excess") { // allow-noncombinator: test fixture branch on input phrase, not parser dispatch
                 assert_eq!(
                     qty,
                     QuantityRef::PreviousEffectAmount {

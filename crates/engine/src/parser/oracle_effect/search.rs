@@ -2797,7 +2797,8 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, Effect, QuantityRef, SharedQuality, SharedQualityRelation,
+        Comparator, Effect, FilterProp, QuantityRef, SharedQuality, SharedQualityRelation,
+        TargetFilter, TypeFilter,
     };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
@@ -5877,12 +5878,21 @@ Search your library for a basic land card, reveal it, put it into your hand, the
                     matches!(count, QuantityExpr::Fixed { value: 2 }),
                     "instead search count must be 2, got {count:?}"
                 );
-                let filter_dbg = format!("{filter:?}");
+                let TargetFilter::Typed(typed) = filter else {
+                    panic!("instead search must keep typed basic-land filter, got {filter:?}");
+                };
                 assert!(
-                    filter_dbg.to_lowercase().contains("basic")
-                        || filter_dbg.contains("Land")
-                        || filter_dbg.contains("Basic"),
-                    "instead search must keep basic-land filter, got {filter:?}"
+                    typed.type_filters.contains(&TypeFilter::Land),
+                    "instead search must retain Land type, got {filter:?}"
+                );
+                assert!(
+                    typed.properties.iter().any(|property| matches!(
+                        property,
+                        FilterProp::HasSupertype {
+                            value: crate::types::card_type::Supertype::Basic
+                        }
+                    )),
+                    "instead search must retain Basic supertype, got {filter:?}"
                 );
             }
             other => panic!("instead sub must be SearchLibrary, got {other:?}"),

@@ -65996,12 +65996,21 @@ fn reclaim_the_wastes_kicked_instead_of_one_folds_search() {
                 "kicked override count must be 2, got {count:?}"
             );
             // Basic land restriction must survive (not widen to Any).
-            let filter_dbg = format!("{filter:?}");
+            let TargetFilter::Typed(typed) = filter else {
+                panic!("kicked search must retain typed basic-land filter, got {filter:?}");
+            };
             assert!(
-                filter_dbg.contains("Basic")
-                    || filter_dbg.contains("Land")
-                    || filter_dbg.contains("basic"),
-                "kicked search must retain basic-land filter, got {filter:?}"
+                typed.type_filters.contains(&TypeFilter::Land),
+                "kicked search must retain Land type, got {filter:?}"
+            );
+            assert!(
+                typed.properties.iter().any(|property| matches!(
+                    property,
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic
+                    }
+                )),
+                "kicked search must retain Basic supertype, got {filter:?}"
             );
         }
         other => panic!("FoldSearchIntoElse body must be SearchLibrary, got {other:?}"),

@@ -11943,8 +11943,10 @@ mod tests {
         // "instead of putting…". Bare AdditionalCostPaid (no Instead) is honest
         // until that axis is modeled; never silently strip the named part.
         assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
-        assert!(
-            body.to_lowercase().contains("instead of putting"),
+        // Body must still carry the named non-quantity axis verbatim.
+        assert_eq!(
+            body,
+            "exile it instead of putting it into your hand.",
             "non-quantity instead-of must remain on the body, got {body:?}"
         );
     }
