@@ -3791,6 +3791,99 @@ fn tamiyo_flip_return_transformed_binds_to_self_ref() {
     );
 }
 
+/// CR 608.2k + CR 608.2c (issue #9620): Magnanimous Magistrate —
+/// "you may remove that many reprieve counters from this creature. If you do,
+/// return that card to the battlefield under its owner's control." The optional
+/// head targets the source (`SelfRef`), but "that card" is the creature that
+/// died (the trigger-event object), not the Magistrate. The SelfRef-continuation
+/// rewrite that correctly serves Ajani/Tamiyo ("exile ~, then return him") must
+/// not fire across an `OptionalEffectPerformed` ("If you do,") gate after a
+/// SelfRef cost — otherwise the return moves the Magistrate instead of the
+/// dead creature. Angelic Renewal is the same class with Sacrifice SelfRef.
+#[test]
+fn magnanimous_magistrate_if_you_do_return_binds_triggering_source() {
+    let def = parse_trigger_line(
+        "Whenever another nontoken creature you control dies, if its mana value was 1 or greater, you may remove that many reprieve counters from this creature. If you do, return that card to the battlefield under its owner's control.",
+        "Magnanimous Magistrate",
+    );
+    let exec = def.execute.as_deref().expect("Magistrate trigger execute");
+    let Effect::RemoveCounter {
+        target: head_target,
+        ..
+    } = &*exec.effect
+    else {
+        panic!("expected optional RemoveCounter head, got {:?}", exec.effect);
+    };
+    assert_eq!(*head_target, TargetFilter::SelfRef);
+    assert!(exec.optional, "counter removal is optional");
+    let sub = exec.sub_ability.as_deref().expect("If you do return sub_ability");
+    assert!(
+        sub.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed),
+        "return must be gated by OptionalEffectPerformed, got {:?}",
+        sub.condition
+    );
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected return ChangeZone sub, got {:?}", sub.effect);
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *target,
+        TargetFilter::TriggeringSource,
+        "If you do, return that card must bind the died creature (TriggeringSource),          not SelfRef — otherwise the Magistrate returns itself"
+    );
+}
+
+/// CR 608.2k + CR 608.2c (issue #9620 sibling): Angelic Renewal —
+/// "you may sacrifice Angelic Renewal. If you do, return that card to the
+/// battlefield." Same OptionalEffectPerformed-after-SelfRef-cost shape as
+/// Magnanimous Magistrate; "that card" is the creature put into the graveyard.
+#[test]
+fn angelic_renewal_if_you_do_return_binds_triggering_source() {
+    let def = parse_trigger_line(
+        "Whenever a creature is put into your graveyard from the battlefield, you may sacrifice Angelic Renewal. If you do, return that card to the battlefield.",
+        "Angelic Renewal",
+    );
+    let exec = def.execute.as_deref().expect("Angelic Renewal trigger execute");
+    let Effect::Sacrifice {
+        target: head_target,
+        ..
+    } = &*exec.effect
+    else {
+        panic!("expected optional Sacrifice head, got {:?}", exec.effect);
+    };
+    assert_eq!(*head_target, TargetFilter::SelfRef);
+    assert!(exec.optional, "sacrifice is optional");
+    let sub = exec.sub_ability.as_deref().expect("If you do return sub_ability");
+    assert!(
+        sub.condition
+            .as_ref()
+            .is_some_and(AbilityCondition::is_optional_effect_performed),
+        "return must be gated by OptionalEffectPerformed, got {:?}",
+        sub.condition
+    );
+    let Effect::ChangeZone {
+        destination,
+        target,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("expected return ChangeZone sub, got {:?}", sub.effect);
+    };
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(
+        *target,
+        TargetFilter::TriggeringSource,
+        "If you do, return that card must bind the died creature (TriggeringSource),          not SelfRef — otherwise Angelic Renewal returns itself"
+    );
+}
+
 /// SHAPE TEST — issue #3299: `parse_trigger_lines` must not compound-split
 /// Syr Konrad's disjunctive zone-change condition into separate triggers.
 #[test]

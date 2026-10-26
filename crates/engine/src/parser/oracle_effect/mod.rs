@@ -47101,6 +47101,14 @@ fn parse_effect_chain_ir_body(
                     }
                 )
             });
+        // CR 608.2k + CR 608.2c (issue #9620): an "If you do," continuation after
+        // an optional SelfRef cost (remove counters from ~ / sacrifice ~) names
+        // the trigger-event object, not the source — Magnanimous Magistrate
+        // ("you may remove … counters from this creature. If you do, return that
+        // card"), Angelic Renewal ("you may sacrifice this enchantment. If you
+        // do, return that card"). The Ajani/Tamiyo SelfRef-continuation class
+        // uses "then" compound linkage (no OptionalEffectPerformed gate) and is
+        // unaffected by excluding that gate here.
         if (typed_trigger_subject
             || exile_then_return_transformed
             || attach_anaphor_after_self_ref_transform)
@@ -47109,6 +47117,9 @@ fn parse_effect_chain_ir_body(
                 .clauses()
                 .last()
                 .is_some_and(|prev| parsed_clause_targets_self_ref(&prev.parsed))
+            && !condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
         {
             replace_target_with_self(&mut clause.effect);
         }
