@@ -561,6 +561,7 @@ mod havi_the_all_father;
 mod hawkeye_avenging_archer_dealt_damage_draw;
 mod hazel_of_the_rootbloom;
 mod head_of_the_hunt_token_controller_7086;
+mod heaped_harvest_sacrifice_search_625;
 mod heart_shaped_herb_monarch;
 mod heist_production_path_handoff;
 mod hellkite_tyrant_steal_artifacts_2906;
