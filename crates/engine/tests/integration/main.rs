@@ -563,6 +563,7 @@ mod hazel_of_the_rootbloom;
 mod head_of_the_hunt_token_controller_7086;
 mod heaped_harvest_sacrifice_search_625;
 mod heart_shaped_herb_monarch;
+mod heated_argument_parent_anaphor;
 mod heist_production_path_handoff;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heralds_horn_changeling_chosen_type;
