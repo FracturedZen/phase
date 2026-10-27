@@ -32684,6 +32684,43 @@ pub(crate) fn fold_activation_cost(
     cost
 }
 
+/// CR 106.4 + CR 106.6 + CR 500.5 + CR 602.2b: Does `player`'s mana pool hold mana that will
+/// empty as this step ends and that the activation of `source_id`'s ability `ability_index` is
+/// allowed to spend? Eligibility is the payment pipeline's own
+/// (`mana_payment::mana_unit_permits_payment_context` over the activation's payment context), so
+/// restrictions such as "spend this mana only to cast spells" are honoured. Whether the unit
+/// matches one of the cost's shards is deliberately not asked: answering that a second time would
+/// duplicate the payment authority, and the effective cost can depend on targets and modes not yet
+/// chosen. Mana kept until end of turn ("you don't lose this mana as steps and phases end") is
+/// not counted; mana a step-end handler such as Upwelling would keep still is. Every gap errs
+/// toward yes, for callers that use it to stand down a preference to wait.
+pub fn pool_has_expiring_mana_for_activation(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let context = activation_payment_context(state, source_id, Some(ability_index));
+    let ctx = context.as_payment_context();
+    state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .is_some_and(|p| {
+            p.mana_pool.count_where(|unit| {
+                // CR 500.5: everything but end-of-turn retention empties before the main
+                // phase; a mana-burn `EndOfPhaseGroup` mark lasts only to the beginning phase's end.
+                let empties = match unit.expiry {
+                    None
+                    | Some(crate::types::mana::ManaExpiry::EndOfPhaseGroup)
+                    | Some(crate::types::mana::ManaExpiry::EndOfCombat) => true,
+                    Some(crate::types::mana::ManaExpiry::EndOfTurn) => false,
+                };
+                empties && mana_payment::mana_unit_permits_payment_context(unit, &ctx)
+            }) > 0
+        })
+}
+
 /// The mana an activation cost demands: the sum of its mana legs, for the
 /// prompt's engine-authored locked totals.
 fn activation_mana_component(cost: &AbilityCost) -> ManaCost {
