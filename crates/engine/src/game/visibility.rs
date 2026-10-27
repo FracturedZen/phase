@@ -5508,6 +5508,7 @@ mod tests {
                     deferred_events: all_events.clone(),
                     ..Default::default()
                 },
+                resolving_entry: None,
             },
         );
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -7042,6 +7043,7 @@ mod tests {
                             remaining_players: Vec::new(),
                             selections: Vec::new(),
                             completion: Default::default(),
+                            resolving_entry: None,
                         });
                 }),
             ),
