@@ -164,6 +164,7 @@ mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
 mod chandra_revolution_doesnt_untap_slot;
+mod chaos_wand_targeted_free_cast_301;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
 mod chittering_rats;
