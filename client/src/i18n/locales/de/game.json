@@ -2051,6 +2051,10 @@
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },
+  "attachHostPlayer": {
+    "title": "Spieler wählen",
+    "subtitle": "Wähle, welcher Spieler diese Verzauberung erhält."
+  },
   "zoneOpponentChooser": {
     "title": "Gegner wählen",
     "subtitle": "Wähle, welcher Gegner die Wahl trifft.",

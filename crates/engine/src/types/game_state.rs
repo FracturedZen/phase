@@ -17719,6 +17719,16 @@ pub enum WaitingFor {
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
+    /// CR 608.2d + CR 303.4 + CR 115.10a: a resolving attach chooses which
+    /// player receives the already-bound attachments. Only entered when two or
+    /// more players match the host filter. `attachments` are the objects to
+    /// move; the rider stays on the resolution continuation.
+    AttachHostPlayerChoice {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        attachments: Vec<ObjectId>,
+        source_id: ObjectId,
+    },
     /// CR 608.2d: A resolving `ChooseFromZone { chooser: Opponent }` ("an
     /// opponent chooses …") in a multiplayer game — the controller (`player`)
     /// first decides WHICH opponent makes the choice (Plargg and Nassari's
@@ -19016,6 +19026,7 @@ impl WaitingFor {
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::AttachHostPlayerChoice { .. } => "AttachHostPlayerChoice",
             WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
@@ -19176,6 +19187,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashChooseOpponent { player, .. }
+            | WaitingFor::AttachHostPlayerChoice { player, .. }
             | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
@@ -19528,6 +19540,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::AttachHostPlayerChoice { .. }
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
@@ -19736,6 +19749,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::AttachHostPlayerChoice { .. }
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
@@ -26086,6 +26100,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RevealUntilKeptChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
+        | WaitingFor::AttachHostPlayerChoice { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }

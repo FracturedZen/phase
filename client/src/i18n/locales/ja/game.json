@@ -2094,6 +2094,10 @@
     "title": "激突する対戦相手を選択",
     "subtitle": "あなたと激突する対戦相手を選択"
   },
+  "attachHostPlayer": {
+    "title": "プレイヤーを選択",
+    "subtitle": "このパーマネントを受け取るプレイヤーを選択"
+  },
   "zoneOpponentChooser": {
     "title": "対戦相手を選択",
     "subtitle": "選択を行う対戦相手を選択",

@@ -2051,6 +2051,10 @@
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },
+  "attachHostPlayer": {
+    "title": "Wybierz gracza",
+    "subtitle": "Wybierz, który gracz otrzymuje ten obiekt."
+  },
   "zoneOpponentChooser": {
     "title": "Wybierz przeciwnika",
     "subtitle": "Wybierz, który przeciwnik dokonuje wyboru.",

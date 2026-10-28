@@ -5,8 +5,8 @@ use crate::game::game_object::AttachTarget;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
-    EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
-    TargetFilter, TargetRef, TypedFilter,
+    EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -325,6 +325,15 @@ fn resolve_bound_attachment_operation(
             "No attachment for Attach".to_string(),
         ));
     }
+    // CR 303.4 + CR 608.2d + CR 115.10a: a player host ("to you", "to one of
+    // your opponents") is chosen as the effect resolves. One legal player
+    // attaches immediately. Two or more pause for the controller's choice.
+    // An empty population does nothing. Object hosts stay on the path below.
+    if let Some(candidates) =
+        attach_player_host_candidates(state, ability, target_filter, &attachment_ids)
+    {
+        return resolve_player_host_attach(state, ability, &attachment_ids, candidates, events);
+    }
     let target_id = match resolve_attach_target(
         state,
         ability,
@@ -540,6 +549,185 @@ pub(crate) fn deliver_attach(
         Some(crate::types::replacements::ReplacementEvent::Attached),
         events,
     )
+}
+
+/// CR 303.4 + CR 115.10a: `Some` when `host` names players rather than objects.
+/// The population is the living players that filter accepts and that at least
+/// one attachment can legally move onto. `None` leaves object-host resolution
+/// untouched. Empty `Typed` filters are objects even when they carry a
+/// controller, so they are not a player host.
+fn attach_player_host_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host: &TargetFilter,
+    attachment_ids: &[ObjectId],
+) -> Option<Vec<PlayerId>> {
+    if !matches!(
+        host,
+        TargetFilter::PlayerMatching { .. }
+            | TargetFilter::Controller
+            | TargetFilter::Opponent
+            | TargetFilter::SpecificPlayer { .. }
+    ) {
+        return None;
+    }
+    Some(
+        state
+            .players
+            .iter()
+            .map(|player| player.id)
+            .filter(|id| crate::game::players::player_exists_for_choice(state, *id))
+            .filter(|id| player_matches_attach_host(state, ability, host, *id))
+            .filter(|id| {
+                attachment_ids
+                    .iter()
+                    .any(|attachment| can_attach_to_player(state, *attachment, *id))
+            })
+            .collect(),
+    )
+}
+
+fn player_matches_attach_host(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    host: &TargetFilter,
+    player: PlayerId,
+) -> bool {
+    match host {
+        TargetFilter::PlayerMatching { player: scope } => super::matches_player_scope(
+            state,
+            player,
+            scope,
+            ability.controller,
+            ability.source_id,
+        ),
+        TargetFilter::Controller => player == ability.controller,
+        TargetFilter::Opponent => {
+            crate::game::players::is_opponent(state, ability.controller, player)
+        }
+        TargetFilter::SpecificPlayer { id } => player == *id,
+        _ => false,
+    }
+}
+
+/// CR 608.2d + CR 701.3a: attach the bound objects to a player host, or pause
+/// when the controller still has to choose which player.
+fn resolve_player_host_attach(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    attachment_ids: &[ObjectId],
+    candidates: Vec<PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<AttachResolutionOutcome, EffectError> {
+    let source_id = ability.source_id;
+    match candidates.len() {
+        0 => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id,
+                subject: None,
+            });
+            Ok(AttachResolutionOutcome::Completed)
+        }
+        1 => {
+            deliver_attachments_to_player(
+                state,
+                attachment_ids,
+                candidates[0],
+                source_id,
+                events,
+            );
+            Ok(AttachResolutionOutcome::Completed)
+        }
+        _ => {
+            state.waiting_for = WaitingFor::AttachHostPlayerChoice {
+                player: ability.controller,
+                candidates,
+                attachments: attachment_ids.to_vec(),
+                source_id,
+            };
+            Ok(AttachResolutionOutcome::Paused)
+        }
+    }
+}
+
+/// CR 701.3a + CR 303.4: move each attachment onto `host` and publish the same
+/// unattach and resolution events an object host emits.
+fn deliver_attachments_to_player(
+    state: &mut GameState,
+    attachment_ids: &[ObjectId],
+    host: PlayerId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    for &attachment_id in attachment_ids {
+        let already_on_host = state.objects.get(&attachment_id).and_then(|obj| obj.attached_to)
+            == Some(AttachTarget::Player(host));
+        if let Some(old_target) = attach_to_player(state, attachment_id, host) {
+            events.push(GameEvent::Unattached {
+                attachment_id,
+                old_target,
+            });
+        }
+        let attached = !already_on_host
+            && state.objects.get(&attachment_id).and_then(|obj| obj.attached_to)
+                == Some(AttachTarget::Player(host));
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id,
+            subject: attached
+                .then(|| state.capture_event_object_snapshot(attachment_id))
+                .flatten()
+                .map(Box::new),
+        });
+    }
+}
+
+/// CR 608.2d: the controller answered `AttachHostPlayerChoice`. Deliver the
+/// attach, and when a described-attachment choice still owns the child frame,
+/// retire that frame and tell its rider whether the attach happened.
+pub(crate) fn finish_attach_host_player_choice(
+    state: &mut GameState,
+    attachments: &[ObjectId],
+    host: PlayerId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let events_before = events.len();
+    deliver_attachments_to_player(state, attachments, host, source_id, events);
+    let owns_attachment_choice = state
+        .active_ability_continuation_frame()
+        .is_some_and(|frame| frame.pending.attachment_choice.is_some());
+    if !owns_attachment_choice {
+        return;
+    }
+    let operation = state
+        .active_ability_continuation_frame()
+        .and_then(|frame| frame.pending.attachment_choice.as_ref())
+        .map(|choice| choice.operation.as_ref().clone())
+        .expect("attachment choice owner must retain its operation");
+    let _ = state
+        .take_active_attachment_choice_continuation()
+        .expect("completed player-host attach must retain its active child")
+        .expect("completed player-host attach must own its active child");
+    let performed = !super::compound_run_unperformed(&operation)
+        && super::mandatory_parent_effect_performed(
+            &operation.effect,
+            &events[events_before..],
+        );
+    if let Some(tail) = state
+        .active_ability_continuation_frame_mut()
+        .map(|frame| frame.pending.chain.as_mut())
+        .filter(|tail| {
+            tail.sub_link == crate::types::ability::SubAbilityLink::SequentialSibling
+                && tail
+                    .condition
+                    .as_ref()
+                    .is_some_and(super::condition_depends_on_effect_performed)
+        })
+    {
+        tail.set_optional_effect_performed_recursive(performed);
+    }
 }
 
 /// CR 701.3d: Unattach each matching Equipment from the matched host, leaving

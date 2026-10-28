@@ -230,6 +230,12 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 608.2d + CR 303.4: The controller's choice of which player receives
+    /// the attachments, answering a pending `WaitingFor::AttachHostPlayerChoice`.
+    /// `opponent` must be one of that prompt's `candidates`.
+    ChooseAttachHostPlayer {
+        opponent: PlayerId,
+    },
     /// CR 608.2d: The controller's choice of which opponent makes a resolving
     /// "an opponent chooses …" zone selection, answering a pending
     /// `WaitingFor::ChooseFromZoneOpponentChooser`. `opponent` must be one of
@@ -1971,6 +1977,7 @@ impl GameAction {
             Self::PassPriority
             | Self::ChooseExert { .. }
             | Self::ChooseClashOpponent { .. }
+            | Self::ChooseAttachHostPlayer { .. }
             | Self::ChooseZoneOpponentChooser { .. }
             | Self::ChoosePileOpponent { .. }
             | Self::ChooseAnnouncingOpponent { .. }
@@ -2375,6 +2382,7 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseAttachHostPlayer { .. }
             | GameAction::ChooseZoneOpponentChooser { .. }
             | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAnnouncingOpponent { .. }

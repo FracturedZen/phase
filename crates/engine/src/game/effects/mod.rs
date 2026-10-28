@@ -4895,6 +4895,11 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             // candidate pool — so the sub-ability chain auto-stashes here
             // exactly like the `ChooseFromZoneChoice` pause it precedes.
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
+            // CR 608.2d + CR 303.4 + CR 115.10a: choosing which player receives
+            // an already-bound attachment pauses this instruction. The rider
+            // ("If you do, draw two cards") must not run until the host is
+            // chosen, or the draw would happen before the Curse moves.
+            | WaitingFor::AttachHostPlayerChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ReturnAsAuraTarget { .. }
             // CR 608.2c: a "one of them" host choice pauses token creation;

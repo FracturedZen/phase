@@ -1996,6 +1996,11 @@ pub fn fallback_action(
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
 
+        // CR 608.2d + CR 303.4: player-host attach — fall back to the first candidate.
+        WaitingFor::AttachHostPlayerChoice { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseAttachHostPlayer { opponent }),
+
         // CR 608.2d: "an opponent chooses …" — the controller picks which
         // opponent makes the zone choice; fall back to the first candidate.
         WaitingFor::ChooseFromZoneOpponentChooser { candidates, .. } => candidates

@@ -197,6 +197,7 @@ fn candidate_discards_controller(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAttachHostPlayer { .. }
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }

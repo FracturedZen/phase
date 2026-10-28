@@ -149,6 +149,8 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SpellbookDraft",
     "ManifestDreadChoice",
     "ClashChooseOpponent",
+    // CR 608.2d + CR 303.4: choose which player receives the attachments.
+    "AttachHostPlayerChoice",
     // CR 608.2d: "an opponent chooses" from a zone — the controller picks the
     // choosing opponent (ZoneOpponentChooserModal).
     "ChooseFromZoneOpponentChooser",

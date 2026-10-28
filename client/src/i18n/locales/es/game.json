@@ -2051,6 +2051,10 @@
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
   },
+  "attachHostPlayer": {
+    "title": "Elegir jugador",
+    "subtitle": "Elige qué jugador recibe este permanente."
+  },
   "zoneOpponentChooser": {
     "title": "Elegir oponente",
     "subtitle": "Elige qué oponente hace la elección.",

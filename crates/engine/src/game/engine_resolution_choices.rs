@@ -1027,6 +1027,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::AttachHostPlayerChoice { .. }
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
@@ -4008,6 +4009,35 @@ pub(super) fn handle_resolution_choice(
                         .expect("a settled clash choice must resume its continuation");
                 }
             }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::AttachHostPlayerChoice {
+                player,
+                candidates,
+                attachments,
+                source_id,
+            },
+            GameAction::ChooseAttachHostPlayer { opponent },
+        ) => {
+            // CR 608.2d + CR 303.4: the chosen player must be one of the
+            // offered candidates. The attach handler does not re-resolve the
+            // ability; the parked rider resumes after the objects move.
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen attach host {opponent:?} is not a legal player"
+                )));
+            }
+            set_priority(state, player);
+            effects::attach::finish_attach_host_player_choice(
+                state,
+                &attachments,
+                opponent,
+                source_id,
+                events,
+            );
+            set_priority(state, player);
+            resume_with_error_propagation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

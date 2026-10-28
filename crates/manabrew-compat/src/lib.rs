@@ -2780,6 +2780,9 @@ pub fn convert_available_action(
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
         }
+        GameAction::ChooseAttachHostPlayer { .. } => {
+            AvailableActionConversion::Unsupported("local.attach-host-player-unsupported")
+        }
         GameAction::ChooseZoneOpponentChooser { .. } => {
             AvailableActionConversion::Unsupported("local.zone-opponent-chooser-unsupported")
         }

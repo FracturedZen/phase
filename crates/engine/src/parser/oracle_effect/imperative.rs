@@ -7543,7 +7543,15 @@ fn parse_explicit_targeted_attach(
 {
     let (input, _) = tag("attach ").parse(input)?;
     let (input, (multi_target, cardinality)) = parse_attach_target_quantifier(input)?;
-    let (input, attachment) = take_until(" to ").parse(input)?;
+    // CR 608.2c: "attached to <referent>" is part of the attachment phrase.
+    // Its internal " to " is not the recipient separator. Take the next " to "
+    // after that relation; a phrase with no such relation still splits on the
+    // first " to " ("attach target Equipment you control to target creature").
+    let qualified_attachment = recognize(pair(
+        pair(take_until(" attached to "), tag(" attached to ")),
+        take_until(" to "),
+    ));
+    let (input, attachment) = alt((qualified_attachment, take_until(" to "))).parse(input)?;
     let (input, _) = tag(" to ").parse(input)?;
     let (input, target) = rest.parse(input)?;
     Ok((
@@ -7627,6 +7635,25 @@ fn parse_attach_recipient<'a>(
     ctx: &mut ParseContext,
     attachment: Option<&TargetFilter>,
 ) -> (TargetFilter, &'a str) {
+    // CR 102.2 + CR 102.3 + CR 608.2d: "one of your opponents" is one player
+    // chosen from the controller's opponents, not the word "you" and not an
+    // opponent-controlled object. Consume it before the object-target parse.
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("one of your opponents"),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return (
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::Opponent),
+            },
+            &trimmed[lower.len()..],
+        );
+    }
     // CR 608.2k: thread `ctx` so "attach this Equipment to it" in trigger
     // bodies binds "it" to the triggering subject (Ancestral Katana —
     // "Whenever a Samurai or Warrior you control attacks alone … attach this
@@ -7767,7 +7794,43 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
             return (TargetFilter::SelfRef, &text[text.len()..]);
         }
     }
-    parse_target_with_ctx(text, &mut ctx.clone_player_antecedents())
+    let (filter, rest) = parse_target_with_ctx(text, &mut ctx.clone_player_antecedents());
+    bind_trailing_attached_to(filter, rest, &mut ctx.clone_player_antecedents())
+}
+
+/// CR 303.4 + CR 608.2c: a described attachment may name its current host
+/// ("a Curse attached to you"). Fold that trailing relation into
+/// `FilterProp::AttachedTo` and consume a leftover period. Any other tail
+/// leaves the filter and remainder unchanged.
+fn bind_trailing_attached_to<'a>(
+    filter: TargetFilter,
+    rest: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let trimmed = rest.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let Ok((after_lower, _)) =
+        tag::<_, _, OracleError<'_>>("attached to ").parse(lower.as_str())
+    else {
+        return (filter, rest);
+    };
+    let after = &trimmed[lower.len() - after_lower.len()..];
+    let Some((referent, tail)) = parse_context_set_referent(after, after_lower, ctx) else {
+        return (filter, rest);
+    };
+    let Some(bound) = distribute_attached_set(filter.clone(), referent) else {
+        return (filter, rest);
+    };
+    let tail_trim = tail.trim_start();
+    if tail_trim.is_empty() {
+        return (bound, tail_trim);
+    }
+    if let Ok((after_period, _)) =
+        all_consuming(tag::<_, _, OracleError<'_>>(".")).parse(tail_trim)
+    {
+        return (bound, after_period);
+    }
+    (filter, rest)
 }
 
 /// CR 608.2c (rules of English — number agreement): Recognize an attachment
@@ -20326,6 +20389,57 @@ mod tests {
             assert_eq!(
                 multi_target,
                 Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 1 })),
+                "{input}"
+            );
+        }
+    }
+
+    /// CR 303.4 + CR 608.2d + CR 102.2 (issue #9611): "attach a Curse attached
+    /// to you to one of your opponents" chooses a Curse that is attached to
+    /// the controller and a recipient opponent. The internal "attached to you"
+    /// is not the recipient, and the recipient is not the controller.
+    #[test]
+    fn parse_attach_curse_attached_to_you_to_one_opponent() {
+        for input in [
+            "attach a Curse attached to you to one of your opponents",
+            "attach a Curse attached to you to one of your opponents.",
+        ] {
+            let lower = input.to_ascii_lowercase();
+            let result = parse_utility_imperative_ast(input, &lower, &mut ParseContext::default());
+            let Some(UtilityImperativeAst::Attach {
+                attachment,
+                target,
+                selection,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected Attach, got {result:?}");
+            };
+            assert_eq!(
+                attachment,
+                TargetFilter::Typed(
+                    TypedFilter::default()
+                        .subtype("Curse".to_string())
+                        .properties(vec![FilterProp::AttachedTo {
+                            to: AttachmentReferent::Player {
+                                player: ControllerRef::You,
+                            },
+                        }])
+                ),
+                "{input}"
+            );
+            assert_eq!(
+                target,
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::Opponent),
+                },
+                "{input}"
+            );
+            assert_eq!(
+                selection,
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::One,
+                },
                 "{input}"
             );
         }

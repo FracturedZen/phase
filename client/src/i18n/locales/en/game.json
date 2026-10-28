@@ -2089,6 +2089,10 @@
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
   },
+  "attachHostPlayer": {
+    "title": "Choose a Player",
+    "subtitle": "Choose which player receives this attachment."
+  },
   "zoneOpponentChooser": {
     "title": "Choose Opponent",
     "subtitle": "Choose which opponent makes the choice.",

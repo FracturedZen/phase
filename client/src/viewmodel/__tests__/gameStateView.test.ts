@@ -1148,6 +1148,7 @@ const PARTITION_FIXTURES: Record<
   ManifestDreadChoice: NO_TARGET_REF_LEGAL_SET,
   LearnChoice: NO_TARGET_REF_LEGAL_SET,
   ClashChooseOpponent: NO_TARGET_REF_LEGAL_SET,
+  AttachHostPlayerChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseFromZoneOpponentChooser: NO_TARGET_REF_LEGAL_SET,
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,

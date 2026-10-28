@@ -638,6 +638,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
         | (
+            WaitingFor::AttachHostPlayerChoice { .. },
+            GameAction::ChooseAttachHostPlayer { .. },
+        )
+        | (
             WaitingFor::ChooseFromZoneOpponentChooser { .. },
             GameAction::ChooseZoneOpponentChooser { .. },
         )
@@ -1384,6 +1388,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAttachHostPlayer { .. }
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }

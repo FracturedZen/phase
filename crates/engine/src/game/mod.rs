@@ -192,6 +192,8 @@ pub mod stickers;
 #[cfg(test)]
 #[path = "stickers_tests.rs"]
 mod stickers_tests;
+#[cfg(test)]
+mod lynde_upkeep_attach_9611;
 pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;

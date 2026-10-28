@@ -2051,6 +2051,10 @@
     "title": "Scegli l'avversario per lo scontro",
     "subtitle": "Scegli quale avversario si scontrerà con te."
   },
+  "attachHostPlayer": {
+    "title": "Scegli un giocatore",
+    "subtitle": "Scegli quale giocatore riceve questo permanente."
+  },
   "zoneOpponentChooser": {
     "title": "Scegli avversario",
     "subtitle": "Scegli quale avversario effettua la scelta.",

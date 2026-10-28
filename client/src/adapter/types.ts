@@ -2892,6 +2892,8 @@ export type WaitingFor =
   | { type: "ManifestDreadChoice"; data: { player: PlayerId; cards: ObjectId[]; source_id: ObjectId } }
   | { type: "LearnChoice"; data: { player: PlayerId; hand_cards: ObjectId[] } }
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
+  // CR 608.2d + CR 303.4: the controller chooses which player receives the attachments.
+  | { type: "AttachHostPlayerChoice"; data: { player: PlayerId; candidates: PlayerId[]; attachments: ObjectId[]; source_id: ObjectId } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
@@ -3398,6 +3400,8 @@ export type GameAction =
   // CR 702.99a: answer to CipherEncodeChoice — a creature to encode on, or null to decline.
   | { type: "CipherEncode"; data: { creature: ObjectId | null } }
   | { type: "ChooseClashOpponent"; data: { opponent: PlayerId } }
+  // CR 608.2d + CR 303.4: answer to AttachHostPlayerChoice.
+  | { type: "ChooseAttachHostPlayer"; data: { opponent: PlayerId } }
   // CR 608.2d: answer to ChooseFromZoneOpponentChooser — which opponent will choose.
   | { type: "ChooseZoneOpponentChooser"; data: { opponent: PlayerId } }
   | { type: "ChoosePileOpponent"; data: { opponent: PlayerId } }

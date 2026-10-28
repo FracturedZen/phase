@@ -1046,6 +1046,10 @@
     "subtitle": "选择由哪位对手与你比点。",
     "title": "选择比点的对手"
   },
+  "attachHostPlayer": {
+    "subtitle": "选择由哪位玩家接受此永久物。",
+    "title": "选择玩家"
+  },
   "coinFlip": {
     "buttons": {
       "keep": "保留这个"

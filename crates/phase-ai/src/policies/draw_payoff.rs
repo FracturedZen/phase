@@ -219,6 +219,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAttachHostPlayer { .. }
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }

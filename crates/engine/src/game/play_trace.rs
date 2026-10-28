@@ -931,6 +931,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAttachHostPlayer { .. }
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }
@@ -1195,6 +1196,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::AttachHostPlayerChoice { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::VoteChoice { .. }

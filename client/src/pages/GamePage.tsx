@@ -117,6 +117,7 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { AttachHostPlayerModal } from "../components/modal/AttachHostPlayerModal.tsx";
 import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
@@ -2039,6 +2040,7 @@ function GamePageContent({
             <MeldChoiceModal />
             <AssistChoosePlayerModal />
             <ClashOpponentModal />
+            <AttachHostPlayerModal />
             <ZoneOpponentChooserModal />
             <PileOpponentModal />
             <AnnouncingOpponentModal />

@@ -360,6 +360,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::AttachHostPlayerChoice { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
@@ -615,6 +616,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::AttachHostPlayerChoice { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
@@ -5019,6 +5021,7 @@ fn selection_projection(
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::AttachHostPlayerChoice { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
@@ -5932,6 +5935,7 @@ fn project_action_payload(
             }
         }
         GameAction::ChooseClashOpponent { opponent }
+        | GameAction::ChooseAttachHostPlayer { opponent }
         | GameAction::ChooseZoneOpponentChooser { opponent }
         | GameAction::ChoosePileOpponent { opponent }
         | GameAction::ChooseAnnouncingOpponent { opponent }
@@ -6724,6 +6728,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseExert { .. } => InteractionActionCode::ChooseExert,
         GameAction::ChooseEnlist { .. } => InteractionActionCode::ChooseEnlist,
         GameAction::ChooseClashOpponent { .. } => InteractionActionCode::ChooseClashOpponent,
+        GameAction::ChooseAttachHostPlayer { .. } => InteractionActionCode::ChooseAttachHostPlayer,
         GameAction::ChooseZoneOpponentChooser { .. } => {
             InteractionActionCode::ChooseZoneOpponentChooser
         }

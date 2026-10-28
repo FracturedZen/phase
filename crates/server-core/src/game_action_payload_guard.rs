@@ -692,6 +692,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseAttachHostPlayer { .. }
         | GameAction::ChooseZoneOpponentChooser { .. }
         | GameAction::ChoosePileOpponent { .. }
         | GameAction::ChooseAnnouncingOpponent { .. }

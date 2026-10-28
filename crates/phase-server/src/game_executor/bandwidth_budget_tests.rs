@@ -600,6 +600,7 @@ impl ScriptedGame {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::AttachHostPlayerChoice { .. }
             | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseAnnouncingOpponent { .. }
             | WaitingFor::ClashCardPlacement { .. }
