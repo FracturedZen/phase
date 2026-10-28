@@ -977,6 +977,33 @@ pub(crate) fn parse_trigger_lines_at_index_ir(
     )]
 }
 
+/// CR 122.1 + CR 603.4: "counter(s) are/is put/placed on <object> for the first
+/// time each turn" names that object's first counter placement this turn.
+fn parse_passive_counter_object_first_time(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("counter").parse(input)?;
+    let (input, plural) = opt(tag("s")).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, _) = if plural.is_some() {
+        tag::<_, _, OracleError<'_>>("are ").parse(input)?
+    } else {
+        tag::<_, _, OracleError<'_>>("is ").parse(input)?
+    };
+    let (input, _) = alt((tag("put on "), tag("placed on "))).parse(input)?;
+    let (input, _) = verify(
+        take_until::<_, _, OracleError<'_>>(" for the first time each turn"),
+        |object: &str| !object.trim().is_empty(),
+    )
+    .parse(input)?;
+    let (input, _) = tag(" for the first time each turn").parse(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, ()))
+}
+
+fn passive_counter_object_first_time(condition: &str) -> bool {
+    let lower = condition.trim().to_ascii_lowercase();
+    scan_preceded(&lower, parse_passive_counter_object_first_time).is_some()
+}
+
 /// Part D: If a `"for the first time ..."` qualifier appears as a
 /// word-boundary phrase in `condition`, strip it and return the corresponding
 /// trigger-event limit; otherwise return `(condition, None)` unchanged.
@@ -1696,13 +1723,21 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // Split condition from effect at first ", " after the trigger phrase
     let (condition_text_raw, effect_text) = split_trigger(tp);
 
-    // CR-uniform: `"for the first time each turn"` in trigger CONDITION text is
-    // a trigger-frequency qualifier that maps to `OncePerTurn`. Detect and strip
-    // before the condition is dispatched. Scoped to condition text (NOT full
-    // text) so triggers whose EFFECT text coincidentally contains the phrase
-    // aren't retroactively constrained.
+    // CR 603.2: `"for the first time each turn"` in trigger CONDITION text is
+    // a trigger-frequency qualifier that maps to `OncePerTurn`, except a passive
+    // counter placement on a named object (CR 122.1). Detect and strip before
+    // the condition is dispatched. Scoped to condition text (NOT full text) so
+    // triggers whose EFFECT text coincidentally contains the phrase aren't
+    // retroactively constrained.
     let (condition_text_stripped, first_time_limit) =
         strip_first_time_each_turn_qualifier(&condition_text_raw);
+    let per_object_counter_first_time = matches!(first_time_limit, Some(FirstTimeLimit::EachTurn))
+        && passive_counter_object_first_time(&condition_text_raw);
+    let first_time_limit = if per_object_counter_first_time {
+        None
+    } else {
+        first_time_limit
+    };
     let condition_text: &str = &condition_text_stripped;
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
@@ -1760,6 +1795,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 )
             }
         };
+    // CR 122.1 + CR 603.4: the passive "for the first time each turn" counter
+    // placement is the per-object first-placement fact. It is not a count of
+    // how many times this ability has fired, so it does not become OncePerTurn.
+    let if_condition = if per_object_counter_first_time && if_condition.is_none() {
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn)
+    } else {
+        if_condition
+    };
     let optional_player = optional_player_from_effect_body(&effect_without_if)
         .or_else(|| after_structural_if.and_then(optional_player_from_effect_body));
 

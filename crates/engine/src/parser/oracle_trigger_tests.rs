@@ -31635,6 +31635,94 @@ fn aurelia_attacks_first_time_has_constraint() {
     assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
 }
 
+fn assert_per_object_counter_first_time(def: &TriggerDefinition) {
+    assert_eq!(def.mode, TriggerMode::CounterAdded);
+    assert_eq!(def.constraint, None);
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn)
+    );
+    match def.execute.as_deref().map(|ability| ability.effect.as_ref()) {
+        Some(Effect::Draw { count, .. }) => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+        }
+        other => panic!("expected a draw, got {other:?}"),
+    }
+}
+
+/// CR 122.1 + CR 603.4: the event-position wording is the object's first
+/// counter placement this turn. OncePerTurn would count firings of the
+/// ability instead, including after the ability was gained mid-turn.
+#[test]
+fn counters_put_on_object_for_the_first_time_each_turn_is_per_object() {
+    let def = parse_trigger_line(
+        "Whenever one or more counters are put on this creature for the first time each turn, draw a card.",
+        "Granted Counter Draw",
+    );
+    assert_per_object_counter_first_time(&def);
+    assert!(def.batched);
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+#[test]
+fn typed_counters_put_on_object_for_the_first_time_each_turn_is_per_object() {
+    let def = parse_trigger_line(
+        "Whenever one or more +1/+1 counters are put on another creature you control for the first time each turn, draw a card.",
+        "Granted Typed Counter Draw",
+    );
+    assert_per_object_counter_first_time(&def);
+    assert!(def.counter_filter.is_some(), "{:?}", def.counter_filter);
+}
+
+/// An active "you put counters" frequency stays a firing limit. The per-object
+/// reading is the passive placement on a named object.
+#[test]
+fn active_counter_placement_first_time_stays_once_per_turn() {
+    let def = parse_trigger_line(
+        "Whenever you put one or more counters on a creature for the first time each turn, draw a card.",
+        "Active Counter First Time",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterAdded);
+    assert_eq!(
+        def.constraint,
+        Some(crate::types::ability::TriggerConstraint::OncePerTurn)
+    );
+    assert_ne!(
+        def.condition,
+        Some(TriggerCondition::FirstTimeObjectCountersAddedThisTurn)
+    );
+}
+
+/// CR 122.1 + CR 603.4 (#9624): the granted trigger draws on the first time
+/// counters are put on that creature this turn.
+#[test]
+fn danny_pink_granted_counter_trigger_is_per_object_first_time() {
+    let parsed = parse_oracle_text(
+        "Mentor\nCreatures you control have \"Whenever one or more counters are put on this creature for the first time each turn, draw a card.\"",
+        "Danny Pink",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string()],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let mut granted = Vec::new();
+    for static_def in &parsed.statics {
+        for modification in &static_def.modifications {
+            if let ContinuousModification::GrantTrigger { trigger } = modification {
+                granted.push(trigger.as_ref());
+            }
+        }
+    }
+    assert_eq!(granted.len(), 1, "{:?}", parsed.statics);
+    assert_per_object_counter_first_time(granted[0]);
+    assert!(granted[0].batched);
+    assert_eq!(granted[0].valid_card, Some(TargetFilter::SelfRef));
+}
+
 #[test]
 fn during_your_main_phase_parser_arm_unit_test() {
     // Isolated: parse_trigger_constraint arm.
