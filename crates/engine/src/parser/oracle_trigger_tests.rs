@@ -11542,16 +11542,18 @@ fn trigger_becomes_blocked_by_a_qualified_creature_preserves_blocker_filter() {
 
 #[test]
 fn trigger_becomes_blocked_by_two_or_more_creatures_stays_bare() {
+    // CR 603.2: "by two or more creatures" is not the bare once-per-combat
+    // event and not the per-blocker "by a creature" event. The mode has no
+    // count field, so the line is refused rather than firing on any block.
     let def = parse_trigger_line(
         "Whenever Vicious Battlerager becomes blocked by two or more creatures, draw a card.",
         "Vicious Battlerager",
     );
 
-    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert!(
-        def.valid_target.is_none(),
-        "threshold wording must not be treated as a per-blocker qualifier"
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "threshold wording must be refused, got {:?}",
+        def.mode
     );
 }
 
@@ -36915,11 +36917,31 @@ fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
         })
     );
 
+    // A source type on a threshold cell is the source filter, not the
+    // single-source amount scope. The threshold stays whole-event.
+    let attacking = parse_trigger_line(
+        "Whenever ~ is dealt 3 or more damage by an attacking creature, draw a card.",
+        "Some Card",
+    );
+    assert_eq!(attacking.mode, TriggerMode::DamageReceived);
+    assert_eq!(
+        attacking.valid_source.as_ref(),
+        Some(&damage_by_source("an attacking creature"))
+    );
+    assert_eq!(
+        attacking.damage_amount,
+        Some(DamageAmountThreshold {
+            comparator: Comparator::GE,
+            threshold: 3,
+            scope: DamageAmountScope::WholeEvent,
+        })
+    );
+
     // H3 — paired negative: a newly-opened cell whose trailing restriction is
     // still unmodeled must STILL be refused. Without it the tail guard could be
     // silently dead and no test would notice.
     let unmodeled_tail = parse_trigger_line(
-        "Whenever ~ is dealt 3 or more damage by an attacking creature, draw a card.",
+        "Whenever ~ is dealt 3 or more damage by exactly one creature, draw a card.",
         "Some Card",
     );
     assert!(
@@ -36941,15 +36963,21 @@ fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
     assert_eq!(reachable.damage_kind, DamageKindFilter::NoncombatOnly);
 }
 
+fn damage_by_source(phrase: &str) -> TargetFilter {
+    let (filter, rest) = parse_type_phrase_folding(phrase);
+    assert!(
+        rest.trim().is_empty(),
+        "{phrase:?} left {rest:?} from {filter:?}"
+    );
+    filter
+}
+
 #[test]
 fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
-    // The honesty guard is AXIS-SCOPED, not blanket: a cell the former `tag()`
-    // arms already covered keeps its pre-existing behavior byte-identically.
-    // Chandra's Phoenix's dropped source restriction is a KNOWN PRE-EXISTING
-    // gap that predates the parameterization — recorded, not endorsed. Widening
-    // the guard to a blanket remainder check would regress this card (and,
-    // invisibly to coverage, Glyph of Life), so this test is the narrowness
-    // sentinel. Verbatim Oracle text.
+    // CR 603.2 + CR 120.1: the source tail is the trigger event. Verbatim
+    // Chandra's Phoenix. An empty-type controller filter on `valid_target` is
+    // the player encoding (`subject_is_player`), not an object that opponent
+    // controls.
     let def = parse_trigger_line(
         "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
         "Chandra's Phoenix",
@@ -36957,6 +36985,94 @@ fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
     assert_eq!(def.mode, TriggerMode::DamageReceived);
     assert_eq!(def.damage_kind, DamageKindFilter::Any);
     assert_eq!(def.damage_amount, None);
+    assert_eq!(
+        def.valid_target,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+    assert_eq!(
+        def.valid_source,
+        Some(merge_or_filters(
+            damage_by_source("a red instant or sorcery spell you control"),
+            damage_by_source("a red planeswalker you control"),
+        ))
+    );
+}
+
+/// CR 603.2 + CR 120.1 + CR 111.1 + CR 509.3c: a qualifier on the trigger event
+/// is stored, or the line is refused. Card names here are not the printed
+/// cards; the class is the qualifier.
+#[test]
+fn dealt_damage_and_block_qualifier_class() {
+    let by_creature = parse_trigger_line(
+        "Whenever this creature is dealt damage by a creature, draw a card.",
+        "Sample Beast",
+    );
+    assert_eq!(by_creature.mode, TriggerMode::DamageReceived);
+    assert_eq!(by_creature.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        by_creature.valid_source.as_ref(),
+        Some(&damage_by_source("a creature"))
+    );
+
+    let by_opponent_source = parse_trigger_line(
+        "Whenever this creature is dealt damage by a source an opponent controls, draw a card.",
+        "Sample Beast",
+    );
+    assert_eq!(by_opponent_source.mode, TriggerMode::DamageReceived);
+    // Same filter the active-voice "a source an opponent controls deals"
+    // grammar stores. "source" is not a card type, so this is not a type phrase.
+    assert_eq!(
+        by_opponent_source.valid_source,
+        Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        ))
+    );
+
+    let bare = parse_trigger_line(
+        "Whenever this creature is dealt damage, draw a card.",
+        "Sample Beast",
+    );
+    assert_eq!(bare.mode, TriggerMode::DamageReceived);
+    assert!(bare.valid_source.is_none());
+
+    let single = parse_trigger_line(
+        "Whenever ~ is dealt damage by a single source, draw a card.",
+        "Sample Beast",
+    );
+    assert!(
+        matches!(single.mode, TriggerMode::Unknown(_)),
+        "a single-source tail with no amount must be refused, got {:?}",
+        single.mode
+    );
+
+    let to_token = parse_trigger_line(
+        "Whenever this creature deals damage to a token, draw a card.",
+        "Sample Beast",
+    );
+    assert_eq!(to_token.mode, TriggerMode::DamageDone);
+    assert_eq!(to_token.valid_source, Some(TargetFilter::SelfRef));
+    match to_token.valid_target {
+        Some(TargetFilter::Typed(ref tf)) => {
+            assert!(
+                tf.properties.contains(&FilterProp::Token),
+                "expected Token, got {:?}",
+                tf.properties
+            );
+        }
+        other => panic!("expected a token recipient, got {other:?}"),
+    }
+
+    let blocked = parse_trigger_line(
+        "Whenever this creature becomes blocked by two or more creatures, draw a card.",
+        "Sample Beast",
+    );
+    assert!(
+        matches!(blocked.mode, TriggerMode::Unknown(_)),
+        "an unstored blocker count must be refused, got {:?}",
+        blocked.mode
+    );
 }
 
 #[test]

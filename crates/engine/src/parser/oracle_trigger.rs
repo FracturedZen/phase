@@ -14712,7 +14712,32 @@ fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFil
     // them into the typed recipient so the trigger gates on the damaged object's
     // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase_folding`.
     let (rest, prefix_props) = many0(terminated(parse_property_filter, space1)).parse(rest)?;
-    let (rest, mut filter) = parse_type_phrase_nom(rest)?;
+    // CR 111.1: "token" is an object property, not a card type, so the type-phrase
+    // combinator declines it. A bare token recipient ("to a token") is that property
+    // alone. A following word is a qualifier this arm does not model.
+    let (rest, mut filter) = if let Ok((after_token, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("tokens")),
+        value((), tag("token")),
+    ))
+    .parse(rest)
+    {
+        if after_token
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ' ')
+        {
+            return Err(nom::Err::Error(OracleError::new(
+                after_token,
+                nom::error::ErrorKind::Eof,
+            )));
+        }
+        (
+            after_token,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Token])),
+        )
+    } else {
+        parse_type_phrase_nom(rest)?
+    };
     // Phrase-terminator guard: accept only end-of-string or a non-alphanumeric
     // terminator (comma, period, space-before-clause), and explicitly reject the
     // " or <player-word>" disjunction. Declines "creature or player",
@@ -15833,10 +15858,16 @@ fn try_parse_event(
     if let Ok((after_compound, _)) =
         tag::<_, _, OracleError<'_>>("blocks or becomes blocked").parse(rest)
     {
+        let filter = parse_becomes_blocked_by_filter(after_compound);
+        // CR 603.2: same refusal as the bare "becomes blocked" arm. An
+        // unparsed blocker tail must not collapse to the unqualified event.
+        if !after_compound.trim().is_empty() && filter.is_none() {
+            return Some(unknown_trigger_definition(full_lower));
+        }
         let mut def = make_base();
         def.mode = TriggerMode::BlocksOrBecomesBlocked;
         def.valid_card = Some(subject.clone());
-        def.valid_target = parse_becomes_blocked_by_filter(after_compound);
+        def.valid_target = filter;
         return Some((TriggerMode::BlocksOrBecomesBlocked, def));
     }
 
@@ -16275,6 +16306,86 @@ fn try_parse_event(
             nom::error::ErrorKind::Eof,
         )))
     }
+    /// CR 120.1 + CR 603.2: "by <source> [or by <source> …]" on a passive
+    /// damage-received event. Each leg is a type phrase. Declines "by a single
+    /// source" (that tail is the amount scope, carried only when a threshold
+    /// exists) and any remainder that is not another "or by" leg, so the caller
+    /// can refuse the line instead of dropping the restriction.
+    fn parse_passive_damage_by_sources(input: &str) -> Option<TargetFilter> {
+        let mut rest = tag::<_, _, OracleError<'_>>("by ")
+            .parse(input.trim_start())
+            .ok()?
+            .0;
+        if tag::<_, _, OracleError<'_>>("a single source")
+            .parse(rest)
+            .is_ok_and(|(after, _)| after.trim().is_empty())
+        {
+            return None;
+        }
+        let mut filters = Vec::new();
+        loop {
+            let Some((filter, next)) = parse_damage_by_leg(rest) else {
+                return None;
+            };
+            let next_trim = next.trim_start();
+            if !next_trim.is_empty()
+                && tag::<_, _, OracleError<'_>>("or by ").parse(next_trim).is_err()
+            {
+                return None;
+            }
+            filters.push(filter);
+            match tag::<_, _, OracleError<'_>>("or by ").parse(next_trim) {
+                Ok((after, _)) => rest = after,
+                Err(_) => break,
+            }
+        }
+        match filters.len() {
+            0 => None,
+            1 => filters.pop(),
+            _ => {
+                let mut acc = filters.remove(0);
+                for leg in filters {
+                    acc = merge_or_filters(acc, leg);
+                }
+                Some(acc)
+            }
+        }
+    }
+    /// One "by <source>" leg. A type phrase wins when it consumes the leg
+    /// ("a creature", "a red instant or sorcery spell you control"). "source"
+    /// is not a card type, so that grammar stops early; the active-voice
+    /// damage subject (`parse_damage_source_subject`, CR 109.4) is the
+    /// fallback and only counts when it consumes the whole leg.
+    fn parse_damage_by_leg(input: &str) -> Option<(TargetFilter, &str)> {
+        let (filter, next) = parse_type_phrase_folding(input);
+        let next_trim = next.trim_start();
+        if next.len() != input.len()
+            && (next_trim.is_empty()
+                || tag::<_, _, OracleError<'_>>("or by ").parse(next_trim).is_ok())
+        {
+            return Some((filter, next));
+        }
+        parse_damage_source_leg(input)
+    }
+    /// `parse_damage_source_subject` requires the space before its verb. At the
+    /// end of a condition that space is absent, so probe with one extra space
+    /// and accept only a fully consumed leg.
+    fn parse_damage_source_leg(input: &str) -> Option<(TargetFilter, &str)> {
+        if let Ok((after, filter)) = parse_damage_source_subject(input) {
+            let after_trim = after.trim_start();
+            if after_trim.is_empty()
+                || tag::<_, _, OracleError<'_>>("or by ").parse(after_trim).is_ok()
+            {
+                return Some((filter, after));
+            }
+        }
+        if input.ends_with(' ') {
+            return None;
+        }
+        let padded = format!("{input} ");
+        let (after, filter) = parse_damage_source_subject(&padded).ok()?;
+        after.is_empty().then_some((filter, ""))
+    }
     /// CR 120.4 + CR 120.4b: the source-scoping tail on the received-damage
     /// grammar — `"…by a single source"` (Pain Magnification). It narrows the
     /// threshold's aggregation domain from the whole simultaneous damage event
@@ -16343,12 +16454,10 @@ fn try_parse_event(
         // The restriction is carried on `DamageAmountThreshold`, which exists
         // only when an amount is present — so with no amount there is nowhere
         // for the scope to live. Do not consume the tail at all in that case:
-        // leaving it unconsumed hands it to the arm's existing unconsumed-tail
-        // guard, which already refuses it in every newly-opened cell AND
-        // preserves the four `previously_covered` cells byte-identically
-        // (Chandra's Phoenix, Glyph of Life). Consuming it unconditionally
-        // would emit `DamageReceived` with the restriction silently dropped in
-        // every newly-opened cell that has no threshold to carry the scope.
+        // leaving it unconsumed hands it to the DealtDamage arm. That arm
+        // stores a type-phrase "by <source>" tail on `valid_source` and
+        // refuses "by a single source" (and any other unparsed remainder)
+        // instead of emitting `DamageReceived` with the restriction dropped.
         let (rest, scope) = if amount.is_some() {
             opt(parse_single_source_scope).parse(rest)?
         } else {
@@ -16579,18 +16688,22 @@ fn try_parse_event(
         let mut def = make_base();
         match event {
             SimpleEvent::BecomesBlocked => {
-                def.mode = TriggerMode::BecomesBlocked;
-                def.valid_card = Some(subject.clone());
                 // CR 509.3c vs 509.3d: a bare "becomes blocked" triggers once per
                 // combat, while "becomes blocked by a <type>" triggers once for
                 // each matching blocker. Capture the "by a/an <type phrase>"
                 // qualifier as the blocker filter so the runtime matcher can tell
-                // the two apart (a present `valid_target` => per-blocker). Without
-                // this, plain "becomes blocked by a creature" cards (which carry no
-                // further qualifier) were indistinguishable from the bare form.
-                // Only the singular-article form qualifies — a threshold like
-                // "by two or more creatures" stays the bare once-per-combat form.
-                def.valid_target = parse_becomes_blocked_by_filter(remaining);
+                // the two apart (a present `valid_target` => per-blocker).
+                // CR 603.2: a count tail ("by two or more creatures") is a
+                // different event. There is no blocker-count field on this mode,
+                // and reading it as the bare once-per-combat form would fire on
+                // any block. Refuse it.
+                let filter = parse_becomes_blocked_by_filter(remaining);
+                if !remaining.trim().is_empty() && filter.is_none() {
+                    return Some(unknown_trigger_definition(full_lower));
+                }
+                def.mode = TriggerMode::BecomesBlocked;
+                def.valid_card = Some(subject.clone());
+                def.valid_target = filter;
             }
             SimpleEvent::BecomesTargetSpellOrAbility => {
                 def.mode = TriggerMode::BecomesTarget;
@@ -16681,32 +16794,21 @@ fn try_parse_event(
                 kind,
                 amount,
             } => {
-                // CR 603.2: an ability triggers when a game event matches ITS trigger
-                // event. The four triples below are exactly the cells the former eight
-                // `tag()` arms already reached; on those, a trailing restriction has
-                // been dropped since long before this change (Chandra's Phoenix's
-                // source clause, Glyph of Life's "by an attacking creature"), and
-                // re-adjudicating them is a separate defect class with its own
-                // population and its own coverage delta. For every OTHER cell this
-                // parameterization newly opens, this arm is the sole cause of the
-                // resulting def, so it must refuse a def it cannot fully model: an
-                // unconsumed tail is an unmodeled restriction ("by a single source"
-                // — Pain Magnification), and emitting `DamageReceived` anyway would
-                // assert a DIFFERENT trigger event and over-fire. Falling through to
-                // `TriggerMode::Unknown` keeps the line honestly unsupported. Mirrors
-                // the F1 guard on `SimpleEvent::BecomesTargetAbility` above, which is
-                // likewise scoped to the seam that owns the tail rather than applied
-                // to shared siblings.
-                let previously_covered = matches!(
-                    (channel, kind, amount),
-                    (DamageChannel::Total, DamageKindFilter::Any, None)
-                        | (DamageChannel::Total, DamageKindFilter::CombatOnly, None)
-                        | (DamageChannel::Excess, DamageKindFilter::Any, None)
-                        | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
-                );
-                if !previously_covered && !remaining.trim().is_empty() {
-                    return None;
-                }
+                // CR 603.2 + CR 120.1: an ability triggers when a game event matches
+                // ITS trigger event. A "by <source>" tail is part of that event.
+                // Represent it on `valid_source`, or refuse the line. Emitting
+                // `DamageReceived` with the tail dropped would fire for every
+                // source (Chandra's Phoenix, Glyph of Life). "by a single source"
+                // is the amount-scope tail, not a type phrase: it is consumed
+                // only when a threshold exists to carry it, and declined here.
+                let source = if remaining.trim().is_empty() {
+                    None
+                } else {
+                    let Some(filter) = parse_passive_damage_by_sources(remaining) else {
+                        return None;
+                    };
+                    Some(filter)
+                };
                 def.mode = match channel {
                     DamageChannel::Total => TriggerMode::DamageReceived,
                     DamageChannel::Excess => TriggerMode::ExcessDamageAll,
@@ -16714,6 +16816,9 @@ fn try_parse_event(
                 def.damage_kind = kind;
                 def.damage_amount = amount;
                 set_trigger_subject(&mut def, subject);
+                if let Some(filter) = source {
+                    def.valid_source = Some(filter);
+                }
             }
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
