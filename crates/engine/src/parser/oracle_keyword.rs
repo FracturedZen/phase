@@ -1062,9 +1062,11 @@ fn parse_morph_cost(cost_text: &str) -> Option<crate::types::keywords::MorphCost
         return None;
     }
     let cost = super::oracle_cost::parse_oracle_cost(clean);
+    if !crate::types::keywords::is_ability_cost_supported_for_morph(&cost) {
+        return None;
+    }
     match cost {
         AbilityCost::Mana { cost: mana_cost } => Some(MorphCost::Mana(mana_cost)),
-        AbilityCost::Unimplemented { .. } => None,
         other => Some(MorphCost::NonMana(other)),
     }
 }
@@ -1815,7 +1817,16 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     .parse(text)
     {
         if let Some(morph_cost) = parse_morph_cost(rest) {
-            return Some((Keyword::Morph(morph_cost), ""));
+            let after_sentence = split_once_on(rest, ".").map_or("", |(_, (_, after))| after);
+            let unconsumed = match &morph_cost {
+                crate::types::keywords::MorphCost::NonMana(cost)
+                    if !ability_cost_is_fully_typed(cost) =>
+                {
+                    rest
+                }
+                _ => after_sentence,
+            };
+            return Some((Keyword::Morph(morph_cost), unconsumed));
         }
     }
 
@@ -7179,6 +7190,65 @@ mod router_registry_tests {
                 assert!(filter.is_some());
             }
             other => panic!("expected Morph(NonMana(ReturnToHand)), got {other:?}"),
+        }
+    }
+
+    /// CR 702.37a + CR 702.37e: Non-mana reveal morph cost (Dragon's Eye Savants).
+    #[test]
+    fn parse_morph_non_mana_cost_dragons_eye_savants() {
+        let line = "Morph—Reveal a blue card in your hand. (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+        let routed = parse_router_keyword_line(line).expect("must parse morph keyword line");
+        let kw = routed.keyword.expect("must produce keyword");
+        match kw {
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(
+                crate::types::ability::AbilityCost::Reveal { count, filter },
+            )) => {
+                assert_eq!(
+                    count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(filter.is_some());
+            }
+            other => panic!("expected Morph(NonMana(Reveal)), got {other:?}"),
+        }
+    }
+
+    /// CR 702.37e: Reject partially parsed morph costs with unconsumed semantic text.
+    #[test]
+    fn parse_morph_cost_rejects_unconsumed_semantic_tail() {
+        let hostile1 = "Morph—Pay 5 life if you control an artifact";
+        assert!(
+            parse_router_keyword_line(hostile1).is_none(),
+            "partially parsed morph cost must be rejected: {hostile1:?}"
+        );
+
+        // CR 107.3d: variable non-mana morph costs are not supported yet.
+        let hostile_x = "Morph—Reveal X blue cards in your hand";
+        assert!(
+            parse_router_keyword_line(hostile_x).is_none(),
+            "symbolic-X morph reveal cost must be rejected: {hostile_x:?}"
+        );
+
+        let hostile2 = "Morph—Reveal a blue card in your hand if you control an artifact";
+        assert!(
+            parse_router_keyword_line(hostile2).is_none(),
+            "partially parsed morph reveal cost must be rejected: {hostile2:?}"
+        );
+    }
+
+    /// CR 107.3d: variable-count non-mana morph costs are not supported yet, so
+    /// the parser rejects them and they stay unsupported in coverage.
+    #[test]
+    fn parse_morph_cost_rejects_variable_counts() {
+        for line in [
+            "Morph—Pay X life",
+            "Morph—Discard X cards",
+            "Morph—Sacrifice X creatures",
+        ] {
+            assert!(
+                parse_router_keyword_line(line).is_none(),
+                "variable-count morph cost must be rejected: {line:?}"
+            );
         }
     }
 }
