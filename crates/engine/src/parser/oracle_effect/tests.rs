@@ -40186,6 +40186,232 @@ fn jailbreak_enters_under_their_control_binds_to_the_owner() {
     );
 }
 
+const IMMORTAL_OBLIGATION_ORACLE: &str = "Return target creature card from an opponent's \
+graveyard to the battlefield under their control with a duty counter on it. For as long as \
+that creature has a duty counter on it, it is goaded, can't attack you or a permanent you \
+control, and can't block creatures you control.";
+
+fn duty_rider<'a>(root: &'a AbilityDefinition) -> Option<&'a AbilityDefinition> {
+    let mut cursor = root.sub_ability.as_deref();
+    while let Some(node) = cursor {
+        if matches!(node.effect.as_ref(), Effect::GenericEffect { .. }) {
+            return Some(node);
+        }
+        cursor = node.sub_ability.as_deref();
+    }
+    None
+}
+
+/// SHAPE (#9608): the spell returns the targeted graveyard creature under its
+/// owner's control with one generic duty counter, and the following sentence is
+/// one counter-gated continuous effect. A whole-line `CantBlock` static on the
+/// instant is the bug this row refuses.
+#[test]
+fn immortal_obligation_spell_lowers_to_reanimation_plus_duty_rider() {
+    let parsed = parse_oracle_text(
+        IMMORTAL_OBLIGATION_ORACLE,
+        "Immortal Obligation",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        crate::parser::oracle_classifier::should_defer_spell_to_effect(
+            &IMMORTAL_OBLIGATION_ORACLE.to_lowercase()
+        ),
+        "the spell must leave the whole-line static classifier"
+    );
+    assert!(
+        parsed.statics.is_empty(),
+        "the instant must not carry a self static: {:?}",
+        parsed.statics
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed: {:?}",
+        parsed.parse_warnings
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let spell = &parsed.abilities[0];
+    assert!(
+        !chain_has_unimplemented(spell),
+        "the chain must lower, not fall through: {spell:?}"
+    );
+
+    let Effect::ChangeZone {
+        origin,
+        destination,
+        enters_under,
+        target,
+        enter_with_counters,
+        ..
+    } = spell.effect.as_ref()
+    else {
+        panic!("sentence one must return the card, got {:?}", spell.effect);
+    };
+    // "from an opponent's graveyard" is the target filter's zone. `origin`
+    // stays unset when that filter already names the graveyard.
+    assert!(
+        origin.is_none() || *origin == Some(Zone::Graveyard),
+        "origin must not name a different zone: {origin:?}"
+    );
+    assert_eq!(*destination, Zone::Battlefield);
+    assert_eq!(*enters_under, Some(ControllerRef::ParentTargetOwner));
+    let TargetFilter::Typed(tf) = target else {
+        panic!("expected a typed creature-card filter, got {target:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "the returned object is a creature card: {tf:?}"
+    );
+    assert!(
+        tf.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::InZone { zone } if *zone == Zone::Graveyard
+        )),
+        "the origin is the graveyard: {tf:?}"
+    );
+    assert!(
+        tf.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::Opponent
+            }
+        )),
+        "the card comes from an opponent's graveyard: {tf:?}"
+    );
+    assert!(
+        enter_with_counters.iter().any(|(counter, count)| matches!(
+            (counter, count),
+            (
+                CounterType::Generic(name),
+                QuantityExpr::Fixed { value: 1 }
+            ) if name == "duty"
+        )),
+        "the card enters with one generic duty counter: {enter_with_counters:?}"
+    );
+
+    let rider = duty_rider(spell).expect("sentence two must be a continuous rider");
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target: rider_target,
+        ..
+    } = rider.effect.as_ref()
+    else {
+        panic!("sentence two must be a GenericEffect, got {:?}", rider.effect);
+    };
+    // ParentTarget is the antecedent context ref. It does not open a second
+    // announcement slot; the cast pipeline answers only sentence one's target.
+    assert_eq!(rider_target, &Some(TargetFilter::ParentTarget));
+    let for_as_long_as = |window: &Option<Duration>| {
+        matches!(
+            window,
+            Some(Duration::ForAsLongAs {
+                condition: StaticCondition::RecipientHasCounters {
+                    counters: crate::types::counter::CounterMatch::OfType(counter),
+                    minimum: 1,
+                    maximum: None,
+                }
+            }) if *counter == CounterType::Generic("duty".to_string())
+        )
+    };
+    assert!(
+        for_as_long_as(&rider.duration) && for_as_long_as(duration),
+        "the duty counter gates both duration carriers: ability={:?} effect={duration:?}",
+        rider.duration
+    );
+    assert_eq!(static_abilities.len(), 1);
+    let installer = &static_abilities[0];
+    assert_eq!(
+        installer.mode,
+        crate::types::statics::StaticMode::Continuous
+    );
+    assert_eq!(installer.affected, Some(TargetFilter::ParentTarget));
+    assert_eq!(installer.modifications.len(), 3, "{:?}", installer.modifications);
+
+    assert!(matches!(
+        &installer.modifications[0],
+        ContinuousModification::AddStaticMode {
+            mode: crate::types::statics::StaticMode::Goaded
+        }
+    ));
+    let ContinuousModification::GrantStaticAbility { definition } = &installer.modifications[1]
+    else {
+        panic!(
+            "the attack prohibition is a nested grant: {:?}",
+            installer.modifications[1]
+        );
+    };
+    assert_eq!(
+        definition.mode,
+        crate::types::statics::StaticMode::CantAttack
+    );
+    assert_eq!(definition.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        definition.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+    );
+    assert_eq!(definition.source_controller, None);
+    let ContinuousModification::AddStaticMode { mode } = &installer.modifications[2] else {
+        panic!(
+            "the block prohibition is an added mode: {:?}",
+            installer.modifications[2]
+        );
+    };
+    let crate::types::statics::StaticMode::BlockRestriction { filter } = mode else {
+        panic!("the added mode must be a block restriction: {mode:?}");
+    };
+    let TargetFilter::Not { filter: inner } = filter else {
+        panic!("can't block <object> is a negated whitelist: {filter:?}");
+    };
+    let TargetFilter::Typed(blocked) = inner.as_ref() else {
+        panic!("the blocked objects are a typed set: {inner:?}");
+    };
+    assert!(
+        blocked.type_filters.contains(&TypeFilter::Creature),
+        "{blocked:?}"
+    );
+    assert_eq!(blocked.controller, Some(ControllerRef::You), "{blocked:?}");
+}
+
+/// A permanent's own "can't block" line must stay on the static classifier.
+/// The spell deferral is the counter-gated goad sentence, not the verb.
+#[test]
+fn immortal_obligation_routing_leaves_permanent_cant_block_static() {
+    assert!(!crate::parser::oracle_classifier::should_defer_spell_to_effect(
+        "creatures you control can't block."
+    ));
+}
+
+/// CR 701.15a: a bare copula goad is still the one-shot designation. The
+/// compound recognizer must not claim a clause that has no restriction tail.
+#[test]
+fn immortal_obligation_bare_goad_stays_one_shot() {
+    let effect = parse_effect("it is goaded until end of turn");
+    assert!(
+        matches!(effect, Effect::Goad { .. }),
+        "bare goad stays Effect::Goad: {effect:?}"
+    );
+}
+
+/// CR 508.1c: the singular defended phrase names the same set as the plural,
+/// and the bare "you" arm still wins when that is the whole scope.
+#[test]
+fn immortal_obligation_singular_defended_scope() {
+    use crate::types::triggers::AttackTargetFilter;
+    let parse = crate::parser::oracle_static::parse_cant_attack_defended_scope_nom;
+    let (rest, scope) = parse(" you or a permanent you control").expect("singular");
+    assert!(rest.is_empty(), "{rest:?}");
+    assert_eq!(scope, Some(AttackTargetFilter::PlayerOrPermanents));
+    let (rest, scope) = parse(" you or permanents you control").expect("plural");
+    assert!(rest.is_empty(), "{rest:?}");
+    assert_eq!(scope, Some(AttackTargetFilter::PlayerOrPermanents));
+    let (rest, scope) = parse(" you").expect("player");
+    assert!(rest.is_empty(), "{rest:?}");
+    assert_eq!(scope, Some(AttackTargetFilter::Player));
+}
+
 /// CR 110.2a: `"under your control"` is unchanged — the 558-card population
 /// that already worked must stay byte-identical through the new grammar.
 #[test]

@@ -6809,6 +6809,13 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             AttackTargetFilter::PlayerOrPermanents,
             tag(" you or permanents you control"),
         ),
+        // CR 508.1c + CR 310.5: the singular printing ("you or a permanent you
+        // control") names the same defended set as the plural. It must precede
+        // the bare " you" arm, which is a prefix of this phrase.
+        value(
+            AttackTargetFilter::PlayerOrPermanents,
+            tag(" you or a permanent you control"),
+        ),
         value(
             AttackTargetFilter::PlayerOrPlaneswalker,
             tag(" you or planeswalkers you control"),

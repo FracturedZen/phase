@@ -8137,11 +8137,15 @@ pub fn can_block_pair_with_precomputed(
         let StaticMode::BlockRestriction { filter } = &def.mode else {
             continue;
         };
+        // CR 509.1b + CR 509.1c + CR 109.5: a one-shot that grafts this
+        // restriction onto an opponent's creature carries the installing player
+        // on `source_controller`. `None` keeps a printed carrier-relative
+        // restriction ("can block only creatures with flying") on the carrier.
         if !matches_target_filter(
             state,
             attacker_id,
             filter,
-            &FilterContext::from_source(state, src_id),
+            &blocker_filter_context(state, src_id, def.source_controller),
         ) {
             return false;
         }

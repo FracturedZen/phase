@@ -264,6 +264,19 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return true;
     }
 
+    // CR 611.2 + CR 611.2a: "…with a counter on it. For as long as that creature
+    // has a counter on it, it is goaded, can't attack you …, and can't block …"
+    // matches both the "can't attack" and "can't block" arms of
+    // `STATIC_CONTAINS_PATTERNS`, so Priority 7 would claim the whole spell as
+    // one `StaticDefinition { mode: CantBlock, affected: SelfRef }`. The second
+    // sentence is a resolving spell's continuous effect, not a static printed
+    // on the instant. The predicate is that sentence's own recognizer — the
+    // parser is the detector — so a spell the recognizer refuses keeps the
+    // static path.
+    if super::oracle_effect::subject::is_counter_gated_goad_restriction(lower) {
+        return true;
+    }
+
     if is_self_spell_cost_modification(lower) {
         return false;
     }

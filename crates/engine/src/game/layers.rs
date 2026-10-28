@@ -10587,12 +10587,15 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
 ///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
 ///   to the target's controller.
+/// - `BlockRestriction` carrying the same kind of controller-relative filter
+///   ("can't block creatures you control"). Grafted onto an opponent's creature,
+///   CR 109.5 would otherwise read "you" as that creature's controller.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
 ///
@@ -10603,9 +10606,8 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),
         }
-        | StaticMode::MustBeBlocked { by: Some(filter) } => {
-            target_filter_controller_is_relative(filter)
-        }
+        | StaticMode::MustBeBlocked { by: Some(filter) }
+        | StaticMode::BlockRestriction { filter } => target_filter_controller_is_relative(filter),
         // CR 109.5 + CR 701.15b: the avoided player is the INSTALLING player,
         // not the carrier's controller — the requirement is grafted onto an
         // opponent's creature (Kardur, Doomscourge) or the controller's own

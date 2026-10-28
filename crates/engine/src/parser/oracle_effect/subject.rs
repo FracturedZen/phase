@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_until};
 use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value, verify};
-use nom::multi::separated_list1;
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -42,7 +42,8 @@ use super::super::oracle_nom::target::{
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
+    parse_block_object_filter, parse_cant_attack_defended_scope_nom,
+    parse_cant_be_activated_exemption_in_text, parse_rule_static_separator_nom,
     parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
@@ -225,6 +226,26 @@ pub(super) fn try_parse_subject_predicate_ast(
                 effect,
                 duration,
                 sub_ability,
+            },
+            ctx,
+        ));
+    }
+
+    // CR 611.2 + CR 611.2b + CR 701.15a + CR 508.1c: "it is goaded, can't attack
+    // <scope>, and can't block <object>" is one continuous effect. The copula
+    // arm below declines a leftover conjunct, and a leading-duration split
+    // would then keep only `Effect::Goad` (which ends on the goader's next
+    // turn) and drop the restrictions. This recognizer consumes the whole
+    // compound, so that split sees a different effect and declines.
+    if let Some(clause) = try_parse_goaded_restriction_compound(text, ctx) {
+        return Some(subject_predicate_ast_from_clause(
+            text,
+            clause,
+            |effect, duration, _sub_ability, _onset| PredicateAst::Continuous {
+                effect,
+                duration,
+                sub_ability: None,
+                onset: ContinuousEffectOnset::WhenFollowed,
             },
             ctx,
         ));
@@ -7818,6 +7839,178 @@ fn extract_pump_modifiers(
     }
 
     Some((power?, toughness?))
+}
+
+/// CR 611.2 + CR 611.2b: routing predicate for a spell whose later sentence
+/// installs one counter-gated continuous effect — the anaphor is goaded, and at
+/// least one controller-relative combat restriction follows. The parser is the
+/// detector: a line this combinator refuses stays on the static path.
+pub(crate) fn is_counter_gated_goad_restriction(lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(lower, parse_counter_gated_goad_sentence).is_some()
+}
+
+fn parse_counter_gated_goad_sentence(input: &str) -> OracleResult<'_, ()> {
+    let (after_prefix, _) = tag("for as long as ").parse(input)?;
+    let (after_condition, condition) =
+        nom_condition::parse_recipient_has_counters(after_prefix)?;
+    // A source subject ("this creature has a counter") is a different class.
+    if !matches!(
+        condition,
+        StaticCondition::RecipientHasCounters { .. }
+    ) {
+        return Err(crate::parser::oracle_nom::error::oracle_err(input));
+    }
+    let (after_comma, _) = tag(", ").parse(after_condition)?;
+    let (after_sentence, sentence) = alt((
+        recognize(pair(take_until("."), tag("."))),
+        recognize(rest),
+    ))
+    .parse(after_comma)?;
+    parse_goaded_restriction_body(sentence)?;
+    Ok((after_sentence, ()))
+}
+
+enum GoadRestrictionConjunct {
+    Attack(crate::types::triggers::AttackTargetFilter),
+    Block(TargetFilter),
+}
+
+/// CR 701.15a + CR 508.1c + CR 509.1b: "<anaphor> is/are goaded" plus at least
+/// one elided-subject combat restriction, consuming the whole clause. A single
+/// "it is goaded [duration]" does not match, so the copula arm keeps that class.
+fn parse_goaded_restriction_body(
+    input: &str,
+) -> OracleResult<'_, (&str, Vec<GoadRestrictionConjunct>)> {
+    let (rest, subject) = parse_goad_restriction_subject(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((tag("is goaded"), tag("are goaded"))).parse(rest)?;
+    let (rest, conjuncts) = many1(preceded(
+        parse_rule_static_separator_nom,
+        parse_goad_restriction_conjunct,
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = multispace0.parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, (subject, conjuncts)))
+}
+
+fn parse_goad_restriction_subject(input: &str) -> OracleResult<'_, &str> {
+    recognize(alt((
+        tag("that creature"),
+        tag("that permanent"),
+        tag("that artifact"),
+        tag("that land"),
+        tag("those creatures"),
+        tag("those permanents"),
+        tag("they"),
+        tag("it"),
+    )))
+    .parse(input)
+}
+
+fn parse_goad_restriction_conjunct(input: &str) -> OracleResult<'_, GoadRestrictionConjunct> {
+    alt((
+        map(parse_goad_attack_conjunct, GoadRestrictionConjunct::Attack),
+        map(parse_goad_block_conjunct, GoadRestrictionConjunct::Block),
+    ))
+    .parse(input)
+}
+
+fn parse_goad_attack_conjunct(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (rest, _) = tag("can't attack").parse(input)?;
+    let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
+    match defended {
+        Some(defended) => Ok((rest, defended)),
+        None => Err(crate::parser::oracle_nom::error::oracle_err(input)),
+    }
+}
+
+fn parse_goad_block_conjunct(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = tag("can't block").parse(input)?;
+    // CR 509.1b: "can't block or be blocked by" is the symmetric class. Declining
+    // here keeps it from lowering to the inverse blanket restriction.
+    let (rest, _) = not(tag(" or be blocked by")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    parse_block_object_filter(rest)
+}
+
+fn goad_restriction_subject_is_fixed(affected: &TargetFilter) -> bool {
+    matches!(
+        affected,
+        TargetFilter::ParentTarget
+            | TargetFilter::TrackedSet { .. }
+            | TargetFilter::SelfRef
+            | TargetFilter::SpecificObject { .. }
+    )
+}
+
+/// CR 611.2 + CR 611.2a + CR 701.15a + CR 508.1c + CR 509.1b: lower the compound
+/// to one `GenericEffect`. Goad is a transient designation (`AddStaticMode`
+/// `Goaded`), not `Effect::Goad`. The attack prohibition is a nested
+/// `GrantStaticAbility` so resolution can latch "you" to the installing player.
+/// The block prohibition is an `AddStaticMode` whose graft stamps the same
+/// player. The embedded duration stays unset so a peeled leading duration is
+/// the authority.
+fn try_parse_goaded_restriction_compound(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (_, (subject, conjuncts)) = parse_goaded_restriction_body(lower.as_str()).ok()?;
+    let application =
+        parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
+    let affected = static_affected_for_application(&application);
+    if !goad_restriction_subject_is_fixed(&affected) {
+        return None;
+    }
+    let mut modifications = vec![ContinuousModification::AddStaticMode {
+        mode: StaticMode::Goaded,
+    }];
+    for conjunct in conjuncts {
+        match conjunct {
+            GoadRestrictionConjunct::Attack(defended) => {
+                let granted = StaticDefinition::new(StaticMode::CantAttack)
+                    .affected(TargetFilter::SelfRef)
+                    .attack_defended(Some(defended));
+                modifications.push(ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(granted),
+                });
+            }
+            GoadRestrictionConjunct::Block(object) => {
+                modifications.push(ContinuousModification::AddStaticMode {
+                    mode: StaticMode::BlockRestriction {
+                        filter: TargetFilter::Not {
+                            filter: Box::new(object),
+                        },
+                    },
+                });
+            }
+        }
+    }
+    Some(ParsedEffectClause {
+        optional_targeting: false,
+        unlowered_guard: None,
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(text.to_string())],
+            duration: None,
+            target: application.target,
+            end_cost: None,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
+    })
 }
 
 /// CR 701.15a: Parse "it's goaded [duration]" / "it is goaded [duration]" copula

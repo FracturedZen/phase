@@ -194,6 +194,8 @@ pub mod stickers;
 mod stickers_tests;
 #[cfg(test)]
 mod lynde_upkeep_attach_9611;
+#[cfg(test)]
+mod immortal_obligation_9608;
 pub mod target_occurrences;
 pub mod targeting;
 pub mod text_substitution;
