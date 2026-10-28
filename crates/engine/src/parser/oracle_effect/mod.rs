@@ -9376,6 +9376,12 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             return clause;
         }
     }
+    // CR 608.2c + CR 701.15b: a glued "The token is goaded …" sentence is part of
+    // this clause. Peel it before a token parser records the creation and drops
+    // the trailing sentence.
+    if let Some(clause) = sequence::try_parse_token_clause_with_trailing_goad(text, ctx) {
+        return clause;
+    }
     // CR 608.2c: "do X unless [game state]" — strip trailing unless suffix and
     // attach the negated gate before body parsing (payment-unless uses
     // `unless_pay` / `extract_resolution_unless_pay_modifier` instead).

@@ -2076,7 +2076,8 @@ fn starts_typed_group_continuous_continuation(remainder_lower: &str) -> bool {
 /// allowed to split, so they are deliberately absent here (issue #5844 review).
 /// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
 /// "The token is goaded" already fails the authority check and stays attached
-/// without an explicit guard.
+/// without an explicit guard. [`try_parse_token_clause_with_trailing_goad`]
+/// peels that attached sentence onto the token creator.
 fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
     alt((
         tag::<_, _, OracleError<'_>>("it "),
@@ -5522,22 +5523,7 @@ pub(super) fn apply_clause_continuation(
             ));
         }
         ContinuationAst::GoadLastCreated { duration } => {
-            // CR 701.15b: Goaded is a designation on the created tokens. The
-            // static-mode modification is an intermediate resolution encoding.
-            defs.push(AbilityDefinition::new(
-                kind,
-                Effect::GenericEffect {
-                    static_abilities: vec![StaticDefinition::continuous()
-                        .affected(TargetFilter::LastCreated)
-                        .modifications(vec![ContinuousModification::AddStaticMode {
-                            mode: StaticMode::Goaded,
-                        }])
-                        .description("goaded".to_string())],
-                    duration: duration.or(Some(Duration::Permanent)),
-                    target: Some(TargetFilter::LastCreated),
-                    end_cost: None,
-                },
-            ));
+            defs.push(goad_last_created_ability(kind, duration));
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate { scope } => {
@@ -9776,6 +9762,129 @@ fn parse_nonland_permanent_domain(
     ))
 }
 
+/// CR 701.15b: Goaded is a designation on the created tokens. The static-mode
+/// modification is an intermediate resolution encoding.
+fn goad_last_created_ability(kind: AbilityKind, duration: Option<Duration>) -> AbilityDefinition {
+    AbilityDefinition::new(
+        kind,
+        Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(TargetFilter::LastCreated)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::Goaded,
+                }])
+                .description("goaded".to_string())],
+            duration: duration.or(Some(Duration::Permanent)),
+            target: Some(TargetFilter::LastCreated),
+            end_cost: None,
+        },
+    )
+}
+
+/// CR 701.15b: the subject of a complete "the token(s) [created this way] is/are
+/// goaded" sentence. Number and the optional "created this way" are separate
+/// axes so the four surface forms stay one grammar.
+fn parse_goad_last_created_article(input: &str) -> Result<(&str, bool), nom::Err<OracleError<'_>>> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("the token").parse(input)?;
+    let (input, plural_mark) = opt(tag("s")).parse(input)?;
+    let (input, _) = opt(tag(" created this way")).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    Ok((input, plural_mark.is_some()))
+}
+
+/// CR 701.15b: a whole remainder that is only the goad sentence. Duration
+/// stripping owns the phrase; the copula must be what is left, so a scan
+/// cannot treat a longer sentence as this one.
+fn parse_complete_goad_last_created_sentence(
+    input: &str,
+) -> Result<(&str, ContinuationAst), nom::Err<OracleError<'_>>> {
+    let input = input.trim();
+    // One trailing period is the sentence end. Anything after it is a further
+    // sentence, and a period that is not final is not this sentence's end.
+    let body = match all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>("."),
+        tag("."),
+    ))
+    .parse(input)
+    {
+        Ok((_, body)) => body,
+        Err(_) => input,
+    };
+    let (after_article, plural) = parse_goad_last_created_article(body)?;
+    let (mod_text, duration) = super::lower::strip_trailing_duration(after_article.trim());
+    let (rest, _) = if plural {
+        tag::<_, _, OracleError<'_>>("are goaded").parse(mod_text.trim())?
+    } else {
+        tag::<_, _, OracleError<'_>>("is goaded").parse(mod_text.trim())?
+    };
+    eof.parse(rest)?;
+    Ok((
+        "",
+        ContinuationAst::GoadLastCreated { duration },
+    ))
+}
+
+/// The bytes before `offset` end a printed sentence, including a sentence that
+/// closed inside a granted-ability quote (`."`).
+fn closed_sentence_before(prefix: &str) -> bool {
+    let prefix = prefix.trim_end();
+    let mut chars = prefix.chars().rev();
+    match chars.next() {
+        Some('.') => true,
+        Some('"') => chars.next() == Some('.'),
+        _ => false,
+    }
+}
+
+fn append_clause_sub_ability(clause: &mut ParsedEffectClause, ability: AbilityDefinition) {
+    let mut link = &mut clause.sub_ability;
+    while let Some(node) = link {
+        link = &mut node.sub_ability;
+    }
+    *link = Some(Box::new(ability));
+}
+
+/// CR 608.2c + CR 701.15b: "The token is goaded …" stays in the token-creation
+/// chunk. When that trailing sentence is complete, the creation keeps its
+/// printed token and the goad is the same sub-ability a separate clause would
+/// lower to. A goad sentence that is the whole clause, or one that sits inside
+/// an opening quote, is left for the path that already owns it.
+pub(super) fn try_parse_token_clause_with_trailing_goad(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_ascii_lowercase();
+    let (offset, continuation, rest) = nom_primitives::scan_last_at_word_boundaries_with_offset(
+        lower.as_str(),
+        parse_complete_goad_last_created_sentence,
+    )?;
+    if offset == 0 || !rest.is_empty() || offset > text.len() {
+        return None;
+    }
+    let prefix = &text[..offset];
+    if !closed_sentence_before(prefix) {
+        return None;
+    }
+    let head = prefix.trim();
+    if head.is_empty() {
+        return None;
+    }
+    let ContinuationAst::GoadLastCreated { duration } = continuation else {
+        return None;
+    };
+    let mut probe = ctx.clone();
+    let mut head_clause = super::parse_effect_clause(head, &mut probe);
+    if !head_clause.effect.is_token_creator() {
+        return None;
+    }
+    append_clause_sub_ability(
+        &mut head_clause,
+        goad_last_created_ability(AbilityKind::Spell, duration),
+    );
+    *ctx = probe;
+    Some(head_clause)
+}
+
 /// CR 701.15a + CR 701.15b: Parse "the token(s) (is|are) goaded [duration]" after token creation.
 /// Prefix stripping mirrors `rewrite_token_created_this_way_unimplemented` so the
 /// predicate (`are goaded`) stays in the remainder for duration stripping.
@@ -12993,6 +13102,114 @@ mod tests {
             }
             other => panic!("expected GenericEffect goad sub, got {other:?}"),
         }
+    }
+
+    fn assert_permanent_goad_sub(sub: &AbilityDefinition) {
+        match sub.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost: _,
+            } => {
+                assert_eq!(*target, Some(TargetFilter::LastCreated));
+                assert_eq!(*duration, Some(Duration::Permanent));
+                assert!(static_abilities.iter().any(|definition| {
+                    definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddStaticMode {
+                                mode: StaticMode::Goaded
+                            }
+                        )
+                    })
+                }));
+            }
+            other => panic!("expected GenericEffect goad sub, got {other:?}"),
+        }
+    }
+
+    /// CR 701.15b: the goad sentence stays in the token chunk and lowers as the
+    /// creation's sub-ability. The quoted grant is not that sentence.
+    #[test]
+    fn trailing_goad_sentence_after_quoted_token_ability_is_a_sub_ability() {
+        let clause = super::super::parse_effect_clause(
+            "create a 1/1 red Goblin creature token with \"This creature attacks each combat if able.\" The token is goaded.",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Token { .. }),
+            "{:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.as_deref().expect("goad sub-ability");
+        assert_permanent_goad_sub(sub);
+    }
+
+    /// A goad sentence inside the granted quote is the token's text, not a
+    /// continuation of the creation.
+    #[test]
+    fn quoted_the_token_is_goaded_is_not_peeled_as_a_continuation() {
+        let clause = super::super::parse_effect_clause(
+            "create a 1/1 red Goblin creature token with \"The token is goaded.\"",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Token { .. }),
+            "{:?}",
+            clause.effect
+        );
+        assert!(
+            clause.sub_ability.is_none(),
+            "a quoted goad must stay inside the token: {:?}",
+            clause.sub_ability
+        );
+    }
+
+    /// CR 701.15b (#9607): the created Pirate can't block, and it is goaded for
+    /// the rest of the game. The goad is a sub-ability of the token creation.
+    #[test]
+    fn nettling_nuisance_goads_the_created_token_for_the_rest_of_the_game() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Whenever one or more Faeries you control deal combat damage to a player, that player creates a 4/2 red Pirate creature token with \"This token can't block.\" The token is goaded for the rest of the game.",
+            "Nettling Nuisance",
+            &[],
+            &["Creature".to_string()],
+            &["Faerie".to_string(), "Rogue".to_string()],
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("trigger body");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                power,
+                toughness,
+                static_abilities,
+                ..
+            } => {
+                assert_eq!(*power, PtValue::Fixed(4));
+                assert_eq!(*toughness, PtValue::Fixed(2));
+                assert!(
+                    static_abilities
+                        .iter()
+                        .any(|definition| definition.mode == StaticMode::CantBlock),
+                    "quoted can't block must stay on the token: {static_abilities:?}"
+                );
+            }
+            other => panic!("expected the created token, got {other:?}"),
+        }
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("goad sub-ability");
+        assert_permanent_goad_sub(sub);
     }
 
     #[test]
