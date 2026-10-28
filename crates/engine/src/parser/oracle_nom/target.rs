@@ -449,6 +449,18 @@ impl ControllerPhrase {
         form: ControllerForm::Singular,
         tense: ControllerTense::Present,
     };
+    /// "target opponent controls".
+    pub(crate) const TARGET_OPPONENT_CONTROLS: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::TargetOpponent),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
+    /// "target player controls".
+    pub(crate) const TARGET_PLAYER_CONTROLS: Self = Self {
+        subject: ControllerSubject::Direct(ControllerRef::TargetPlayer),
+        form: ControllerForm::Singular,
+        tense: ControllerTense::Present,
+    };
     /// "controlled by that player".
     pub(crate) const CONTROLLED_BY_THAT_PLAYER: Self = Self {
         subject: ControllerSubject::Anaphoric(PlayerAnaphor::ThatPlayer),
