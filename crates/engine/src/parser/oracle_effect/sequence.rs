@@ -2988,6 +2988,12 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("connive")),
         value((), tag("they ")),
     )))
+    // CR 608.2c + CR 122.1 + CR 601.2d: "…, then distribute N counters among …"
+    // is its own instruction (Invoke Justice, #9619). "distribute" is already a
+    // clause-head verb for gap diagnosis and `try_parse_distribute_counters`,
+    // but this table is what the `, then` splitter consults — without it the
+    // counters stay glued to the preceding ChangeZone and are dropped.
+    .or(value((), tag("distribute ")))
     .parse(s)
     .is_ok()
 }
@@ -12349,6 +12355,88 @@ mod tests {
     fn comma_then_clause_still_splits() {
         let chunks = clause_texts("draw a card, then discard a card");
         assert_eq!(chunks, vec!["draw a card", "discard a card"]);
+    }
+
+    /// CR 608.2c + CR 122.1 + CR 601.2d (#9619): Invoke Justice's trailing
+    /// "distribute four +1/+1 counters among …" is a second instruction. The
+    /// `, then` splitter must peel it off so it reaches
+    /// `try_parse_distribute_counters` instead of being swallowed by the
+    /// graveyard ChangeZone (which then reports the card as fully supported).
+    #[test]
+    fn comma_then_distribute_counters_splits() {
+        let chunks = clause_texts(
+            "return target permanent card from your graveyard to the battlefield, then distribute four +1/+1 counters among any number of creatures and/or vehicles target player controls",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "return target permanent card from your graveyard to the battlefield",
+                "distribute four +1/+1 counters among any number of creatures and/or vehicles target player controls",
+            ]
+        );
+    }
+
+    #[test]
+    fn invoke_justice_distribute_counters_chain() {
+        use crate::types::game_state::DistributionUnit;
+
+        let def = parse_effect_chain(
+            "Return target permanent card from your graveyard to the battlefield, then distribute four +1/+1 counters among any number of creatures and/or Vehicles target player controls.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                def.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "return clause: {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("distribute counters must be a sub-ability");
+        match sub.effect.as_ref() {
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 4 },
+                target,
+            } => {
+                assert!(
+                    filter_scoped_to_target_player(target),
+                    "counters go on creatures and/or Vehicles that player controls, got {target:?}"
+                );
+            }
+            other => panic!("expected distributed +1/+1 PutCounter, got {other:?}"),
+        }
+        assert_eq!(
+            sub.distribute,
+            Some(DistributionUnit::Counters("P1P1".to_string()))
+        );
+        let spec = sub
+            .multi_target
+            .as_ref()
+            .expect("any number of targets, capped by the four counters");
+        assert_eq!(spec.min, QuantityExpr::Fixed { value: 0 });
+        assert_eq!(spec.max, Some(QuantityExpr::Fixed { value: 4 }));
+        assert!(
+            !crate::parser::oracle::has_unimplemented(&def),
+            "Invoke Justice must not report a gap once both clauses lower: {def:?}"
+        );
+    }
+
+    fn filter_scoped_to_target_player(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(tf) => tf.controller == Some(ControllerRef::TargetPlayer),
+            TargetFilter::Or { filters } => {
+                !filters.is_empty() && filters.iter().all(filter_scoped_to_target_player)
+            }
+            _ => false,
+        }
     }
 
     #[test]
