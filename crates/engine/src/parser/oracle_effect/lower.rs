@@ -2210,18 +2210,30 @@ pub(super) fn change_zone_selects_battlefield_permanent(
 pub(super) fn change_zone_target_choice_timing(
     origin: Option<Zone>,
     target: &TargetFilter,
-    has_multi_target: bool,
+    // Explicit off-battlefield zones subsume the old `has_multi_target &&
+    // non-battlefield zone` gate. Callers still pass the flag.
+    _has_multi_target: bool,
     fragment_lower: &str,
 ) -> TargetChoiceTiming {
+    let mut explicit_zones = target.extract_zones();
+    if let Some(zone) = target.extract_in_zone() {
+        if !explicit_zones.contains(&zone) {
+            explicit_zones.push(zone);
+        }
+    }
+    // CR 115.10a + CR 608.2d: a moved object constrained to a non-battlefield
+    // zone is chosen as the effect resolves when the text does not say
+    // "target", even if `origin` is None and the zone lives only on the filter.
+    // Deadly Cover-Up (#9617) is that shape: "exile a card from an opponent's
+    // graveyard" is applied after "Destroy all creatures", so a creature this
+    // spell just destroyed is a legal pick. Relic of Progenitus already took
+    // this arm via an explicit graveyard origin. Explicit "target cards …"
+    // (Memory's Journey) stay Stack.
     let off_battlefield_origin = origin.is_some_and(|zone| zone != Zone::Battlefield)
-        || has_multi_target
-            && target
-                .extract_zones()
-                .iter()
-                .any(|zone| *zone != Zone::Battlefield);
+        || explicit_zones
+            .iter()
+            .any(|zone| *zone != Zone::Battlefield);
     if off_battlefield_origin {
-        // Off-BF non-"target " legs (Relic: "exiles a card from their graveyard")
-        // are resolution picks; explicit "target cards …" (Memory's Journey) stay Stack.
         if nom_primitives::scan_contains(fragment_lower, "target ") {
             TargetChoiceTiming::Stack
         } else {
@@ -2233,9 +2245,6 @@ pub(super) fn change_zone_target_choice_timing(
         // CR 115.1: battlefield non-targeted picks (Sothera / Strategic Betrayal
         // edict class) resolve via EffectZoneChoice after player_scope rebinding,
         // not stack targeting.
-        // Graveyard/hand/library seeds without "target" (Deadly Cover-Up) keep
-        // stack-time selection — their filters carry explicit InZone constraints
-        // and origin is None (not off_battlefield_origin above).
         TargetChoiceTiming::Resolution
     } else {
         TargetChoiceTiming::Stack

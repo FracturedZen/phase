@@ -11106,6 +11106,105 @@ fn relic_of_progenitus_target_player_exiles_from_their_graveyard() {
     );
 }
 
+/// CR 115.10a + CR 608.2d (#9617): "exile a card from an opponent's graveyard"
+/// does not say "target". The card is chosen as the effect resolves, after
+/// earlier instructions (Deadly Cover-Up's "Destroy all creatures") have
+/// filled the graveyard. The zone lives on the filter and `origin` stays None.
+/// An explicit "target card" is still announced while casting.
+#[test]
+fn deadly_cover_up_untargeted_graveyard_exile_is_chosen_at_resolution() {
+    fn is_opponent_graveyard_card(target: &TargetFilter) -> bool {
+        let TargetFilter::Typed(typed) = target else {
+            return false;
+        };
+        typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard,
+        }) && typed.properties.contains(&FilterProp::Owned {
+            controller: ControllerRef::Opponent,
+        })
+    }
+
+    fn collect_change_zones<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a AbilityDefinition>) {
+        if matches!(*def.effect, Effect::ChangeZone { .. }) {
+            out.push(def);
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect_change_zones(sub, out);
+        }
+        if let Some(else_ability) = def.else_ability.as_deref() {
+            collect_change_zones(else_ability, out);
+        }
+        for mode in &def.mode_abilities {
+            collect_change_zones(mode, out);
+        }
+    }
+
+    let bare = parse_effect_chain(
+        "Exile a card from an opponent's graveyard.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        bare.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "untargeted graveyard exile is a resolution choice: {:?}",
+        bare.effect
+    );
+    match &*bare.effect {
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Exile,
+            target,
+            ..
+        } if is_opponent_graveyard_card(target) => {}
+        other => panic!("expected origin-None opponent-graveyard exile, got {other:?}"),
+    }
+
+    let targeted = parse_effect_chain(
+        "Exile target card from an opponent's graveyard.",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        targeted.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "the word target keeps the graveyard card a stack target: {:?}",
+        targeted.effect
+    );
+
+    let parsed = parse_oracle_text(
+        "As an additional cost to cast this spell, you may collect evidence 6.\nDestroy all creatures. If evidence was collected, exile a card from an opponent's graveyard. Then search its owner's graveyard, hand, and library for any number of cards with that name and exile them. That player shuffles, then draws a card for each card exiled from their hand this way.",
+        "Deadly Cover-Up",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mut exile_nodes = Vec::new();
+    for ability in &parsed.abilities {
+        collect_change_zones(ability, &mut exile_nodes);
+    }
+    let graveyard_exiles: Vec<_> = exile_nodes
+        .into_iter()
+        .filter(|node| match &*node.effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => is_opponent_graveyard_card(target),
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        graveyard_exiles.len(),
+        1,
+        "Deadly Cover-Up must keep one opponent-graveyard exile clause: {graveyard_exiles:?}"
+    );
+    assert_eq!(
+        graveyard_exiles[0].target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the spell's exile clause is chosen on resolution: {:?}",
+        graveyard_exiles[0].effect
+    );
+}
+
 #[test]
 fn effect_exile_target_opponent_graveyard_is_change_zone_all() {
     // CR 400.12: "exile target opponent's graveyard" — same class.

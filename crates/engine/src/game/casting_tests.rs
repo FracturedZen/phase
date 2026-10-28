@@ -27963,10 +27963,11 @@ fn deadly_fixture() -> (
 }
 
 /// Drive Deadly through the full cast+resolution pipeline. The seed exile
-/// ("exile a card from an opponent's graveyard") surfaces a cast-time
-/// `TargetSelection` — a same-named `Grizzly Bears` is chosen as the seed so
-/// `SameNameAsParentTarget` binds that name. Collect evidence is opted in/out via
-/// `pay_evidence`; `SearchChoice` selects all offered (name-matched) cards.
+/// ("exile a card from an opponent's graveyard") is an untargeted resolution
+/// choice (`EffectZoneChoice`, CR 608.2d, #9617) — a same-named `Grizzly Bears`
+/// is chosen as the seed so `SameNameAsParentTarget` binds that name. Collect
+/// evidence is opted in/out via `pay_evidence`; `SearchChoice` selects all
+/// offered (name-matched) cards.
 fn drive_deadly(
     runner: &mut crate::game::scenario::GameRunner,
     deadly: ObjectId,
@@ -28008,6 +28009,23 @@ fn drive_deadly(
                 runner
                     .act(GameAction::ChooseTarget { target: bears })
                     .expect("seed target accepted");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                // CR 608.2d (#9617): the untargeted graveyard exile is chosen
+                // while the spell resolves, after Destroy has filled the yard.
+                let bears = cards.iter().copied().find(|id| {
+                    runner.state().objects.get(id).map(|object| object.name.as_str())
+                        == Some("Grizzly Bears")
+                });
+                assert!(
+                    bears.is_some(),
+                    "resolution exile must offer a Grizzly Bears, cards={cards:?}"
+                );
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![bears.expect("checked above")],
+                    })
+                    .expect("resolution exile accepted");
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
@@ -28192,6 +28210,112 @@ fn deadly_cover_up_case_b_evidence_exiles_owner_zones_and_draws() {
         p1_library_len(&runner),
         p1_lib_before - 1,
         "P1 (owner) draws exactly 1 (W5 count + W6 owner axis)"
+    );
+}
+
+/// CR 608.2d + CR 701.7a (#9617): the opponent's graveyard starts empty. The
+/// creature Deadly Cover-Up destroys is in that graveyard when the untargeted
+/// exile is chosen, and it is a legal pick. The same-name search then exiles
+/// the owner's other copy.
+#[test]
+fn deadly_cover_up_destroyed_creature_is_a_resolution_exile_choice() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let deadly = scenario
+        .add_spell_to_hand_from_oracle(P0, "Deadly Cover-Up", false, DEADLY_ORACLE)
+        .id();
+    scenario
+        .add_spell_to_graveyard(P0, "Evidence A", false)
+        .with_mana_cost(ManaCost::generic(3));
+    scenario
+        .add_spell_to_graveyard(P0, "Evidence B", false)
+        .with_mana_cost(ManaCost::generic(3));
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let elves = scenario.add_creature(P1, "Llanowar Elves", 1, 1).id();
+    let hand_bears = scenario.add_card_to_hand(P1, "Grizzly Bears");
+    scenario.add_card_to_library_top(P1, "Forest");
+    scenario.add_card_to_library_top(P1, "Island");
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    let library_before = p1_library_len(&runner);
+
+    let card_id = runner.state().objects[&deadly].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: deadly,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Deadly cast accepted");
+
+    let mut chose_exile = false;
+    for _ in 0..25 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                assert_eq!(
+                    runner.state().objects[&bears].zone,
+                    Zone::Battlefield,
+                    "destroy has not happened while the spell is still being cast"
+                );
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("collect evidence");
+            }
+            WaitingFor::CollectEvidenceChoice { cards, .. } => {
+                assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("evidence cards");
+            }
+            WaitingFor::TargetSelection { .. } => {
+                panic!("untargeted graveyard exile must not be announced while casting");
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert_eq!(
+                    runner.state().objects[&bears].zone,
+                    Zone::Graveyard,
+                    "the destroyed creature must be in the graveyard before the exile choice"
+                );
+                assert!(
+                    cards.contains(&bears),
+                    "the destroyed creature must be a legal exile pick, cards={cards:?}"
+                );
+                runner
+                    .act(GameAction::SelectCards { cards: vec![bears] })
+                    .expect("resolution exile");
+                chose_exile = true;
+            }
+            WaitingFor::SearchChoice { cards, .. } => {
+                assert!(chose_exile, "the same-name search follows the seed exile");
+                runner
+                    .act(GameAction::SelectCards { cards })
+                    .expect("same-name search");
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() && chose_exile {
+                    break;
+                }
+                runner.pass_both_players();
+            }
+            other => panic!("unexpected Deadly prompt: {other:?}"),
+        }
+    }
+
+    assert!(chose_exile, "the exile choice must be offered at resolution");
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().objects[&hand_bears].zone,
+        Zone::Exile,
+        "the owner's other copy is exiled by the same-name search"
+    );
+    assert_eq!(runner.state().objects[&elves].zone, Zone::Graveyard);
+    assert_eq!(
+        p1_library_len(&runner),
+        library_before - 1,
+        "the owner draws one card for the copy exiled from hand"
     );
 }
 

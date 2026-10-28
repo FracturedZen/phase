@@ -10585,23 +10585,33 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// copy's copied name reverts once it leaves the battlefield, so the live read
 /// would report the printed name instead.
 ///
-/// Returns `None` when no ability is in scope, when the ability has no object
-/// targets, or when the referenced object has no record in either `state.objects`
-/// or `state.lki_cache`.
+/// CR 608.2c + CR 201.2 + CR 400.7j: a resolution-time choice has no stack
+/// object target. The moved object is still the referent of "that name" when
+/// the instruction recorded it on `effect_context_object` (Deadly Cover-Up,
+/// #9617). This is the same snapshot `parent_target_owner` already reads.
+///
+/// Returns `None` when no ability is in scope, when the ability has neither an
+/// object target nor that snapshot, or when the referenced object has no record
+/// in either `state.objects` or `state.lki_cache`.
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
-    let id = first_object_target(ability)?;
-    if let Some(snapshot) = ability
+    if let Some(id) = first_object_target(ability) {
+        if let Some(snapshot) = ability
+            .effect_context_object
+            .as_ref()
+            .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
+        {
+            return Some(snapshot.lki.name.clone());
+        }
+        if let Some(obj) = state.objects.get(&id) {
+            return Some(obj.name.clone());
+        }
+        return state.lki_cache.get(&id).map(|lki| lki.name.clone());
+    }
+    ability
         .effect_context_object
         .as_ref()
-        .filter(|snapshot| snapshot.object_id == id && snapshot.is_current(state))
-    {
-        return Some(snapshot.lki.name.clone());
-    }
-    if let Some(obj) = state.objects.get(&id) {
-        return Some(obj.name.clone());
-    }
-    state.lki_cache.get(&id).map(|lki| lki.name.clone())
+        .map(|snapshot| snapshot.lki.name.clone())
 }
 
 fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
@@ -24596,6 +24606,81 @@ mod tests {
         let none = ability_with(None);
         assert!(matches(&none, clone_named), "no snapshot: live name");
         assert!(!matches(&none, bears), "no snapshot: not the copied name");
+    }
+
+    /// CR 608.2c + CR 201.2 + CR 400.7j (#9617): an untargeted resolution-time
+    /// exile records the chosen card on `effect_context_object` and has no
+    /// stack object target. "Cards with that name" still reads that snapshot.
+    #[test]
+    fn same_name_as_parent_target_reads_resolution_choice_snapshot_without_stack_target() {
+        let mut state = setup();
+        let seed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+        let hand_bear = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let elves = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Llanowar Elves".to_string(),
+            Zone::Hand,
+        );
+        let snapshot = CostPaidObjectSnapshot::capture(
+            &state.objects[&seed],
+            state.objects[&seed].snapshot_public_characteristics(),
+        );
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.effect_context_object = Some(snapshot);
+        assert!(
+            super::matches_target_filter(
+                &state,
+                hand_bear,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "resolution-choice snapshot supplies the exiled card's name"
+        );
+        assert!(
+            !super::matches_target_filter(
+                &state,
+                elves,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "a different name must not match"
+        );
+
+        ability.effect_context_object = None;
+        assert!(
+            !super::matches_target_filter(
+                &state,
+                hand_bear,
+                &filter,
+                &FilterContext::from_ability(&ability),
+            ),
+            "no stack target and no snapshot has no name referent"
+        );
     }
 
     /// CR 608.2h + CR 400.7: A `Typed{controller: ScopedPlayer}` filter
