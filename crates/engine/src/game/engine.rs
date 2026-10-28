@@ -124,8 +124,9 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
-    /// A life change in this action proved unrepresentable (the final amount,
-    /// the life total, or the per-turn gained/lost counter does not fit the
+    /// A life, player-counter or energy change in this action proved
+    /// unrepresentable (the final amount, the life total, the per-turn
+    /// gained/lost counter, or the counter/energy total does not fit the
     /// engine's `i32`/`u32` storage). Representability is an engine limit, not
     /// a game rule; the action boundary rejects the whole action and restores
     /// its pre-action snapshot rather than silently skipping the change.
@@ -1393,8 +1394,9 @@ impl ProspectiveSimulationOutcome {
     }
 }
 
-/// Closes this boundary's life window and restores the window that was open
-/// before it. Returns the player whose life change failed inside the boundary.
+/// Closes this boundary's ingress window and restores the window that was open
+/// before it. Returns the player whose life, player-counter or energy change
+/// failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
     prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
@@ -1404,8 +1406,8 @@ fn close_ingress_window(
     window.and_then(|window| window.failed_player)
 }
 
-/// The player whose life change inside the current action proved
-/// unrepresentable, if any. An open ingress window records the first failure;
+/// The player whose life, player-counter or energy change inside the current
+/// action proved unrepresentable, if any. An open ingress window records the first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
 fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
@@ -1551,10 +1553,10 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
-    // A life change this action resolves must be representable: open the
-    // ingress window after transient cleanup (which clears any prior window)
+    // A player-resource change this action resolves must be representable: open
+    // the ingress window after transient cleanup (which clears any prior window)
     // and close it before returning a `RawActionApplication`. Every ordinary
-    // life settlement records a failure here instead of silently treating the
+    // life, player-counter and energy settlement records a failure here instead of silently treating the
     // change as zero, so the boundary rejects the whole action atomically.
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
@@ -17415,20 +17417,19 @@ pub fn preflight_debug_action(
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
     action
-        .validate_life_change_amount()
+        .validate_player_resource_amount()
         .map_err(EngineError::InvalidAction)?;
 
-    // CR 616.1: a sandbox life change is a real event whose replacements can
-    // park a replacement-order choice for the affected player. Only a settled
-    // Priority boundary can own that choice; admitting a second event under an
-    // open prompt would replace the outstanding proposal before it resolves.
-    if matches!(
-        action,
-        DebugAction::GainLife { .. } | DebugAction::LoseLife { .. }
-    ) && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    // CR 616.1: a sandbox life change or player-counter/energy gain is a real
+    // event whose replacements can park a replacement-order choice for the
+    // affected player. Only a settled Priority boundary can own that choice;
+    // admitting a second event under an open prompt would replace the
+    // outstanding proposal before it resolves.
+    if action.requires_settled_priority()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         return Err(EngineError::InvalidAction(
-            "Debug::GainLife / Debug::LoseLife require a Priority window".into(),
+            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy require a Priority window".into(),
         ));
     }
 
