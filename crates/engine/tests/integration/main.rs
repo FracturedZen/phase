@@ -2043,6 +2043,7 @@ mod unregistered_token_keyword_punctuation;
 mod user_capture_probes;
 mod valakut_fireboar_switch_pt_on_attack;
 mod vanille_meld_optional_cost;
+mod vanish_into_memory_returned_toughness_discard_9842;
 mod vannifar_cloak_from_hand;
 mod varragoth_search_top;
 mod veteran_bodyguard_tap_redirect;

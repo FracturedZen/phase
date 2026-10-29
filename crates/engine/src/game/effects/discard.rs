@@ -289,6 +289,28 @@ pub fn resolve(
         _ => (1, false, None, TargetFilter::Any, false, None),
     };
 
+    // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
+    let declared_target_discard =
+        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
+    // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
+    // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
+    // object id must still be discarded. Controller-scoped "discard a card"
+    // (Macabre Waltz) must not consume propagated bounce targets (issue #3257).
+    let object_bound_discard = ability.effect.target_filter().is_some_and(|t| {
+        matches!(
+            t,
+            TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource
+                | TargetFilter::LastCreated
+                | TargetFilter::AttachedTo
+                | TargetFilter::CostPaidObject
+        )
+    });
+
     // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
     // became a new object discards nothing, and the trigger still resolves.
     //
@@ -303,7 +325,17 @@ pub fn resolve(
     // before either gate is evaluated. `EffectKind::from(&ability.effect)`
     // (not a literal) because this resolver serves BOTH `DiscardCard` and
     // `Discard`, which the Tier C census counts as distinct effect types.
-    if ability.pinned_object_targets_all_stale(state) {
+    //
+    // Issue #9842 (Vanish into Memory): the guard applies only when the
+    // discard's object targets actually designate what gets discarded
+    // (declared or object-bound). A player-scoped discard ("discard cards
+    // equal to that creature's toughness") merely inherits the parent's
+    // returned card as chain context (CR 608.2c); that card changing zones
+    // is not this instruction's referent going stale, so the discard must
+    // still happen from the player's hand.
+    if (declared_target_discard || object_bound_discard)
+        && ability.pinned_object_targets_all_stale(state)
+    {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -340,28 +372,6 @@ pub fn resolve(
             }
         })
         .collect();
-
-    // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
-    let declared_target_discard =
-        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
-    // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
-    // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
-    // object id must still be discarded. Controller-scoped "discard a card"
-    // (Macabre Waltz) must not consume propagated bounce targets (issue #3257).
-    let object_bound_discard = ability.effect.target_filter().is_some_and(|t| {
-        matches!(
-            t,
-            TargetFilter::ParentTarget
-                | TargetFilter::ParentTargetSlot { .. }
-                | TargetFilter::LastRevealed
-                | TargetFilter::LastZoneChanged
-                | TargetFilter::SelfRef
-                | TargetFilter::TriggeringSource
-                | TargetFilter::LastCreated
-                | TargetFilter::AttachedTo
-                | TargetFilter::CostPaidObject
-        )
-    });
 
     // Issue #4950 (Thoughtseize) — corrected root cause: `declared_target_discard`
     // and `object_bound_discard` say nothing about whether the discard's
