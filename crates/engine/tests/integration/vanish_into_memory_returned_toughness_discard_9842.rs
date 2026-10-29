@@ -62,7 +62,9 @@ fn cast_vanish(power: i32, toughness: i32) -> (GameRunner, ObjectId) {
     for i in 0..5 {
         scenario.add_creature_to_hand(P0, &format!("P0 Hand {i}"), 1, 1);
     }
-    let creature = scenario.add_creature(P0, "Vanishing Beast", power, toughness).id();
+    let creature = scenario
+        .add_creature(P0, "Vanishing Beast", power, toughness)
+        .id();
     let vanish = scenario
         .add_spell_to_hand_from_oracle(P0, "Vanish into Memory", false, VANISH_INTO_MEMORY)
         .with_mana_cost(ManaCost::generic(0))
