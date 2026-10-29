@@ -9806,6 +9806,15 @@ fn matches_filter_prop(
         // Name comparison is case-insensitive per `FilterProp::Named` /
         // `FilterProp::SameName` conventions.
         FilterProp::NameMatchesAnyPermanent { controller } => {
+            // CR 201.2a: an object with no name (e.g. a face-down permanent,
+            // CR 708.2a) doesn't have the same name as any other object, even
+            // another nameless one. Read names through the shared `Name`
+            // quality vocabulary so an empty name yields an empty value set.
+            let candidate_names =
+                object_shared_quality_values(obj, &SharedQuality::Name, &state.all_creature_types);
+            if candidate_names.is_empty() {
+                return false;
+            }
             let controller_pid = controller
                 .as_ref()
                 .and_then(|controller| source_controller_ref_player(state, source, controller));
@@ -9856,7 +9865,13 @@ fn matches_filter_prop(
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
-                controller_ok && perm.name.eq_ignore_ascii_case(&obj.name)
+                controller_ok
+                    && object_shares_quality_values(
+                        perm,
+                        &SharedQuality::Name,
+                        &candidate_names,
+                        &state.all_creature_types,
+                    )
             })
         }
         FilterProp::InZone { zone } => obj.zone == *zone,
@@ -18195,6 +18210,80 @@ mod tests {
             matches_target_filter(&state, other_name, &does_not_share, source),
             "a card named unlike any battlefield creature does not share"
         );
+    }
+
+    /// CR 201.2a: `NameMatchesAnyPermanent` ("has the same name as a
+    /// permanent") never matches a nameless candidate, even when the battlefield
+    /// holds a nameless face-down permanent (CR 708.2a). Fails on revert: the
+    /// pre-fix arm compared raw strings, so `"" == ""` matched.
+    #[test]
+    fn name_matches_any_permanent_nameless_object_matches_nothing() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        add_creature(&mut state, PlayerId(1), "Grizzly Bears");
+        let face_down = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down].name, "");
+
+        let nameless = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            String::new(),
+            Zone::Library,
+        );
+        let same_name = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "GRIZZLY BEARS".to_string(),
+            Zone::Library,
+        );
+        let other_name = create_object(
+            &mut state,
+            CardId(103),
+            PlayerId(0),
+            "Gray Ogre".to_string(),
+            Zone::Library,
+        );
+
+        let any_permanent = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::NameMatchesAnyPermanent { controller: None },
+        ]));
+        let your_permanent = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::NameMatchesAnyPermanent {
+                controller: Some(ControllerRef::You),
+            },
+        ]));
+
+        assert!(
+            !matches_target_filter(&state, nameless, &any_permanent, source),
+            "CR 201.2a: a nameless card has the same name as no permanent"
+        );
+        assert!(
+            !matches_target_filter(&state, nameless, &your_permanent, source),
+            "CR 201.2a: not even the nameless face-down permanent you control"
+        );
+        // Reach guards: named candidates still compare case-insensitively.
+        assert!(matches_target_filter(
+            &state,
+            same_name,
+            &any_permanent,
+            source
+        ));
+        assert!(
+            !matches_target_filter(&state, same_name, &your_permanent, source),
+            "the controller scope still narrows the permanent pool"
+        );
+        assert!(!matches_target_filter(
+            &state,
+            other_name,
+            &any_permanent,
+            source
+        ));
     }
 
     /// CR 201.2c: an object has a different name than a group of objects only if
