@@ -777,6 +777,36 @@ pub fn move_object_for_test(
     )
 }
 
+/// CR 111.8 + CR 603.2g: the object-level no-op refusals `zones::move_to_zone`
+/// enforces unconditionally, hoisted ahead of every replacement consult.
+///
+/// The pipeline runs `replace_event` (including the intrinsic enters-with
+/// counter seed, CR 614.1c / CR 614.12) before the primitive's delivery-time
+/// guards, so a move the primitive will reject must be refused up front —
+/// otherwise its replacements apply (counters, CR 616.1 choices, one-shot
+/// `last_effect_count` consumption) to an event that never happens.
+///
+/// - CR 111.8: a token that has left the battlefield can't change zones; it
+///   stays where it is and ceases to exist at the next SBA (CR 111.7, CR
+///   704.5d). An exact CR 601.2a pending spell plus its announcement
+///   placeholder makes the retained-origin representation stack-resident until
+///   delivery, which `token_is_outside_battlefield_and_stack` accounts for.
+/// - CR 603.2g + CR 603.6a: a Battlefield -> Battlefield move puts nothing onto
+///   the battlefield, so no entry event occurs.
+///
+/// Missing objects are treated as no-ops too (already moved / ceased to exist).
+pub(crate) fn zone_move_is_primitive_noop(
+    state: &GameState,
+    object_id: ObjectId,
+    to: Zone,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return true;
+    };
+    zones::token_is_outside_battlefield_and_stack(state, obj)
+        || (obj.zone == Zone::Battlefield && to == Zone::Battlefield)
+}
+
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -798,26 +828,8 @@ pub(crate) fn move_object_with_terminal(
     // rejects as a no-op. These two are pure object-level reads with no game
     // effect, so testing them up front cannot change observable behavior — it
     // only avoids spending a one-shot replacement on a move that never happens.
-    {
-        let obj = state
-            .objects
-            .get(&req.object_id)
-            .expect("object exists (zone read above)");
-        // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7). An
-        // exact CR 601.2a pending spell plus its announcement placeholder makes
-        // the retained-origin representation stack-resident until this delivery.
-        if zones::token_is_outside_battlefield_and_stack(state, obj) {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
-        // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
-        // permanent onto the battlefield — no entry event occurs, so no
-        // would-style replacement should be consulted (and the primitive would
-        // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
-        // no-op guard.
-        if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
+    if zone_move_is_primitive_noop(state, req.object_id, req.to) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
 
     // Library-placement arm (W3). A `Some(placement)` request lands the object at
@@ -4565,6 +4577,12 @@ fn execute_zone_move_with_applied_terminal(
     else {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    // CR 111.8 + CR 603.2g: refuse primitive no-op moves before the intrinsic
+    // enters-with seed and the replacement consult (issue #10396: Ephemerate on
+    // a token put the token's enters-with counters on it in exile).
+    if zone_move_is_primitive_noop(state, obj_id, dest_zone) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
     // Saga therefore remains in exile after its final chapter resolves.
