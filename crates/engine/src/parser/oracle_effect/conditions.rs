@@ -7360,6 +7360,13 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
         return Some(condition);
     }
 
+    // CR 608.2c + CR 110.2: "it entered [the battlefield] under your control"
+    // reads the result of the preceding return instruction (Phelia, Exuberant
+    // Shepherd).
+    if let Some(condition) = parse_it_entered_under_your_control_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     // CR 702.119a-c: "[possessive] emerge cost was paid" → CastVariantPaid { Emerge },
     // routing Adipose Offspring's "instead create X of those tokens" body through
     // the ConditionInstead token-reproduction path.
@@ -8859,6 +8866,30 @@ fn entered_or_cast_from_zone_condition(zone: Zone) -> AbilityCondition {
             AbilityCondition::WasCast { zone: Some(zone) },
         ],
     }
+}
+
+/// CR 608.2c + CR 110.2 + CR 400.7: "if it entered [the battlefield] under your
+/// control" after an instruction that puts "it" onto the battlefield (Phelia,
+/// Exuberant Shepherd: "return that card to the battlefield under its owner's
+/// control. If it entered under your control, ..."). The pronoun names the
+/// object the preceding instruction moved, so the gate is the zone-change
+/// ledger of that instruction: the moved object arrived on the battlefield
+/// and is controlled by this ability's controller. A card whose owner is an
+/// opponent returns under that opponent's control and fails the gate; so does
+/// a return that did not happen (the card left exile first). The "this turn"
+/// history form is a different predicate, and `all_consuming` rejects it.
+fn parse_it_entered_under_your_control_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming((
+        tag::<_, _, OracleError<'_>>("it entered "),
+        opt(tag("the battlefield ")),
+        tag("under your control"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+        destination: Some(Zone::Battlefield),
+    })
 }
 
 /// CR 603.4 + CR 601.2 + CR 603.6c: "if it entered from your library or was

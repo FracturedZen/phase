@@ -24349,6 +24349,69 @@ fn delayed_combat_step_payload_nests_that_combat_continuation() {
     assert!(matches!(legs[2], Effect::GenericEffect { .. }), "{legs:?}");
 }
 
+/// CR 603.7a + CR 608.2c + CR 110.2: Phelia, Exuberant Shepherd (issue #10314).
+/// "If it entered under your control" reads the delayed return's result, so the
+/// gated counter rides the end-step payload with a typed "this way" gate instead
+/// of resolving, ungated, when the attack trigger exiles the card.
+#[test]
+fn delayed_return_entered_under_your_control_gate_nests_into_payload() {
+    let chain = parse_effect_chain(
+        "Exile up to one other target nonland permanent. At the beginning of the next end step, return that card to the battlefield under its owner's control. If it entered under your control, put a +1/+1 counter on ~.",
+        AbilityKind::Spell,
+    );
+    let legs = chain_effects(&chain);
+    assert_eq!(legs.len(), 2, "{legs:?}");
+    let Effect::CreateDelayedTrigger { effect, .. } = &legs[1] else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ),
+        "{effect:?}"
+    );
+    let counter = effect
+        .sub_ability
+        .as_deref()
+        .expect("the counter must ride the delayed return");
+    assert!(
+        matches!(&*counter.effect, Effect::PutCounter { .. }),
+        "{counter:?}"
+    );
+    assert_eq!(
+        counter.condition,
+        Some(AbilityCondition::ZoneChangedThisWay {
+            filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            destination: Some(Zone::Battlefield),
+        })
+    );
+}
+
+/// CR 608.2c: the "this turn" history form is a different predicate and must
+/// not be claimed by the return-result gate.
+#[test]
+fn entered_under_your_control_this_turn_is_not_the_return_result_gate() {
+    let mut ctx = ParseContext::default();
+    let (condition, _) = super::conditions::strip_leading_general_conditional(
+        "If it entered under your control this turn, draw a card.",
+        &mut ctx,
+    );
+    assert!(
+        !matches!(
+            condition,
+            Some(AbilityCondition::ZoneChangedThisWay {
+                destination: Some(Zone::Battlefield),
+                ..
+            })
+        ),
+        "{condition:?}"
+    );
+}
+
 #[test]
 fn strip_temporal_prefix_end_step() {
     let (text, cond) =

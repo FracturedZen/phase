@@ -240,6 +240,9 @@ struct DelayedPayloadAntecedent {
     result: Option<AbilityCondition>,
     /// CR 506.1: the combat step the payload fires in, if it fires in one.
     combat_step: Option<Phase>,
+    /// CR 608.2c: the destination of the zone change the payload's LAST spine
+    /// instruction performs, if that instruction moves objects.
+    final_zone_move: Option<Zone>,
 }
 
 /// Which arm of the delayed-payload continuation decision fired.
@@ -285,6 +288,37 @@ fn payload_mint(payload: &AbilityDefinition) -> Option<PayloadMint> {
         current = definition.sub_ability.as_deref();
     }
     None
+}
+
+/// CR 608.2c: the destination of the zone change performed by the payload's
+/// final spine instruction — the instruction a following "this way" gate reads.
+fn payload_final_zone_move(payload: &AbilityDefinition) -> Option<Zone> {
+    let mut last = payload;
+    while let Some(next) = last.sub_ability.as_deref() {
+        last = next;
+    }
+    match last.effect.as_ref() {
+        Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
+            Some(*destination)
+        }
+        _ => None,
+    }
+}
+
+/// CR 608.2c: whether `clause` is gated on the zone change its immediately
+/// preceding instruction performed ("if it entered under your control", "if a
+/// creature was exiled this way"), and that zone change is the open payload's
+/// final instruction moving objects to `payload_zone`. Such a gate cannot be
+/// evaluated before the payload resolves, so the clause belongs to the payload.
+fn clause_reads_payload_zone_move(clause: &ClauseIr, payload_zone: Option<Zone>) -> bool {
+    let Some(payload_zone) = payload_zone else {
+        return false;
+    };
+    matches!(
+        clause.condition,
+        Some(AbilityCondition::ZoneChangedThisWay { destination, .. })
+            if destination.is_none_or(|zone| zone == payload_zone)
+    )
 }
 
 /// CR 603.7a: obtain the payload for either delayed-trigger producer shape.
@@ -425,6 +459,13 @@ fn classify_continuation_clause(
     if antecedent.combat_step.is_some() && clause_names_that_combat(clause) {
         return ContinuationVerdict::Nest;
     }
+    // CR 603.7a + CR 608.2c: a "this way" gate on the payload's own zone change
+    // (Phelia, Exuberant Shepherd: "return that card to the battlefield ... If it
+    // entered under your control, put a +1/+1 counter on Phelia") reads what the
+    // delayed return did, so it resolves as part of that payload.
+    if clause_reads_payload_zone_move(clause, antecedent.final_zone_move) {
+        return ContinuationVerdict::Nest;
+    }
     let result = clause_reflexive_result(clause);
     if result.as_ref().is_some_and(|result| {
         antecedent
@@ -509,6 +550,7 @@ fn resolve_delayed_payload_placements(clauses: &mut [ClauseIr], kind: AbilityKin
                     mint: payload_mint(&payload),
                     result: clause_reflexive_result(clause),
                     combat_step: clause_delayed_combat_step(clause),
+                    final_zone_move: payload_final_zone_move(&payload),
                 });
                 last_contiguous_clause = Some(clause_index);
             }
