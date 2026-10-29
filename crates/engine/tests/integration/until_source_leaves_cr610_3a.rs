@@ -607,3 +607,49 @@ fn copy_until_exile_is_not_returned_when_a_blinked_source_leaves() {
         "CR 610.3 + CR 400.7: the flickered Angel leaving does not return C1"
     );
 }
+
+/// CR 610.3b + CR 704.5f (#10156, Banisher Priest ruling 2013-07-01): Banisher
+/// Priest enters as a 0/0 under an opponent's Elesh Norn, its enters trigger
+/// targets the opponent's creature, and the Priest dies to the state-based
+/// action before the trigger resolves. The Priest left the battlefield after
+/// the ability triggered, so the target is not exiled.
+#[test]
+fn triggered_until_exile_does_nothing_when_its_source_died_to_sba_before_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let priest = scenario
+        .add_creature_to_hand_from_oracle(P0, "Banisher Priest", 2, 2, BANISHER_PRIEST)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.add_creature_from_oracle(
+        P1,
+        "Elesh Norn, Grand Cenobite",
+        4,
+        7,
+        "Vigilance\nOther creatures you control get +2/+2.\nCreatures your opponents control get -2/-2.",
+    );
+    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner.cast(priest).commit();
+    let events = drive(&mut runner, priority_with_stack(0), VecDeque::from([bears]));
+    assert_eq!(
+        runner.state().objects[&priest].zone,
+        Zone::Graveyard,
+        "reach-guard: the 0/0 Priest died to the state-based action"
+    );
+    assert!(
+        exile_node_resolved(&events, priest),
+        "reach-guard: the Priest's enters trigger resolved its exile node"
+    );
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Battlefield,
+        "CR 610.3b: the Priest left after its trigger triggered, so the Bears don't move"
+    );
+    assert_eq!(
+        until_links(runner.state()),
+        0,
+        "the refused exile installs no return link"
+    );
+}

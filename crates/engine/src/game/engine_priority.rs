@@ -3,7 +3,10 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
-use super::engine::{begin_pending_trigger_target_selection, check_exile_returns, EngineError};
+use super::engine::{
+    begin_pending_trigger_target_selection, check_exile_returns, latch_held_duration_events,
+    EngineError,
+};
 use super::match_flow;
 use super::players;
 use super::sba;
@@ -571,6 +574,12 @@ fn run_post_action_pipeline_core(
             // death triggers on the stack that need target/mode prompts before the
             // next SBA pass.
             if let Some(waiting_for) = begin_pending_trigger_target_selection(state)? {
+                // CR 610.3a + CR 610.3b: this prompt returns before the
+                // exile-return pass below, so latch the "until" events this
+                // action's SBAs produced (a source dying as a 0/0 while its
+                // enters trigger is announced) onto the held abilities now;
+                // the next action's buffer no longer holds them.
+                latch_held_duration_events(state, events);
                 state.waiting_for = waiting_for.clone();
                 if delayed_event_start.is_some() || payment_owned {
                     let delayed_input = unclaimed_delayed_trigger_input(

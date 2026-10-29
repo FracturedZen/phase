@@ -20580,7 +20580,23 @@ fn duration_events_after_trigger(
 /// duration ended. Each duration-bearing holder's trigger event is located
 /// once per pass.
 pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
+    latch_held_duration_events(state, events);
+    return_exiled_cards_whose_duration_ended(state, events);
+}
+
+/// CR 610.3a + CR 610.3b: record on every held activated or triggered ability
+/// the specified "until" events in `events` that occurred after it was put onto
+/// the stack or triggered, so its resolving zone change moves nothing.
+/// Idempotent: an event already recorded on a holder is not recorded twice.
+///
+/// Holders are the stack, the resolving entry, the deferred and ordered trigger
+/// queues, and the trigger whose stack entry is still being announced
+/// (`pending_trigger`, e.g. while its controller chooses targets). The last
+/// matters when a state-based action removes the source in the same pass as
+/// the trigger was collected (Banisher Priest entering as a 0/0, #10156): the
+/// pass hands the target prompt back before the exile-return pass runs, and
+/// the next action's buffer no longer holds the source's departure.
+pub(super) fn latch_held_duration_events(state: &mut GameState, events: &[GameEvent]) {
     let holders: &GameState = state;
     let scanned: &[GameEvent] = events;
 
@@ -20688,6 +20704,21 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
         })
         .collect();
 
+    let announced_latches: Vec<DurationEvent> = holders
+        .pending_trigger
+        .as_deref()
+        .map(|pending| {
+            duration_events_after_trigger(
+                holders,
+                scanned,
+                &pending.ability,
+                pending.source_id,
+                pending.controller,
+                pending.trigger_event.as_ref(),
+            )
+        })
+        .unwrap_or_default();
+
     for (entry_id, duration_event) in stack_latches {
         if let Some(ability) = state
             .stack
@@ -20722,6 +20753,21 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
             context.record_duration_event(duration_event);
         }
     }
+    // CR 610.3b: the announced trigger carries its latch onto the stack entry
+    // (`push_pending_trigger_to_stack_with_firing_and_duration_events` keeps the
+    // ability's resolution context).
+    for duration_event in announced_latches {
+        if let Some(pending) = state.pending_trigger.as_deref_mut() {
+            pending
+                .ability
+                .record_duration_event_recursive(duration_event);
+        }
+    }
+}
+
+/// CR 610.3: return linked exiled cards whose "until" duration ended in `events`.
+fn return_exiled_cards_whose_duration_ended(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let mut to_return: Vec<crate::types::game_state::ExileLink> = Vec::new();
 
     for event in events.iter() {
         match event {
