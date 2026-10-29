@@ -1910,8 +1910,14 @@ pub(crate) fn move_to_zone_with_entry_flags(
         });
     }
 
+    // CR 113.6b + CR 611.3a: the moved object's own off-zone static starts or
+    // stops functioning as it crosses into or out of the zone it works from
+    // (Anger milled: "as long as this card is in your graveyard ...").
     let static_dependency_after =
-        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to);
+        crate::game::layers::static_layer_dependency_for_zone_transition(state, from, to)
+            || crate::game::layers::moved_object_static_functions_from_transition_zone(
+                state, object_id, from, to,
+            );
 
     // pod-lab loop-3 Q5: a plain Battlefield entry that doesn't originate
     // from Hand or Exile, and isn't itself the source of a live

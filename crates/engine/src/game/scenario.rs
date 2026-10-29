@@ -566,6 +566,39 @@ impl GameScenario {
         }
     }
 
+    /// Add a creature card to the top of a player's library (CR 401). Returns a
+    /// `CardBuilder`; mirrors [`Self::add_creature_to_graveyard`] for staging a
+    /// creature card that a mill or other library effect moves.
+    pub fn add_creature_to_library_top(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Library,
+        );
+        self.place_on_library_top(player, id);
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a land card to a player's graveyard (CR 404). Returns a `CardBuilder`
     /// for fluent chaining. Mirrors [`Self::add_creature_to_graveyard`] — used to
     /// stage `nonland`/type-restricted graveyard-exile controls.

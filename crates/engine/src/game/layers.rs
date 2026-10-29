@@ -5513,6 +5513,50 @@ pub(crate) fn static_layer_dependency_for_zone_transition(
         || any_active_static_reads_zone_membership(state, to)
 }
 
+/// CR 113.6b + CR 611.3a: does the MOVED object carry a continuous static
+/// that functions from `from` or `to` — listed in its `active_zones`, or gated
+/// on its own source being in that zone (`SourceInZone`)? Such a static starts
+/// or stops applying because its source itself crossed into or out of the zone
+/// it works from (Anger milled into its owner's graveyard grants haste at once).
+/// `static_layer_dependency_for_zone_transition` cannot see this: it asks
+/// whether a static READS a zone's population, and a source-zone gate reads
+/// only its own source's location. Scoped to the moved object, so unrelated
+/// graveyard traffic does not invalidate layers.
+pub(crate) fn moved_object_static_functions_from_transition_zone(
+    state: &GameState,
+    object_id: ObjectId,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    obj.static_definitions.iter_all().any(|def| {
+        def.mode == StaticMode::Continuous
+            && [from, to].into_iter().any(|zone| {
+                def.active_zones.contains(&zone)
+                    || def.condition.as_ref().is_some_and(|condition| {
+                        static_condition_gates_source_in_zone(condition, zone)
+                    })
+            })
+    })
+}
+
+/// CR 113.6b: does `condition` (through And/Or/Not) test that the static's own
+/// source is in `zone`?
+fn static_condition_gates_source_in_zone(condition: &StaticCondition, zone: Zone) -> bool {
+    match condition {
+        StaticCondition::SourceInZone { zone: gated } => *gated == zone,
+        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+            .iter()
+            .any(|c| static_condition_gates_source_in_zone(c, zone)),
+        StaticCondition::Not { condition } => {
+            static_condition_gates_source_in_zone(condition, zone)
+        }
+        _ => false,
+    }
+}
+
 /// Mark the layer system as requiring a FULL battlefield re-evaluation. The
 /// conservative escalation used by every mutation other than a battlefield entry.
 pub fn mark_layers_full(state: &mut GameState) {
