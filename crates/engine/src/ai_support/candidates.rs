@@ -5940,6 +5940,10 @@ fn mana_payment_actions(
         // iterating `state.battlefield` (rather than every object in the game)
         // is behavior-preserving and avoids scanning hand/library/graveyard
         // objects on go-wide token boards.
+        // CR 702.51a + CR 702.126a: generic (Colorless) convoke/improvise taps
+        // exist only "for each generic mana in this spell's total cost".
+        let total_cost_has_generic =
+            crate::game::casting::pending_cast_total_cost_has_generic(state);
         for &obj_id in &state.battlefield {
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
@@ -5962,7 +5966,9 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                ConvokeMode::Improvise
+                    if total_cost_has_generic && obj.is_improvise_eligible(player) =>
+                {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -5974,15 +5980,18 @@ fn mana_payment_actions(
                     ));
                 }
                 ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
-                    // CR 702.51a: Colorless (for generic) always available
-                    actions.push(candidate(
-                        GameAction::TapForConvoke {
-                            object_id: obj_id,
-                            mana_type: crate::types::mana::ManaType::Colorless,
-                        },
-                        TacticalClass::Mana,
-                        Some(player),
-                    ));
+                    // CR 702.51a: Colorless (for generic) only when the total cost
+                    // has generic mana for it to pay.
+                    if total_cost_has_generic {
+                        actions.push(candidate(
+                            GameAction::TapForConvoke {
+                                object_id: obj_id,
+                                mana_type: crate::types::mana::ManaType::Colorless,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
                     // CR 702.51a: one colored tap per color the creature has — but only
                     // colors the cost can actually use. A colored convoke marker pays only a
                     // matching colored pip, so a color absent from the cost is a wasted tap.

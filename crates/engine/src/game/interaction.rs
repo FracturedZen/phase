@@ -2255,6 +2255,9 @@ fn mana_payment_direct_actions(
                     | ManaCost::SelfManaValue
                     | ManaCost::SelfManaCostReduced { .. } => None,
                 });
+            // CR 702.51a + CR 702.126a: a generic (Colorless) convoke/improvise
+            // tap exists only "for each generic mana in this spell's total cost".
+            let total_cost_has_generic = super::casting::pending_cast_total_cost_has_generic(state);
             for object_id in &state.battlefield {
                 let Some(object) = state.objects.get(object_id) else {
                     continue;
@@ -2264,10 +2267,12 @@ fn mana_payment_direct_actions(
                 }
                 match mode {
                     ConvokeMode::Convoke if object.is_convoke_eligible(player) => {
-                        actions.push(GameAction::TapForConvoke {
-                            object_id: *object_id,
-                            mana_type: ManaType::Colorless,
-                        });
+                        if total_cost_has_generic {
+                            actions.push(GameAction::TapForConvoke {
+                                object_id: *object_id,
+                                mana_type: ManaType::Colorless,
+                            });
+                        }
                         actions.extend(object.color.iter().filter_map(|color| {
                             if cost_shards.is_some_and(|shards| {
                                 !shards.iter().any(|shard| shard.contributes_to(*color))
@@ -2287,7 +2292,9 @@ fn mana_payment_direct_actions(
                             mana_type: ManaType::Colorless,
                         });
                     }
-                    ConvokeMode::Improvise if object.is_improvise_eligible(player) => {
+                    ConvokeMode::Improvise
+                        if total_cost_has_generic && object.is_improvise_eligible(player) =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,

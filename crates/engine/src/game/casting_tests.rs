@@ -24647,14 +24647,17 @@ fn generic_convoke_payment_cannot_pay_colorless_mana_symbol() {
         },
     )
     .unwrap();
-    apply_as_current(
+    // CR 702.51a (#10345): {C} is not generic mana, so a generic convoke tap
+    // has nothing to pay and is refused outright.
+    assert!(apply_as_current(
         &mut state,
         GameAction::TapForConvoke {
             object_id: helper,
             mana_type: ManaType::Colorless,
         },
     )
-    .unwrap();
+    .is_err());
+    assert!(!state.objects[&helper].tapped);
 
     assert!(
         apply_as_current(&mut state, GameAction::PassPriority).is_err(),
@@ -24789,6 +24792,163 @@ fn convoke_payment_offers_and_accepts_colored_creature_payment() {
     assert_eq!(obj.convoked_creatures, vec![creature]);
     assert!(!obj.mana_spent_to_cast);
     assert_eq!(obj.colors_spent_to_cast.distinct_colors(), 0);
+}
+
+/// CR 702.51a / CR 702.126a (#10345): generic convoke / improvise taps exist
+/// only "for each generic mana in this spell's total cost". Build a tap-payment
+/// spell costing `cost` with one off-color helper on the battlefield.
+fn cast_tap_payment_spell_with_helper(
+    keyword: Keyword,
+    cost: ManaCost,
+    helper_type: CoreType,
+) -> (GameState, ObjectId) {
+    use crate::game::engine::apply_as_current;
+
+    let mut state = setup_game_at_main_phase();
+    let helper = create_object(
+        &mut state,
+        CardId(64),
+        PlayerId(0),
+        "Black Helper".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&helper).unwrap();
+        obj.card_types.core_types.push(helper_type);
+        obj.color.push(ManaColor::Black);
+    }
+    let spell = create_object(
+        &mut state,
+        CardId(65),
+        PlayerId(0),
+        "Tap Payment Spell".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&spell).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.keywords.push(keyword);
+        obj.mana_cost = cost;
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+    }
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id: CardId(65),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    (state, helper)
+}
+
+fn offers_tap_for_convoke(state: &GameState, object: ObjectId) -> bool {
+    let (_, _, grouped) = crate::ai_support::legal_actions_full(state);
+    grouped.get(&object).is_some_and(|actions| {
+        actions
+            .iter()
+            .any(|action| matches!(action, GameAction::TapForConvoke { .. }))
+    })
+}
+
+#[test]
+fn convoke_generic_tap_refused_without_generic_in_total_cost() {
+    use crate::game::engine::apply_as_current;
+
+    let (mut state, black) = cast_tap_payment_spell_with_helper(
+        Keyword::Convoke,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        },
+        CoreType::Creature,
+    );
+    assert!(
+        !offers_tap_for_convoke(&state, black),
+        "a {{G}} convoke spell has no generic mana for a black creature to pay"
+    );
+    let tap = apply_as_current(
+        &mut state,
+        GameAction::TapForConvoke {
+            object_id: black,
+            mana_type: ManaType::Colorless,
+        },
+    );
+    assert!(tap.is_err(), "generic convoke tap must be refused");
+    assert!(!state.objects.get(&black).unwrap().tapped);
+}
+
+#[test]
+fn convoke_generic_tap_still_offered_with_generic_in_total_cost() {
+    use crate::game::engine::apply_as_current;
+
+    let (mut state, black) = cast_tap_payment_spell_with_helper(
+        Keyword::Convoke,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        },
+        CoreType::Creature,
+    );
+    assert!(offers_tap_for_convoke(&state, black));
+    apply_as_current(
+        &mut state,
+        GameAction::TapForConvoke {
+            object_id: black,
+            mana_type: ManaType::Colorless,
+        },
+    )
+    .expect("generic convoke tap pays the {1}");
+    assert!(state.objects.get(&black).unwrap().tapped);
+}
+
+#[test]
+fn convoke_generic_tap_offered_for_two_generic_hybrid_shard() {
+    let (state, black) = cast_tap_payment_spell_with_helper(
+        Keyword::Convoke,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::TwoGreen],
+            generic: 0,
+        },
+        CoreType::Creature,
+    );
+    assert!(
+        offers_tap_for_convoke(&state, black),
+        "{{2/G}} may be paid with generic mana, so a generic convoke tap applies"
+    );
+}
+
+#[test]
+fn improvise_tap_refused_without_generic_in_total_cost() {
+    use crate::game::engine::apply_as_current;
+
+    let (mut state, artifact) = cast_tap_payment_spell_with_helper(
+        Keyword::Improvise,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        },
+        CoreType::Artifact,
+    );
+    assert!(!offers_tap_for_convoke(&state, artifact));
+    let tap = apply_as_current(
+        &mut state,
+        GameAction::TapForConvoke {
+            object_id: artifact,
+            mana_type: ManaType::Colorless,
+        },
+    );
+    assert!(tap.is_err(), "improvise pays only generic mana");
+    assert!(!state.objects.get(&artifact).unwrap().tapped);
 }
 
 // --- Aura casting tests ---

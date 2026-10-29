@@ -15249,14 +15249,29 @@ fn apply_non_priority_pass_action(
                         }
                         mana_type
                     } else {
-                        // Colorless: any creature can pay generic
+                        // Colorless: any creature can pay generic — but only
+                        // "for each generic mana in this spell's total cost".
+                        if !super::casting::pending_cast_total_cost_has_generic(state) {
+                            return Err(EngineError::ActionNotAllowed(
+                                "Convoke generic tap requires generic mana in the total cost"
+                                    .to_string(),
+                            ));
+                        }
                         crate::types::mana::ManaType::Colorless
                     }
                 }
                 // Waterbend always produces colorless
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
-                // CR 702.126a: Improvise pays generic mana only — always colorless.
-                ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
+                // CR 702.126a: Improvise pays generic mana only — always colorless,
+                // and only when the total cost has generic mana to pay.
+                ConvokeMode::Improvise => {
+                    if !super::casting::pending_cast_total_cost_has_generic(state) {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Improvise requires generic mana in the total cost".to_string(),
+                        ));
+                    }
+                    crate::types::mana::ManaType::Colorless
+                }
                 ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
             };
             // CR 701.26a + CR 508.1f: route the convoke tap through the single

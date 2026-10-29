@@ -252,14 +252,19 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
                 }
                 true
             } else {
+                // CR 702.51a: a generic tap needs generic mana in the total cost.
                 *mana_type == ManaType::Colorless
+                    && crate::game::casting::pending_cast_total_cost_has_generic(state)
             }
         }
         ConvokeMode::Waterbend => {
             obj.is_waterbend_eligible(*player) && *mana_type == ManaType::Colorless
         }
         ConvokeMode::Improvise => {
-            obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
+            // CR 702.126a: improvise pays only generic mana in the total cost.
+            obj.is_improvise_eligible(*player)
+                && *mana_type == ManaType::Colorless
+                && crate::game::casting::pending_cast_total_cost_has_generic(state)
         }
     }
 }

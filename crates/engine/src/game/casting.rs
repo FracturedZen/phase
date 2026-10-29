@@ -22096,6 +22096,38 @@ pub(super) fn spell_tap_payment_mode(
     spell_tap_payment_mode_for(state, player, source_id, false)
 }
 
+/// CR 702.51a + CR 702.126a: whether the pending cast's total cost has a
+/// generic component a convoke / improvise tap could pay "rather than pay that
+/// mana". Generic is the `generic` count plus any shard payable with generic
+/// mana ({X} not yet folded, or a {2/C} two-generic hybrid). A pending cast whose
+/// cost is not a concrete `ManaCost::Cost` stays permissive (true): the total is
+/// not yet determined there, so this gate must not refuse a legal payment.
+pub(crate) fn pending_cast_total_cost_has_generic(state: &GameState) -> bool {
+    let Some(pending) = state.pending_cast.as_ref() else {
+        return true;
+    };
+    match &pending.cost {
+        ManaCost::Cost { shards, generic } => {
+            *generic > 0
+                || shards.iter().any(|shard| {
+                    matches!(
+                        shard,
+                        ManaCostShard::X
+                            | ManaCostShard::TwoWhite
+                            | ManaCostShard::TwoBlue
+                            | ManaCostShard::TwoBlack
+                            | ManaCostShard::TwoRed
+                            | ManaCostShard::TwoGreen
+                    )
+                })
+        }
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => true,
+    }
+}
+
 /// CR 702.102b: Fuse-aware sibling of [`spell_tap_payment_mode`]. `fused` projects
 /// a pre-payment fused split spell with its COMBINED characteristics so a
 /// `CastWithKeyword`-granted Convoke / Improvise / Delve keyed on the combined
