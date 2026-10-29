@@ -36592,6 +36592,14 @@ pub enum TriggerCondition {
     /// split already established by `SourceMatchesFilter` /
     /// `ZoneChangeObjectMatchesFilter`.
     ZoneChangeObjectIsTapped,
+    /// CR 702.167a + CR 602.2 + CR 603.6c: The triggering zone change moved its
+    /// object into exile as part of paying the cost of a craft ability that the
+    /// trigger's controller was activating ("When this creature is exiled from
+    /// the battlefield while you're activating a craft ability" — Market Gnome).
+    /// Reads the event's `ZoneChangeRecord::craft_activator`; always wrapped in
+    /// `EventTime`, since the activation is over by the time the trigger would
+    /// be rechecked on resolution.
+    ZoneChangeDuringCraftActivation,
     /// CR 603.4 + CR 611.2b: Source-bound intervening-if predicate expressed
     /// as a normal target filter evaluated against the trigger source.
     SourceMatchesFilter { filter: TargetFilter },
@@ -36852,6 +36860,7 @@ impl TriggerCondition {
             | TriggerCondition::HasCounters { .. }
             | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
             | TriggerCondition::ZoneChangeObjectIsTapped
+            | TriggerCondition::ZoneChangeDuringCraftActivation
             | TriggerCondition::SourceMatchesFilter { .. }
             | TriggerCondition::EventDamageSourceMatchesFilter { .. }
             | TriggerCondition::EventObjectMatchesFilter { .. }

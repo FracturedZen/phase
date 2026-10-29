@@ -38,6 +38,10 @@ mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
 pub mod coverage;
+// Tests for craft-qualified exile triggers (Market Gnome, CR 702.167a).
+#[cfg(test)]
+#[path = "craft_exile_trigger_tests.rs"]
+mod craft_exile_trigger_tests;
 pub mod crew_payment;
 pub mod dash;
 #[cfg(test)]

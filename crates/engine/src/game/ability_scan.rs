@@ -4441,7 +4441,8 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        TriggerCondition::ZoneChangeObjectIsTapped => Axes {
+        TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::ZoneChangeDuringCraftActivation => Axes {
             event: true,
             sibling: false,
             projected: false,

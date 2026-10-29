@@ -10022,6 +10022,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::IsRenowned { .. }
         | TriggerCondition::HasCounters { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::ZoneChangeDuringCraftActivation
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
         | TriggerCondition::ChosenLabelIs { .. }
         | TriggerCondition::ExceptFirstDrawInDrawStep

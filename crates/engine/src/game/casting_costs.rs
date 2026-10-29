@@ -3050,6 +3050,55 @@ fn selected_battlefield_departures<'a>(
     group
 }
 
+/// CR 702.167a + CR 602.2: The player activating a craft ability, when
+/// `pending` is that activation. Craft's synthesized cost is the only source of
+/// `AbilityCost::ExileMaterials`. The materials-choice detour removes that leg
+/// from `activation_cost` before the exile moves run, so a live residual alone
+/// is not enough: also read the activation snapshot's printed `base_cost`, which
+/// still carries `ExileMaterials` for the whole activation (including the craft
+/// permanent's own self-exile after materials are paid).
+fn craft_cost_activator(pending: &PendingCast, player: PlayerId) -> Option<PlayerId> {
+    let from_residual = pending
+        .activation_cost
+        .as_ref()
+        .and_then(super::casting::find_craft_materials_cost)
+        .is_some();
+    let from_snapshot = pending
+        .activation_cost_snapshot
+        .as_ref()
+        .and_then(|snap| super::casting::find_craft_materials_cost(&snap.base_cost))
+        .is_some();
+    (from_residual || from_snapshot).then_some(player)
+}
+
+/// CR 702.167a + CR 603.6c: Record on each cost move of a `chosen` object into
+/// exile that it happened while `craft_activator` was activating a craft
+/// ability ("When this creature is exiled ... while you're activating a craft
+/// ability" — Market Gnome). A replacement that redirected the move elsewhere
+/// leaves no exile event to stamp.
+fn stamp_craft_cost_moves(
+    craft_activator: Option<PlayerId>,
+    events: &mut [GameEvent],
+    chosen: &[ObjectId],
+) {
+    let Some(activator) = craft_activator else {
+        return;
+    };
+    for event in events {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Exile,
+            record,
+            ..
+        } = event
+        {
+            if chosen.contains(object_id) {
+                record.craft_activator = Some(activator);
+            }
+        }
+    }
+}
+
 /// CR 601.2h + CR 616.1: Move `chosen[start_at_index..]` through the zone pipeline as
 /// cost moves. A move that parks for a replacement choice leaves the typed `Cast` root
 /// holding `pending`, `completion` and the departure `ledger`, parks the span's
@@ -3069,6 +3118,10 @@ fn move_cost_objects(
     ledger: &mut CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
+    let craft_activator = craft_cost_activator(pending, player);
+    // CR 702.167a + CR 616.1: a resumed call's span opens with the paused move's
+    // replacement-delivered event; stamp it like a move this call performs.
+    stamp_craft_cost_moves(craft_activator, &mut events[cost_event_start..], chosen);
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
         let mut request = ZoneMoveRequest::cost(object_id, destination, pending.object_id);
         // CR 406.6: the delve exile is the casting spell's own cost, so a delivered
@@ -3079,7 +3132,14 @@ fn move_cost_objects(
         ) {
             request = request.track_exiled_by_source();
         }
-        match zone_pipeline::move_object(state, request, events) {
+        let move_event_start = events.len();
+        let result = zone_pipeline::move_object(state, request, events);
+        stamp_craft_cost_moves(
+            craft_activator,
+            &mut events[move_event_start..],
+            &[object_id],
+        );
+        match result {
             ZoneMoveResult::Done => {}
             ZoneMoveResult::NeedsChoice(choice_player) => {
                 // CR 603.10a: the departures so far, and (while a group can still
@@ -6275,6 +6335,7 @@ pub(crate) fn handle_exile_materials_for_cost(
     let source_id = pending.object_id;
     // CR 702.167a/b + CR 601.2h: chosen materials are revalidated against the
     // live battlefield/graveyard union immediately before payment.
+    let event_start = events.len();
     let result = finish_exile_selection_for_cost(
         state,
         player,
@@ -6295,6 +6356,10 @@ pub(crate) fn handle_exile_materials_for_cost(
             Ok(())
         },
     )?;
+    // CR 702.167a + CR 603.6c: ExileMaterials is craft-only. Stamp even when the
+    // residual cost no longer carries that leg (the choice detour removes it)
+    // and the snapshot was absent so `move_cost_objects` could not see craft.
+    stamp_craft_cost_moves(Some(player), &mut events[event_start..], chosen);
     // CR 702.167c: link each exiled material to the crafting source so a
     // "cares what was used to craft it" ability can read them after the
     // permanent returns transformed (same ObjectId across the exile round-trip;

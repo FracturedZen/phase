@@ -5044,6 +5044,9 @@ fn fmt_trigger_condition(
             fmt_target(filter)
         ),
         TC::ZoneChangeObjectIsTapped => "entering object is tapped".into(),
+        TC::ZoneChangeDuringCraftActivation => {
+            "exiled while you're activating a craft ability".into()
+        }
         TC::SourceMatchesFilter { filter } => format!("source is {}", fmt_target(filter)),
         TC::EventDamageSourceMatchesFilter { filter } => {
             format!("damage source is {}", fmt_target(filter))
@@ -10460,6 +10463,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::HasCounters { .. }
         | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::ZoneChangeDuringCraftActivation
         | TriggerCondition::SourceMatchesFilter { .. }
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
         | TriggerCondition::EventObjectMatchesFilter { .. }

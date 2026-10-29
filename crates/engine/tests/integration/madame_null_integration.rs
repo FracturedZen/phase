@@ -120,6 +120,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             is_suspected: false,
             was_prepared: false,
             departure: engine::types::game_state::ZoneDeparture::Moved,
+            craft_activator: None,
         }),
     });
 }

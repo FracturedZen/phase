@@ -3072,6 +3072,7 @@ impl GameObject {
             // CR 800.4a: stamped by the player-leaves-game procedure, which owns
             // that fact; every other move is an ordinary move.
             departure: crate::types::game_state::ZoneDeparture::Moved,
+            craft_activator: None,
         }
     }
 

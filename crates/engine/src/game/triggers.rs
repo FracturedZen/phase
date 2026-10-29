@@ -17255,6 +17255,18 @@ fn evaluate_trigger_condition_with_source(
                 source_context.is_some_and(|source| source.source_read(state).lki().tapped)
             }
         }
+        // CR 702.167a + CR 602.2 + CR 603.6c: "while you're activating a craft
+        // ability" — the triggering exile was a cost move of a craft ability this
+        // trigger's controller was activating, as stamped on the event's own
+        // zone-change record. Fails closed without a zone-change event.
+        TriggerCondition::ZoneChangeDuringCraftActivation => matches!(
+            trigger_event,
+            Some(GameEvent::ZoneChanged {
+                to: Zone::Exile,
+                record,
+                ..
+            }) if record.craft_activator == Some(controller)
+        ),
         // CR 701.27g: True when the trigger source is a transformed permanent (DFC
         // with its back face up). Negation wraps via `Not { Box::new(SourceIsTransformed) }`.
         TriggerCondition::SourceIsTransformed => {

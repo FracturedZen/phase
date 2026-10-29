@@ -1682,6 +1682,13 @@ pub struct ZoneChangeRecord {
     /// stamps it. Omitted on the wire when `Moved`.
     #[serde(default, skip_serializing_if = "ZoneDeparture::is_moved")]
     pub departure: ZoneDeparture,
+    /// CR 702.167a + CR 602.2: the player who was activating a craft ability
+    /// when this move happened as part of paying that ability's cost (the
+    /// materials exile). Read by "is exiled ... while you're activating a craft
+    /// ability" (Market Gnome). `None` for every other move; omitted on the
+    /// wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub craft_activator: Option<PlayerId>,
 }
 
 /// CR 800.4a + CR 603.6c: how an object left the zone a [`ZoneChangeRecord`]
@@ -1791,6 +1798,8 @@ struct ZoneChangeRecordWire {
     was_prepared: bool,
     #[serde(default)]
     departure: ZoneDeparture,
+    #[serde(default)]
+    craft_activator: Option<PlayerId>,
 }
 
 impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
@@ -1829,6 +1838,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             is_suspected,
             was_prepared,
             departure,
+            craft_activator,
         } = wire;
         Self {
             object_id,
@@ -1864,6 +1874,7 @@ impl From<ZoneChangeRecordWire> for ZoneChangeRecord {
             is_suspected,
             was_prepared,
             departure,
+            craft_activator,
         }
     }
 }
@@ -2214,6 +2225,7 @@ impl ZoneChangeRecord {
             is_suspected: false,
             was_prepared: false,
             departure: ZoneDeparture::Moved,
+            craft_activator: None,
         }
     }
 }

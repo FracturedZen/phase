@@ -15991,6 +15991,12 @@ fn try_parse_event(
         return Some(result);
     }
 
+    // CR 701.13a + CR 702.167a: "is exiled from the battlefield [while you're
+    // activating a craft ability]" — qualified exile trigger (Market Gnome).
+    if let Some(result) = try_parse_exiled_qualified(subject, rest) {
+        return Some(result);
+    }
+
     // CR 701.13a: "is exiled" / "are exiled" — exile trigger
     if alt((
         value((), tag::<_, _, OracleError<'_>>("is exiled")),
@@ -23041,6 +23047,71 @@ fn try_parse_returned_to_hand(
     // must fire from hand because the source has already moved.
     if filter_references_self(subject) {
         def.trigger_zones = vec![Zone::Battlefield, Zone::Hand];
+    }
+    Some((TriggerMode::ChangesZone, def))
+}
+
+/// Parse "[subject] is/are exiled [from the battlefield] [while you're activating
+/// a craft ability]" when at least one qualifier is present. The bare "is exiled"
+/// form stays with the unqualified `TriggerMode::Exiled` arm.
+///
+/// CR 603.6c + CR 603.10a: "from the battlefield" makes this a leaves-the-
+/// battlefield zone-change trigger (origin Battlefield, destination Exile), the
+/// same shape as "is put into exile from the battlefield".
+///
+/// CR 702.167a + CR 602.2: "while you're activating a craft ability" restricts
+/// the trigger to an exile performed as part of paying the cost of a craft
+/// ability its controller is activating (Market Gnome: "When this creature is
+/// exiled from the battlefield while you're activating a craft ability, you gain
+/// 1 life and draw a card."). That fact is only true at the moment of the event,
+/// so it gates the trigger event (`EventTime`) and is never rechecked on
+/// resolution. Unknown trailing text fails the arm rather than being dropped.
+fn try_parse_exiled_qualified(
+    subject: &TargetFilter,
+    rest: &str,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    let (after_verb, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("is exiled")),
+        value((), tag("are exiled")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (after_origin, origin) = opt(value(
+        Zone::Battlefield,
+        tag::<_, _, OracleError<'_>>(" from the battlefield"),
+    ))
+    .parse(after_verb)
+    .ok()?;
+    let (tail, during_craft) = opt(value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(" while you're activating a craft ability"),
+            tag(" while you\u{2019}re activating a craft ability"),
+        )),
+    ))
+    .parse(after_origin)
+    .ok()?;
+    if origin.is_none() && during_craft.is_none() {
+        return None;
+    }
+    if !tail.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = TriggerMode::ChangesZone;
+    def.destination = Some(Zone::Exile);
+    def.origin = origin;
+    def.valid_card = Some(subject.clone());
+    if during_craft.is_some() {
+        def.condition = Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::ZoneChangeDuringCraftActivation),
+        });
+    }
+    // CR 603.10a: a self-referential leaves-the-battlefield trigger looks back
+    // from the zone the source moved to.
+    if filter_references_self(subject) {
+        def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
     }
     Some((TriggerMode::ChangesZone, def))
 }

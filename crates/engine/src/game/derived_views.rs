@@ -5585,6 +5585,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 departure: crate::types::game_state::ZoneDeparture::Moved,
+                craft_activator: None,
             }),
         };
         let ability = ResolvedAbility::new(

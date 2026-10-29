@@ -27498,6 +27498,45 @@ fn trigger_is_exiled() {
     assert!(def.valid_card.is_some());
 }
 
+/// CR 702.167a + CR 603.6c (issue #10195): Market Gnome — "exiled from the
+/// battlefield while you're activating a craft ability" is a battlefield→exile
+/// zone-change trigger gated at event time on the craft activation, not a bare
+/// any-exile trigger.
+#[test]
+fn trigger_exiled_from_battlefield_while_activating_craft() {
+    let def = parse_trigger_line(
+        "When this creature is exiled from the battlefield while you're activating a craft ability, you gain 1 life and draw a card.",
+        "Market Gnome",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Exile));
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::ZoneChangeDuringCraftActivation),
+        })
+    );
+    assert!(def.trigger_zones.contains(&Zone::Exile));
+    assert!(def.execute.is_some());
+}
+
+/// CR 603.6c + CR 603.10a: "is exiled from the battlefield" keeps its origin
+/// instead of collapsing to an any-zone exile trigger.
+#[test]
+fn trigger_is_exiled_from_the_battlefield_keeps_origin() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control is exiled from the battlefield, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.origin, Some(Zone::Battlefield));
+    assert_eq!(def.destination, Some(Zone::Exile));
+    assert!(def.valid_card.is_some());
+    assert_eq!(def.condition, None);
+}
+
 #[test]
 fn trigger_is_sacrificed() {
     let def = parse_trigger_line(

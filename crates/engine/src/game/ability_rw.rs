@@ -1937,6 +1937,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::WasStartingPlayer { .. }
         | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::ZoneChangeDuringCraftActivation
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
         | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
@@ -7124,6 +7125,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         | TriggerCondition::WasStartingPlayer { .. } => frozen_source_read(),
         TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
         | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::ZoneChangeDuringCraftActivation
         | TriggerCondition::EventDamageSourceMatchesFilter { .. }
         | TriggerCondition::EventObjectMatchesFilter { .. }
         | TriggerCondition::DamagedPlayerIsEventSourceOwner
