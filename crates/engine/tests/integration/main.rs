@@ -303,6 +303,7 @@ mod custom_format_schema;
 mod cut_a_deal_draw_this_way_count;
 mod cybership_combat_damage_manifest;
 mod dalkovan_encampment_attack_trigger;
+mod damage_source_referred_by_stack_10295;
 mod dandan_analysis_ai_support_reads;
 mod dandan_custom_pile;
 mod dandan_declare_round;
