@@ -1238,13 +1238,12 @@ fn submit_p1_order(board: &mut RiptideBoard) {
 }
 
 /// P1's library after P1's two cards are delivered third from the top in
-/// P1's order. CHARACTERIZATION of the prompt's `NthFromTop` mapping (#10216):
-/// each submitted card is inserted at index `n - 1`, so submitting
-/// `[borrowed, demon]` leaves `demon` third and `borrowed` fourth. The card
-/// does not fix this mapping; CR 401.4 lets the owner choose any order.
+/// P1's order. CR 401.4 (#10216): the prompt reads the selection the same way
+/// for every position, first selected highest, so submitting
+/// `[borrowed, demon]` leaves `borrowed` third and `demon` fourth.
 fn p1_library_after_both(board: &RiptideBoard) -> Vec<ObjectId> {
     let f = &board.p1_library;
-    vec![f[0], f[1], board.demon, board.borrowed, f[2]]
+    vec![f[0], f[1], board.borrowed, board.demon, f[2]]
 }
 
 fn p3_library_after(board: &RiptideBoard) -> Vec<ObjectId> {

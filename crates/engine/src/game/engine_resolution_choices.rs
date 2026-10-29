@@ -9378,9 +9378,15 @@ fn effect_zone_library_placement_order(
     chosen: &[ObjectId],
     library_position: &LibraryPosition,
 ) -> Vec<ObjectId> {
+    // CR 401.4: the owner's submitted order reads the same way for every
+    // position: the first selected card ends highest in the placed group.
+    // Top and NthFromTop insert each card at one fixed index, so they replay
+    // the selection last-to-first; Bottom appends, so it replays in order.
     match library_position {
-        LibraryPosition::Top => chosen.iter().rev().copied().collect(),
-        LibraryPosition::Bottom | LibraryPosition::NthFromTop { .. } => chosen.to_vec(),
+        LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
+            chosen.iter().rev().copied().collect()
+        }
+        LibraryPosition::Bottom => chosen.to_vec(),
         LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
             unreachable!("EffectZoneChoice normalizes unsupported library positions to Top")
         }
@@ -9450,6 +9456,16 @@ fn replay_effect_zone_library_placement(
     placed: &[ObjectId],
     library_position: &LibraryPosition,
 ) -> Vec<ObjectId> {
+    // CR 401.4: the placed cards land as one group "Nth from the top" of the
+    // library they join, so the index counts only the cards that stay put.
+    // Lift this holder's placed cards out before any insertion; removing them
+    // one at a time would shift the index under the cards already inserted.
+    if matches!(library_position, LibraryPosition::NthFromTop { .. }) {
+        library.retain(|id| {
+            !(placed.contains(id)
+                && state.zone_storage_seat(Zone::Library, state.objects[id].owner) == holder)
+        });
+    }
     for card_id in effect_zone_library_placement_order(chosen, library_position) {
         let card_holder = state.zone_storage_seat(Zone::Library, state.objects[&card_id].owner);
         if card_holder != holder || !placed.contains(&card_id) {
@@ -9484,16 +9500,28 @@ fn move_library_origin_cards_in_selection_order(
                 zones::move_to_library_position(state, card_id, false, events);
             }
         }
-        LibraryPosition::Top | LibraryPosition::NthFromTop { .. } => {
-            let index = match library_position {
-                LibraryPosition::Top => Some(0),
-                LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
-                _ => unreachable!("matched library position"),
-            };
+        LibraryPosition::Top => {
             let placement_order = effect_zone_library_placement_order(chosen, library_position);
             for card_id in placement_order {
                 // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_at_index(state, card_id, index, events);
+                zones::move_to_library_at_index(state, card_id, Some(0), events);
+            }
+        }
+        // CR 401.4: the chosen cards land as one group, first selected
+        // highest, "Nth from the top" of the cards that stay put. Moving them
+        // one at a time would let each departure shift the fixed index.
+        LibraryPosition::NthFromTop { n } => {
+            let index = n.saturating_sub(1) as usize;
+            for holder in library_holders_of(state, chosen) {
+                let group: Vec<ObjectId> = chosen
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        state.zone_storage_seat(Zone::Library, state.objects[id].owner) == holder
+                    })
+                    .collect();
+                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+                zones::reorder_within_library(state, holder, &group, Some(index));
             }
         }
         LibraryPosition::BeneathTop { .. } | LibraryPosition::RandomWithinTop { .. } => {
@@ -9505,14 +9533,13 @@ fn move_library_origin_cards_in_selection_order(
 /// CR 401.4 + CR 400.3 + CR 608.2c: Preserve the raw arm's selected-card interleaving
 /// after the Hand-origin delivery batch has settled. Reconstruct each affected
 /// library without the newly delivered cards, replay the original placement
-/// order using only cards that actually landed in a library, then reposition
-/// just the cards that began there into the resulting slots.
+/// order using only cards that actually landed in a library, then write that
+/// order back in one in-library reorder.
 fn reposition_library_origins_after_batch_delivery(
     state: &mut GameState,
     chosen: &[ObjectId],
     library_origin: &[ObjectId],
     library_position: &LibraryPosition,
-    events: &mut Vec<GameEvent>,
 ) {
     let library_placed: Vec<_> = chosen
         .iter()
@@ -9539,12 +9566,12 @@ fn reposition_library_origins_after_batch_delivery(
             &library_placed,
             library_position,
         );
-        for (index, &card_id) in desired.iter().enumerate().rev() {
-            if library_origin.contains(&card_id) {
-                // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
-                zones::move_to_library_at_index(state, card_id, Some(index), events);
-            }
-        }
+        // `desired` is a permutation of this library: every card in it now,
+        // reordered. Moving single cards to fixed indexes shifts the cards
+        // between them, so write the whole order in one in-library reorder.
+        debug_assert_eq!(desired.len(), state.library_of(holder).len());
+        // allow-raw-zone: in-library reposition is not a zone-change event (CR 401.4 + CR 614.1).
+        zones::reorder_within_library(state, holder, &desired, Some(0));
     }
 }
 
@@ -9564,7 +9591,6 @@ fn finish_effect_zone_put_at_library_position(
         &chosen,
         &library_origin,
         &library_position,
-        events,
     );
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
@@ -15133,7 +15159,8 @@ mod tests {
             let c1 = hand_card(&mut state, PlayerId(1), 1);
             let c2 = hand_card(&mut state, PlayerId(1), 2);
             let order = effect_zone_non_library_delivery_order(&state, &[c1, c2], &[], &nth);
-            assert_eq!(order, vec![c1, c2], "shared={expected_shared}");
+            // Delivered deepest-first so the first selected card ends highest.
+            assert_eq!(order, vec![c2, c1], "shared={expected_shared}");
         }
     }
 
@@ -15170,7 +15197,6 @@ mod tests {
             &[p1c],
             &[p1c],
             &nth,
-            &mut Vec::new(),
         );
         let mut expected: Vec<ObjectId> = pile.iter().copied().filter(|id| *id != p1c).collect();
         expected.insert(2, p1c);
@@ -15192,7 +15218,6 @@ mod tests {
             &[p1c],
             &[p1c],
             &nth,
-            &mut Vec::new(),
         );
         assert_eq!(
             standard.players[1]
@@ -15202,6 +15227,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![pile[1], pile[3], p1c, pile[5], pile[9]],
             "separate libraries place the card third from the top of its owner's"
+        );
+    }
+
+    /// CR 401.4 (#10216): library cards put "Nth from the top" land as one
+    /// group, first selected highest, counted against the cards that stay
+    /// put. Moving them one at a time let each departure shift the index.
+    #[test]
+    fn library_origin_nth_from_top_places_one_group_first_selected_highest() {
+        let nth = LibraryPosition::NthFromTop { n: 2 };
+        let (mut moved, pile) = standard_libraries();
+        let chosen = [pile[7], pile[1]];
+        move_library_origin_cards_in_selection_order(&mut moved, &chosen, &nth, &mut Vec::new());
+        let expected = vec![pile[3], pile[7], pile[1], pile[5], pile[9]];
+        assert_eq!(
+            moved.players[1].library.iter().copied().collect::<Vec<_>>(),
+            expected,
+            "the group sits second from the top of the three cards that stay"
+        );
+
+        let (mut replayed, pile) = standard_libraries();
+        let chosen = [pile[7], pile[1]];
+        reposition_library_origins_after_batch_delivery(&mut replayed, &chosen, &chosen, &nth);
+        assert_eq!(
+            replayed.players[1]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            expected,
+            "the batch-delivery reposition writes the same group order"
         );
     }
 

@@ -14233,13 +14233,15 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             ],
         ),
         (
+            // CR 401.4: the four cards land as one group, first selected
+            // highest, second from the top of the one card that stays put.
             engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
             vec![
-                hand_first,
-                library_second,
-                hand_second,
-                library_first,
                 marker,
+                hand_first,
+                library_first,
+                hand_second,
+                library_second,
             ],
         ),
     ] {
