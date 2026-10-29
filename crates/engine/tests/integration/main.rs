@@ -92,6 +92,7 @@ mod balduvian_horde_random_discard;
 mod baleful_mastery_regression;
 mod balthier_and_fran_crew_history;
 mod banding_combat;
+mod barbflare_gremlin_tapped_land_mana;
 mod bards_company_recruit;
 mod batched_trigger_subject_count;
 mod batroc_the_leaper_multikicker_counters;

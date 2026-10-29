@@ -155,12 +155,16 @@ pub fn is_renewable_mana_ability(ability_def: &AbilityDefinition) -> bool {
 ///
 /// `trigger_event` is the event that caused the trigger to fire (CR 603.7c).
 ///
-/// Criterion (c) requires that **every** reachable link in the resolution graph
-/// (the `sub_ability` chain and the `else_ability` branch at each link, per
-/// CR 608.2c) is `Effect::Mana`. Inline resolution runs the full chain without
-/// giving any player priority — so a mixed chain like "add {G}, then draw a
-/// card" must use the stack, not route inline. "Any link adds mana" is too
-/// permissive: it would skip priority on the draw.
+/// Criterion (c) is CR 605.1b's "could add mana": some reachable link in the
+/// resolution graph (the `sub_ability` chain and the `else_ability` branch at
+/// each link, per CR 608.2c) is `Effect::Mana`. CR 605.1b does not require
+/// the ability's *other* effects to be mana — Barbflare Gremlin ("that player
+/// adds one mana … Then that land deals 1 damage to that player") and
+/// Overabundance are mana abilities that also deal damage, and CR 605.4a
+/// resolves them immediately, damage included. Every non-mana link must
+/// still be one inline resolution can finish without a player decision
+/// ([`link_resolves_inline_without_choice`]); any other mixed chain (e.g.
+/// "add {G}, then draw a card") conservatively keeps using the stack.
 ///
 /// Criterion (b) accepts `TappedForMana` (CR 106.12a) — the per-resolution
 /// event emitted whenever a `{T}`-cost mana ability resolves and produces mana,
@@ -184,10 +188,10 @@ pub fn is_triggered_mana_ability(
     ability: &ResolvedAbility,
     trigger_event: Option<&GameEvent>,
 ) -> bool {
-    // (c) Every reachable link must produce mana. A mixed chain (Mana + Draw,
-    // Mana + Damage, …) cannot route inline because non-mana effects in the
-    // chain require stack resolution to give players priority.
-    if !chain_is_all_mana(ability) {
+    // (c) CR 605.1b: the ability "could add mana" — some reachable link
+    // produces mana — and every other link is a choice-free effect the inline
+    // resolver completes on its own (Barbflare Gremlin's damage, CR 605.4a).
+    if !chain_could_add_mana(ability) || !chain_non_mana_links_resolve_inline(ability) {
         return false;
     }
     // (a) No target anywhere in the reachable resolution graph — mirrors the
@@ -292,12 +296,32 @@ pub(crate) fn is_resolving_triggered_mana(state: &GameState, ability: &ResolvedA
     is_triggered_mana_ability(ability, state.current_trigger_event.as_ref())
 }
 
-/// True iff every reachable link (via `sub_ability` and `else_ability` per
-/// CR 608.2c) has `Effect::Mana`. The "every link is mana" rule is the
-/// conservative reading of CR 605.1b(c) — inline resolution skips priority,
-/// so any non-mana effect reachable during resolution forces stack use.
-fn chain_is_all_mana(ability: &ResolvedAbility) -> bool {
-    visit_links_all(ability, &|link| matches!(link.effect, Effect::Mana { .. }))
+/// CR 605.1b: True iff **any** reachable link (via `sub_ability` and
+/// `else_ability` per CR 608.2c) has `Effect::Mana` — the ability "could add
+/// mana".
+fn chain_could_add_mana(ability: &ResolvedAbility) -> bool {
+    visit_links_any(ability, &|link| matches!(link.effect, Effect::Mana { .. }))
+}
+
+/// True iff every reachable link is either `Effect::Mana` or passes
+/// [`link_resolves_inline_without_choice`].
+fn chain_non_mana_links_resolve_inline(ability: &ResolvedAbility) -> bool {
+    visit_links_all(ability, &|link| {
+        matches!(link.effect, Effect::Mana { .. }) || link_resolves_inline_without_choice(link)
+    })
+}
+
+/// CR 605.4a: a non-mana effect that an immediately-resolving triggered mana
+/// ability can carry out with no player decision — damage dealt or life lost
+/// with a fixed, untargeted recipient (targets are rejected separately by
+/// criterion (a)). Deny-by-default: an effect that moves cards, asks for a
+/// choice, or otherwise has not been audited for stackless resolution keeps
+/// the whole chain on the stack.
+fn link_resolves_inline_without_choice(link: &ResolvedAbility) -> bool {
+    matches!(
+        link.effect,
+        Effect::DealDamage { .. } | Effect::LoseLife { target: None, .. }
+    )
 }
 
 /// True iff **any** reachable link (via `sub_ability` and `else_ability`)
@@ -345,7 +369,7 @@ fn sole_produced_color(produced: &[ManaType]) -> Option<ManaColor> {
 
 /// Visit every reachable link of `ability` — head + `sub_ability` chain +
 /// `else_ability` branches at each link — and return `true` iff `pred` holds
-/// for all of them. Mirrors `chain_is_all_mana` / `chain_has_any_targets`'s
+/// for all of them. Mirrors `chain_could_add_mana` / `chain_has_any_targets`'s
 /// single traversal shape so the two walkers stay structurally identical.
 fn visit_links_all(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
     if !pred(ability) {
@@ -11831,12 +11855,49 @@ mod tests {
         ));
     }
 
+    fn damage_to_controller_resolved() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    #[test]
+    fn classifier_accepts_mana_plus_untargeted_damage_chain() {
+        // CR 605.1b: "could add mana" — Barbflare Gremlin / Overabundance add
+        // mana and then deal damage; the damage does not stop the trigger
+        // from being a mana ability (CR 605.4a resolves it immediately).
+        let mut head = mana_producing_resolved();
+        head.sub_ability = Some(Box::new(damage_to_controller_resolved()));
+        assert!(is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
+    }
+
+    #[test]
+    fn classifier_rejects_damage_only_chain() {
+        // CR 605.1b: an ability that cannot add mana is never a mana ability.
+        let mut head = damage_to_controller_resolved();
+        head.sub_ability = Some(Box::new(damage_to_controller_resolved()));
+        assert!(!is_triggered_mana_ability(
+            &head,
+            Some(&tapped_for_mana_event())
+        ));
+    }
+
     #[test]
     fn classifier_rejects_mixed_mana_plus_non_mana_chain() {
-        // CR 605.1b criterion (c): "every link is mana" — a chain with mana
-        // at the head but a non-mana sub (e.g., draw a card) MUST use the
-        // stack. Routing such a chain inline would silently perform the
-        // non-mana effect without giving players priority.
+        // Deny-by-default for non-mana links not audited for stackless
+        // resolution: a chain with mana at the head but a draw sub keeps
+        // using the stack.
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(draw_resolved()));
         assert!(!is_triggered_mana_ability(
