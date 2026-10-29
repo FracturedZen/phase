@@ -1412,6 +1412,7 @@ mod recipient_scoped_discard_filter;
 mod recurring_insight_6856;
 mod recursive_recruitment;
 mod refurbished_familiar;
+mod regal_behemoth_monarch_mana;
 mod rejoin_the_fight_choose_pool;
 mod relic_of_progenitus_6446;
 mod render_silent_cant_cast;

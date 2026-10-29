@@ -4020,9 +4020,23 @@ fn inline_tap_mana_trigger_abilities(
                 Some(&definition_ref),
             );
             ability.ability_index = Some(active.live_index);
-            if super::mana_abilities::is_triggered_mana_ability(&ability, Some(tap_event)) {
-                coupled.push((definition_ref, ability));
+            if !super::mana_abilities::is_triggered_mana_ability(&ability, Some(tap_event)) {
+                continue;
             }
+            // CR 603.4: an intervening-if ("while you're the monarch", "if this
+            // creature is tapped") gates the trigger itself. Checked through the
+            // same firing-condition authority the post-action scan uses; the
+            // ability resolves at once (CR 605.4a), so this check is also its
+            // resolution recheck.
+            if !FiringConditions::printed(trigger_definition, Some(&definition_ref)).hold(
+                state,
+                ability.controller,
+                &source_context,
+                tap_event,
+            ) {
+                continue;
+            }
+            coupled.push((definition_ref, ability));
         }
     }
     coupled
