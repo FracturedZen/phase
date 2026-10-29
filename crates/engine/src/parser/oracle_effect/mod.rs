@@ -28595,7 +28595,31 @@ fn lower_subject_predicate_ast_body(
             // moved-object ChangeZone/ChangeZoneAll leg ALONE (see the resolution-
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
+            //
+            // CR 608.2c + CR 701.17a / CR 701.21a (Basalt Golem #10347): anaphoric
+            // "that <object>'s controller/owner <verb>s it" leaves
+            // `subject.target = None` (the Mercy Killing TargetOnly wrap below
+            // covers only the TARGETED possessive). Under a SelfRef trigger
+            // subject (BecomesBlocked), bare "it" would otherwise resolve to
+            // SelfRef via `resolve_it_pronoun` and sacrifice the source. Stamp
+            // the demonstrative object as the pronoun referent for this
+            // predicate only — Quagmire Lamprey's "on that creature" already
+            // binds ParentTarget through `parse_target`; this makes bare "it"
+            // match. Self-ETB "sacrifice it" (Phlage / Azorius Herald) is
+            // untouched: its sentence subject is not ParentTargetController.
+            let stamped_anaphor_object = subject.target.is_none()
+                && matches!(
+                    &affected,
+                    TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner
+                )
+                && ctx.object_pronoun_ref.is_none();
+            if stamped_anaphor_object {
+                ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
+            }
             let mut clause = lower_imperative_clause(&text, ctx);
+            if stamped_anaphor_object {
+                ctx.object_pronoun_ref = None;
+            }
             let placement_target_set = refine_put_at_library_position(&mut clause, &text, ctx);
             if clause.multi_target.is_none() {
                 clause.multi_target = placement_target_set;

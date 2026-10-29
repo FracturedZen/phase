@@ -11576,6 +11576,81 @@ fn trigger_quagmire_lamprey_counter_targets_parent_target() {
     }
 }
 
+/// Basalt Golem (#10347): per-blocker BecomesBlocked delayed sacrifice must
+/// bind "it" to the blocker (`ParentTarget`), not the source (`SelfRef`).
+/// CR 608.2c + CR 701.21a — "that creature's controller sacrifices it at end
+/// of combat"; Quagmire's "on that creature" already routes ParentTarget.
+#[test]
+fn basalt_golem_blocker_sacrifice_binds_parent_target_not_self() {
+    let parsed = parse_oracle_text(
+        "This creature can't be blocked by artifact creatures.\nWhenever this creature becomes blocked by a creature, that creature's controller sacrifices it at end of combat. If the player does, they create a 0/2 colorless Wall artifact creature token with defender.",
+        "Basalt Golem",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Golem".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::BecomesBlocked)
+        .expect("Basalt Golem BecomesBlocked trigger");
+    assert!(
+        trigger.valid_target.is_some(),
+        "per-blocker BecomesBlocked must carry valid_target (CR 509.3d)"
+    );
+    let execute = trigger.execute.as_deref().expect("delayed installer");
+    let Effect::CreateDelayedTrigger {
+        condition,
+        effect,
+        ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "expected CreateDelayedTrigger at end of combat, got {:?}",
+            execute.effect
+        );
+    };
+    assert!(
+        matches!(
+            condition,
+            DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat
+            }
+        ),
+        "expected end-of-combat delay, got {condition:?}"
+    );
+    match effect.effect.as_ref() {
+        Effect::Sacrifice { target, count, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ParentTarget,
+                "blocker antecedent 'it' must be ParentTarget, not SelfRef (source)"
+            );
+            assert_eq!(
+                *count,
+                QuantityExpr::Fixed { value: 1 },
+                "sacrifices exactly that one blocker"
+            );
+        }
+        other => panic!("expected delayed Sacrifice(ParentTarget), got {other:?}"),
+    }
+    let wall = effect
+        .sub_ability
+        .as_deref()
+        .expect("If the player does → Wall token sub");
+    assert_eq!(
+        wall.condition,
+        Some(AbilityCondition::effect_performed()),
+        "Wall must gate on OptionalEffectPerformed, got {:?}",
+        wall.condition
+    );
+    assert!(
+        matches!(wall.effect.as_ref(), Effect::Token { .. }),
+        "expected Wall Token effect, got {:?}",
+        wall.effect
+    );
+}
+
 #[test]
 fn trigger_becomes_blocked_pump_scales_with_creatures_blocking_it() {
     let def = parse_trigger_line(
