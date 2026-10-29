@@ -9050,22 +9050,19 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
     };
     let mut targets = Vec::new();
 
-    // CR 508.1b + CR 702.16j: A player with protection from everything can't
-    // be declared as the player each attacking creature is attacking — the
-    // attack declaration would fail because the protected player is not a
-    // legal attack target.
-    let protected = |pid: PlayerId| -> bool {
-        super::static_abilities::player_has_protection_from_everything(state, pid)
-    };
-
     // All non-eliminated, phased-in opponents (excluding teammates)
     for player in &state.players {
         if player.id != active
             && !state.eliminated_players.contains(&player.id)
             && !allies.contains(&player.id)
             && player.is_phased_in()
-            && !protected(player.id)
         {
+            // CR 702.16j + CR 506.3: protection from everything forbids being
+            // targeted, enchanted, blocked, and damaged — not being attacked.
+            // Choosing whom a creature attacks is not targeting (CR 115.1), so
+            // a protected player remains a legal attack target; the combat
+            // damage is prevented instead (The One Ring / Teferi's Protection
+            // rulings: "Creatures can still attack you").
             targets.push(AttackTarget::Player(player.id));
         }
     }
@@ -23940,12 +23937,12 @@ mod tests {
         );
     }
 
-    /// CR 508.1b + CR 702.16j: A player with protection from everything is
-    /// not a legal attack target. `get_valid_attack_targets` must exclude
-    /// them from the list opposing creatures can declare as their attack
-    /// target.
+    /// Issue #10315 — CR 702.16j + CR 506.3: protection from everything does
+    /// not stop a player from being attacked (The One Ring ruling 2023-06-16:
+    /// "Creatures can still attack you while you have protection from
+    /// everything"). The protected player must stay a valid attack target.
     #[test]
-    fn get_valid_attack_targets_excludes_protected_player() {
+    fn get_valid_attack_targets_keeps_player_with_protection_from_everything() {
         use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
         use crate::types::keywords::{Keyword, ProtectionTarget};
 
@@ -23972,10 +23969,10 @@ mod tests {
         // Active player is PlayerId(0) (default for new_two_player).
         let targets = get_valid_attack_targets(&state);
         assert!(
-            !targets
+            targets
                 .iter()
                 .any(|t| matches!(t, AttackTarget::Player(id) if *id == PlayerId(1))),
-            "protected PlayerId(1) must not be a valid attack target, got {:?}",
+            "PlayerId(1) with protection from everything must remain attackable, got {:?}",
             targets
         );
     }

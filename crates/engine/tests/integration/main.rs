@@ -1906,6 +1906,7 @@ mod offer_side_auto_payment;
 mod omenpath_journey_random_exiled_with;
 mod omnath_unspent_green_mana_2887;
 mod one_ring_burden_upkeep_lethal;
+mod one_ring_protection_attackable_10315;
 mod opposition_agent_final;
 mod optional_effect_remember_legal_actions;
 mod otherwise_conditional_effects;
