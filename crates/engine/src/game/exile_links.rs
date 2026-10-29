@@ -775,7 +775,8 @@ pub(crate) fn repeat_until_stop_witness(
 }
 
 /// CR 607.2a: True when `card_id` shares a name with another card linked to
-/// `source_id` via `exile_links`.
+/// `source_id` via `exile_links`. CR 201.2a: a nameless card (e.g. exiled face
+/// down, CR 708.2a) shares a name with no other card, even another nameless one.
 pub(crate) fn shares_name_with_other_exiled_by_source(
     state: &GameState,
     source_id: ObjectId,
@@ -789,7 +790,7 @@ pub(crate) fn shares_name_with_other_exiled_by_source(
         .iter()
         .filter(|link| link.source_id == source_id && link.exiled_id != card_id)
         .filter_map(|link| state.objects.get(&link.exiled_id))
-        .any(|other| other.name.eq_ignore_ascii_case(&card.name))
+        .any(|other| crate::game::filter::names_are_same(&other.name, &card.name))
 }
 
 fn source_contains_linked_exile_consumer(obj: &crate::game::GameObject) -> bool {
@@ -859,6 +860,64 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::statics::CastFrequency;
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// CR 607.2a + CR 201.2a: a nameless card exiled by a source (e.g. exiled
+    /// face down, CR 708.2a) shares a name with no other card exiled by it, even
+    /// another nameless one. Fails on revert: the raw string comparison read
+    /// `"" == ""` as a shared name.
+    #[test]
+    fn shares_name_with_other_exiled_by_source_ignores_nameless_cards() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind, GameState};
+
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Linked Source".to_string(),
+            Zone::Battlefield,
+        );
+        let exile = |state: &mut GameState, card: u64, name: &str| {
+            let id = create_object(
+                state,
+                CardId(card),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Exile,
+            );
+            state.exile_links.push(ExileLink {
+                exiled_id: id,
+                source_id: source,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+            id
+        };
+        let nameless_a = exile(&mut state, 2, "");
+        let nameless_b = exile(&mut state, 3, "");
+        let bears = exile(&mut state, 4, "Grizzly Bears");
+        let bears_again = exile(&mut state, 5, "GRIZZLY BEARS");
+        let ogre = exile(&mut state, 6, "Gray Ogre");
+
+        assert!(
+            !shares_name_with_other_exiled_by_source(&state, source, nameless_a),
+            "CR 201.2a: two nameless exiled cards do not share a name"
+        );
+        assert!(!shares_name_with_other_exiled_by_source(
+            &state, source, nameless_b
+        ));
+        // Reach: named cards still compare case-insensitively.
+        assert!(shares_name_with_other_exiled_by_source(
+            &state, source, bears
+        ));
+        assert!(shares_name_with_other_exiled_by_source(
+            &state,
+            source,
+            bears_again
+        ));
+        assert!(!shares_name_with_other_exiled_by_source(
+            &state, source, ogre
+        ));
+    }
 
     /// CR 607.2a + CR 611.2a: the source-linked duration ends on EVERY
     /// permission variant that can carry it, not only `PlayFromExile`.

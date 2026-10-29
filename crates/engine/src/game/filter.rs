@@ -9096,6 +9096,14 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
+/// CR 201.2 + CR 201.2a: two names are the same when they match
+/// case-insensitively, except that an object with no name (e.g. a face-down
+/// permanent or face-down exiled card, CR 708.2a) doesn't have the same name as
+/// any other object, including another object with no name.
+pub(crate) fn names_are_same(left: &str, right: &str) -> bool {
+    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
     let id = first_object_target(ability)?;
@@ -9784,9 +9792,10 @@ fn matches_filter_prop(
                     }
                 })
         }
-        // SameName: matches objects with the same name as the tracked card from context.
-        // At runtime, this checks against the source object's name (the event context card).
-        FilterProp::SameName => obj.name == source.lki.name,
+        // CR 201.2 + CR 201.2a: matches objects with the same name as the tracked
+        // card from context (the source object's name, i.e. the event context
+        // card). A nameless object shares a name with nothing.
+        FilterProp::SameName => names_are_same(&obj.name, &source.lki.name),
         // CR 201.2: Match objects whose name equals the resolving ability's
         // first object target (the parent target captured by the chained sub-ability).
         // Falls back to the LKI cache when the targeted object has already left its zone
@@ -10741,8 +10750,9 @@ fn zone_change_record_matches_property(
         ),
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => record.power.unwrap_or(0) > source.lki.power.unwrap_or(0),
-        // CR 201.2: Same-name match against the tracked source object.
-        FilterProp::SameName => source.lki.name.eq_ignore_ascii_case(&record.name),
+        // CR 201.2 + CR 201.2a: Same-name match against the tracked source
+        // object; a nameless object shares a name with nothing.
+        FilterProp::SameName => names_are_same(&record.name, &source.lki.name),
         // CR 201.2: Same-name match against the resolving ability's first object
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
@@ -23006,6 +23016,100 @@ mod tests {
             ),
             "stale target id must fall through to the effect-context snapshot rung"
         );
+    }
+
+    /// CR 201.2a: `FilterProp::SameName` never matches when either side is
+    /// nameless — on both the live-object path and the zone-change (look-back)
+    /// record path. The source here is a face-down creature (CR 708.2a). Fails
+    /// on revert: the live arm compared raw strings (`"" == ""` matched) and the
+    /// record arm compared `eq_ignore_ascii_case`, which also matches `""`.
+    #[test]
+    fn same_name_nameless_matches_nothing_live_and_look_back() {
+        use crate::types::game_state::ZoneChangeRecord;
+
+        let filter =
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::SameName]));
+        let mut state = setup();
+        let face_down_source = add_creature(&mut state, PlayerId(0), "Hidden Card");
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&face_down_source).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&face_down_source].name, "");
+        let named_source = add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        let nameless_candidate = create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(1),
+            String::new(),
+            Zone::Graveyard,
+        );
+        let bears_candidate = create_object(
+            &mut state,
+            CardId(81),
+            PlayerId(1),
+            "grizzly bears".to_string(),
+            Zone::Graveyard,
+        );
+
+        // Live-object path.
+        assert!(
+            !matches_target_filter(&state, nameless_candidate, &filter, face_down_source),
+            "CR 201.2a: a nameless object does not share a nameless source's name"
+        );
+        assert!(!matches_target_filter(
+            &state,
+            bears_candidate,
+            &filter,
+            face_down_source
+        ));
+        assert!(
+            matches_target_filter(&state, bears_candidate, &filter, named_source),
+            "reach: named objects match case-insensitively"
+        );
+        assert!(!matches_target_filter(
+            &state,
+            nameless_candidate,
+            &filter,
+            named_source
+        ));
+
+        // Zone-change (look-back) record path.
+        let record_named = |name: &str, id: ObjectId| ZoneChangeRecord {
+            name: name.to_string(),
+            ..ZoneChangeRecord::test_minimal(id, Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let nameless_record = record_named("", nameless_candidate);
+        let bears_record = record_named("Grizzly Bears", bears_candidate);
+        let face_down_ctx = FilterContext::from_source(&state, face_down_source);
+        let named_ctx = FilterContext::from_source(&state, named_source);
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                &state,
+                &nameless_record,
+                &filter,
+                &face_down_ctx
+            ),
+            "CR 201.2a: look-back — a nameless record does not share a nameless source's name"
+        );
+        assert!(!matches_target_filter_on_zone_change_record(
+            &state,
+            &bears_record,
+            &filter,
+            &face_down_ctx
+        ));
+        assert!(matches_target_filter_on_zone_change_record(
+            &state,
+            &bears_record,
+            &filter,
+            &named_ctx
+        ));
+        assert!(!matches_target_filter_on_zone_change_record(
+            &state,
+            &nameless_record,
+            &filter,
+            &named_ctx
+        ));
     }
 
     /// CR 608.2h + CR 201.2a + CR 707.2: `SameNameAsParentTarget` reads the
