@@ -14087,6 +14087,92 @@ fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
     );
 }
 
+/// CR 109.2: Training Grounds' "creatures you control" denotes creature
+/// permanents on the battlefield, so its discount must not reach an ability
+/// activated from a creature CARD in `zone` (unearth from a graveyard, cycling
+/// from a hand). Returns `(offered_with_one_mana, offered_with_two_mana)`.
+fn training_grounds_offers_off_battlefield_activation(zone: Zone) -> (bool, bool) {
+    let mut state = setup_game_at_main_phase();
+    let training_grounds = create_object(
+        &mut state,
+        CardId(704),
+        PlayerId(0),
+        "Training Grounds".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&training_grounds)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
+                dynamic_count: None,
+                exemption: crate::types::statics::ActivationExemption::None,
+                activator: None,
+                targets: None,
+                frequency: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+        );
+
+    let card = create_object(
+        &mut state,
+        CardId(705),
+        PlayerId(0),
+        "Off-Battlefield Dummy".to_string(),
+        zone,
+    );
+    {
+        let obj = state.objects.get_mut(&card).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        });
+        ability.activation_zone = Some(zone);
+        Arc::make_mut(&mut obj.abilities).push(ability);
+    }
+
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    let with_one = can_activate_ability_now(&state, PlayerId(0), card, 0);
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+    let with_two = can_activate_ability_now(&state, PlayerId(0), card, 0);
+    (with_one, with_two)
+}
+
+#[test]
+fn training_grounds_does_not_discount_graveyard_creature_card_ability() {
+    let (with_one, with_two) = training_grounds_offers_off_battlefield_activation(Zone::Graveyard);
+    assert!(
+        !with_one,
+        "CR 109.2: a graveyard creature card is not a creature you control; its {{2}} ability must pay full cost"
+    );
+    assert!(with_two, "reach guard: the full {{2}} cost is payable");
+}
+
+#[test]
+fn training_grounds_does_not_discount_hand_creature_card_ability() {
+    let (with_one, with_two) = training_grounds_offers_off_battlefield_activation(Zone::Hand);
+    assert!(
+        !with_one,
+        "CR 109.2: a creature card in hand is not a creature you control; its {{2}} ability must pay full cost"
+    );
+    assert!(with_two, "reach guard: the full {{2}} cost is payable");
+}
+
 #[test]
 fn target_gated_self_cost_reduction_applies_after_target_selection() {
     let mut state = setup_game_at_main_phase();

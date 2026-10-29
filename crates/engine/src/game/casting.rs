@@ -33728,6 +33728,9 @@ struct ActivationView<'a> {
     source: ObjectId,
     /// `None`: the live source. `Some`: its facts as they were when activated.
     source_lki: Option<&'a LKISnapshot>,
+    /// CR 109.2: the zone the source is in (live) or was in when the ability
+    /// was activated (recorded). `None` when the live source no longer exists.
+    source_zone: Option<Zone>,
     active_keyword: Option<&'static str>,
     is_mana: bool,
     is_loyalty: bool,
@@ -33771,6 +33774,16 @@ fn reduce_ability_cost_non_target_gates_admit(
         if !player_may_begin_activating(state, view.activator, static_controller, Some(activator)) {
             return false;
         }
+    }
+    // CR 109.2: a zone-less "<type> you control" source filter (Training
+    // Grounds' "creatures you control") means a permanent on the battlefield, so
+    // it can't reach an ability of a card in a graveyard, hand, exile, or the
+    // command zone (unearth, cycling, embalm, …), even though that card still has
+    // the type (CR 205.2a) and its owner reads as its controller (CR 108.4a).
+    if affected.is_some_and(super::filter::filter_denotes_battlefield_permanent)
+        && view.source_zone != Some(Zone::Battlefield)
+    {
+        return false;
     }
     // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
     affected.is_none_or(|filter| match view.source_lki {
@@ -33871,6 +33884,7 @@ fn first_qualifying_activation_this_turn<'s>(
                 activator: record.activator,
                 source: record.source,
                 source_lki: Some(&record.source_lki),
+                source_zone: Some(record.source_zone),
                 active_keyword: record
                     .ability_tag
                     .map(crate::types::ability::AbilityTag::keyword_str),
@@ -34089,6 +34103,7 @@ fn resolve_one_reduce_ability_cost(
         activator: player,
         source: ability_source_id,
         source_lki: None,
+        source_zone: state.objects.get(&ability_source_id).map(|obj| obj.zone),
         active_keyword,
         is_mana: ability_is_mana,
         is_loyalty: ability_is_loyalty,
