@@ -16910,6 +16910,146 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
     ));
 }
 
+/// Walks a chain to (search, choose, chosen move, rest move) and asserts the
+/// search keeps no put step of its own (CR 701.24b: the found cards wait in
+/// the library until the partition moves them).
+#[cfg(test)]
+fn search_partition_steps(
+    chain: &crate::types::ability::AbilityDefinition,
+) -> (
+    &crate::types::ability::AbilityDefinition,
+    &crate::types::ability::AbilityDefinition,
+    &crate::types::ability::AbilityDefinition,
+) {
+    assert!(
+        matches!(&*chain.effect, Effect::SearchLibrary { .. }),
+        "{:?}",
+        chain.effect
+    );
+    let choose = chain
+        .sub_ability
+        .as_deref()
+        .expect("search should chain directly to ChooseFromZone (no early move)");
+    let chosen = choose.sub_ability.as_deref().expect("chosen move");
+    let rest = chosen.sub_ability.as_deref().expect("rest move");
+    (choose, chosen, rest)
+}
+
+/// #10238 Intuition: "Target opponent chooses one." (no "of them") and
+/// "Put that card into your hand and the rest into your graveyard."
+#[test]
+fn intuition_partition_keeps_found_cards_in_library_until_choice() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+
+    let chain = parse_effect_chain(
+        "Search your library for three cards and reveal them. Target opponent chooses one. Put that card into your hand and the rest into your graveyard. Then shuffle.",
+        AbilityKind::Spell,
+    );
+    let (choose, chosen, rest) = search_partition_steps(&chain);
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 1,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "{:?}",
+        choose.effect
+    );
+    assert!(
+        matches!(
+            &*chosen.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "{:?}",
+        chosen.effect
+    );
+    assert!(
+        matches!(
+            &*rest.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                ..
+            }
+        ),
+        "{:?}",
+        rest.effect
+    );
+    let shuffle = rest.sub_ability.as_deref().expect("Then shuffle tail");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "{:?}",
+        shuffle.effect
+    );
+}
+
+/// #10238 Elemental Teachings: the chosen lands go to the graveyard and only
+/// the rest enter tapped — no early Library→Battlefield move for all four.
+#[test]
+fn elemental_teachings_partition_rest_enters_battlefield_tapped() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+    use crate::types::zones::EtbTapState;
+
+    let chain = parse_effect_chain(
+        "Search your library for up to four land cards with different names and reveal them. An opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest onto the battlefield tapped, then shuffle.",
+        AbilityKind::Spell,
+    );
+    let (choose, chosen, rest) = search_partition_steps(&chain);
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "{:?}",
+        choose.effect
+    );
+    assert!(
+        matches!(
+            &*chosen.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Graveyard,
+                enter_tapped: EtbTapState::Unspecified,
+                ..
+            }
+        ),
+        "{:?}",
+        chosen.effect
+    );
+    assert!(
+        matches!(
+            &*rest.effect,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                enter_tapped: EtbTapState::Tapped,
+                ..
+            }
+        ),
+        "{:?}",
+        rest.effect
+    );
+    let shuffle = rest.sub_ability.as_deref().expect("then shuffle tail");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "{:?}",
+        shuffle.effect
+    );
+}
+
 #[test]
 fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
     use crate::parser::oracle_effect::parse_effect_chain;

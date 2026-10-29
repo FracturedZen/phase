@@ -504,9 +504,13 @@ pub(crate) enum ContinuationAst {
     /// "Put/shuffle the chosen cards into <zone> and put the rest into <zone>"
     /// after a tracked-set choice. The choice resolver injects chosen cards into
     /// the first continuation and unchosen cards into its immediate sub-ability.
+    /// CR 110.2 + CR 608.2c: `*_enters_tapped` records "onto the battlefield
+    /// tapped" (Elemental Teachings' rest pile).
     ChoicePartitionDestinations {
         chosen_destination: Zone,
         rest_destination: Zone,
+        chosen_enters_tapped: bool,
+        rest_enters_tapped: bool,
     },
     /// "Put those cards/the chosen cards on top ..." after a search/dig/choice
     /// producer.

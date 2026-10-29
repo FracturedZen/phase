@@ -2,7 +2,9 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -369,9 +371,76 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
         .unwrap_or(1)
 }
 
-fn parse_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+/// One pile's destination in a chosen/rest partition: the zone and whether a
+/// battlefield entry is tapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartitionPile {
+    zone: Zone,
+    enters_tapped: bool,
+}
+
+impl From<Zone> for PartitionPile {
+    fn from(zone: Zone) -> Self {
+        Self {
+            zone,
+            enters_tapped: false,
+        }
+    }
+}
+
+/// CR 608.2d: "an opponent chooses N" / "target opponent chooses N" /
+/// "[you] choose N" with nothing after the number (Intuition).
+fn parse_bare_search_choice(lower: &str) -> Option<(u32, Chooser)> {
+    all_consuming(alt((
+        map(
+            preceded(
+                alt((
+                    tag::<_, _, OracleError<'_>>("an opponent chooses "),
+                    tag("target opponent chooses "),
+                )),
+                nom_primitives::parse_number,
+            ),
+            |n| (n, Chooser::Opponent),
+        ),
+        map(
+            preceded(
+                (opt(tag("you ")), tag("choose ")),
+                nom_primitives::parse_number,
+            ),
+            |n| (n, Chooser::Controller),
+        ),
+    )))
+    .parse(lower)
+    .ok()
+    .map(|(_, parsed)| parsed)
+}
+
+fn parse_choice_partition_destinations(lower: &str) -> Option<(PartitionPile, PartitionPile)> {
     parse_put_choice_partition_destinations(lower)
         .or_else(|| parse_shuffle_choice_partition_destinations(lower))
+}
+
+/// CR 110.2 + CR 608.2c: a partition pile's destination — any owner zone
+/// `parse_choice_partition_destination` reads, or "onto the battlefield
+/// [tapped]" (Elemental Teachings: "and the rest onto the battlefield tapped").
+fn parse_choice_partition_pile(input: &str) -> OracleResult<'_, PartitionPile> {
+    alt((
+        map(
+            terminated(
+                preceded(tag(" onto the battlefield"), opt(tag(" tapped"))),
+                // Fail closed on an unread rider ("… under your control",
+                // "… attacking"): only a sentence/clause end or the " and "
+                // joining the two piles may follow.
+                peek(alt((eof, tag(","), tag("."), tag(" and ")))),
+            ),
+            |tapped| PartitionPile {
+                zone: Zone::Battlefield,
+                enters_tapped: tapped.is_some(),
+            },
+        ),
+        map(parse_choice_partition_destination, PartitionPile::from),
+    ))
+    .parse(input)
 }
 
 fn starts_have_base_power_toughness(input: &str) -> bool {
@@ -418,18 +487,20 @@ fn parse_put_chosen_cards_at_library_position(lower: &str) -> Option<LibraryPosi
     .ok()
 }
 
-fn parse_put_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+fn parse_put_choice_partition_destinations(lower: &str) -> Option<(PartitionPile, PartitionPile)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
     let (rest, _) = parse_chosen_cards_reference(rest).ok()?;
-    let (rest, chosen_destination) = parse_choice_partition_destination(rest).ok()?;
+    let (rest, chosen_destination) = parse_choice_partition_pile(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" and ").parse(rest).ok()?;
     let (rest, _) = opt(tag::<_, _, OracleError<'_>>("put ")).parse(rest).ok()?;
     let (rest, _) = parse_rest_cards_reference(rest).ok()?;
-    let (_, rest_destination) = parse_choice_partition_destination(rest).ok()?;
+    let (_, rest_destination) = parse_choice_partition_pile(rest).ok()?;
     Some((chosen_destination, rest_destination))
 }
 
-fn parse_shuffle_choice_partition_destinations(lower: &str) -> Option<(Zone, Zone)> {
+fn parse_shuffle_choice_partition_destinations(
+    lower: &str,
+) -> Option<(PartitionPile, PartitionPile)> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(lower).ok()?;
     let (rest, _) = parse_chosen_cards_reference(rest).ok()?;
     let (rest, _) = alt((
@@ -441,8 +512,8 @@ fn parse_shuffle_choice_partition_destinations(lower: &str) -> Option<(Zone, Zon
     .ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" and put ").parse(rest).ok()?;
     let (rest, _) = parse_rest_cards_reference(rest).ok()?;
-    let (_, rest_destination) = parse_choice_partition_destination(rest).ok()?;
-    Some((Zone::Library, rest_destination))
+    let (_, rest_destination) = parse_choice_partition_pile(rest).ok()?;
+    Some((Zone::Library.into(), rest_destination))
 }
 
 fn parse_chosen_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -451,6 +522,10 @@ fn parse_chosen_cards_reference(input: &str) -> Result<(&str, ()), nom::Err<Orac
         alt((
             tag::<_, _, OracleError<'_>>("the chosen cards"),
             tag("the chosen card"),
+            // CR 608.2c: Intuition's single chosen card ("Target opponent
+            // chooses one. Put that card into your hand and the rest …"). Only
+            // reached after "put "/"shuffle " and only paired with a rest pile.
+            tag("that card"),
         )),
     )
     .parse(input)
@@ -6226,7 +6301,10 @@ pub(super) fn apply_clause_continuation(
         ContinuationAst::ChoicePartitionDestinations {
             chosen_destination,
             rest_destination,
+            chosen_enters_tapped,
+            rest_enters_tapped,
         } => {
+            let tap_state = crate::types::zones::EtbTapState::from_legacy_bool;
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -6241,7 +6319,7 @@ pub(super) fn apply_clause_continuation(
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enter_tapped: tap_state(chosen_enters_tapped),
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -6259,7 +6337,7 @@ pub(super) fn apply_clause_continuation(
                         owner_library: false,
                         enter_transformed: false,
                         enters_under: None,
-                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enter_tapped: tap_state(rest_enters_tapped),
                         enters_attacking: false,
                         up_to: false,
                         enter_with_counters: vec![],
@@ -9380,11 +9458,11 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             Some(ContinuationAst::PutChoiceRemainderOnBottom)
         }
         Effect::ChooseFromZone { .. } => parse_choice_partition_destinations(&lower)
-            .map(|(chosen_destination, rest_destination)| {
-                ContinuationAst::ChoicePartitionDestinations {
-                    chosen_destination,
-                    rest_destination,
-                }
+            .map(|(chosen, rest)| ContinuationAst::ChoicePartitionDestinations {
+                chosen_destination: chosen.zone,
+                rest_destination: rest.zone,
+                chosen_enters_tapped: chosen.enters_tapped,
+                rest_enters_tapped: rest.enters_tapped,
             })
             .or_else(|| {
                 parse_put_chosen_cards_at_library_position(&lower)
@@ -9422,6 +9500,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 Chooser::Controller
             };
             Some(ContinuationAst::ChooseFromExile { count, chooser })
+        }
+        // CR 608.2c + CR 608.2d: Intuition's bare "Target opponent chooses one."
+        // after a search whose found cards wait in the library — the count has no
+        // "of them" tail, so the whole sentence must be the chooser + number.
+        Effect::SearchLibrary { .. }
+            if parse_bare_search_choice(lower.trim().trim_end_matches('.')).is_some() =>
+        {
+            parse_bare_search_choice(lower.trim().trim_end_matches('.'))
+                .map(|(count, chooser)| ContinuationAst::ChooseFromExile { count, chooser })
         }
         Effect::ChangeZone {
             origin: Some(Zone::Library),
@@ -15149,8 +15236,55 @@ mod tests {
             Some(ContinuationAst::ChoicePartitionDestinations {
                 chosen_destination: Zone::Graveyard,
                 rest_destination: Zone::Hand,
+                chosen_enters_tapped: false,
+                rest_enters_tapped: false,
             })
         );
+    }
+
+    #[test]
+    fn choice_partition_pile_reads_battlefield_tapped_and_fails_closed_on_riders() {
+        assert_eq!(
+            parse_choice_partition_destinations(
+                "put the chosen cards into your graveyard and the rest onto the battlefield tapped, then shuffle."
+            ),
+            Some((
+                Zone::Graveyard.into(),
+                PartitionPile {
+                    zone: Zone::Battlefield,
+                    enters_tapped: true,
+                }
+            ))
+        );
+        assert_eq!(
+            parse_choice_partition_destinations(
+                "put that card into your hand and the rest into your graveyard."
+            ),
+            Some((Zone::Hand.into(), Zone::Graveyard.into()))
+        );
+        assert_eq!(
+            parse_choice_partition_destinations(
+                "put the chosen cards into your graveyard and the rest onto the battlefield under your control."
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn bare_search_choice_requires_whole_sentence() {
+        assert_eq!(
+            parse_bare_search_choice("target opponent chooses one"),
+            Some((1, Chooser::Opponent))
+        );
+        assert_eq!(
+            parse_bare_search_choice("an opponent chooses two"),
+            Some((2, Chooser::Opponent))
+        );
+        assert_eq!(
+            parse_bare_search_choice("target opponent chooses one of them"),
+            None
+        );
+        assert_eq!(parse_bare_search_choice("choose one —"), None);
     }
 
     #[test]
@@ -15178,6 +15312,8 @@ mod tests {
             Some(ContinuationAst::ChoicePartitionDestinations {
                 chosen_destination: Zone::Library,
                 rest_destination: Zone::Hand,
+                chosen_enters_tapped: false,
+                rest_enters_tapped: false,
             })
         );
     }
