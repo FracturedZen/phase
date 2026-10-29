@@ -4494,6 +4494,61 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         filter
     };
 
+    // CR 205.3a + CR 509.1b (#10364 Doorman): `TYPE_SEPARATORS` above runs
+    // before power / toughness / mana-value suffixes, so a type union that
+    // follows a property suffix — "creatures with power 2 or less and/or
+    // Walls" — is left unconsumed in the remainder. Retry the same separators
+    // now that left-binding suffixes are finished.
+    //
+    // The left leg already carries its property suffixes. Merge with
+    // `merge_or_filters` only — do NOT call `finalize_or_disjunction` /
+    // `distribute_properties_to_or`, which would harvest the power bound on
+    // the left and push it onto Walls (turning "any Wall" into "Wall with
+    // power 2 or less").
+    //
+    // Scoped to a left leg whose trailing suffix is a P/T or mana-value
+    // comparison with no controller / zone suffix: unions after "you control"
+    // or "in your graveyard" belong to callers (quantity `AnyOf` populations).
+    let property_suffix_left = matches!(
+        &filter,
+        TargetFilter::Typed(tf)
+            if tf.controller.is_none()
+                && tf.properties.iter().any(|p| {
+                    matches!(p, FilterProp::PtComparison { .. } | FilterProp::Cmc { .. })
+                })
+                && !tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::InZone { .. }))
+    );
+    if property_suffix_left {
+        let rest_lower = lower[pos..].trim_start();
+        let rest_offset = lower[pos..].len() - rest_lower.len();
+        for separator in TYPE_SEPARATORS {
+            if let Ok((after_sep, _)) = tag::<_, _, OracleError<'_>>(*separator).parse(rest_lower) {
+                let after_trimmed = after_sep.trim_start();
+                let can_recurse = if separator.starts_with(',') {
+                    starts_with_or_article_type_segment(after_trimmed)
+                } else {
+                    starts_with_type_word(after_trimmed)
+                        || nom_target::parse_supertype_prefix(after_trimmed)
+                            .is_ok_and(|(rest, _)| starts_with_type_phrase_lead(rest))
+                        || (left_card_suffix
+                            && !is_article_led_bare_card(after_trimmed)
+                            && starts_with_or_article_type_segment(after_trimmed))
+                };
+                if can_recurse {
+                    let sep_text = &text[pos + rest_offset + separator.len()..];
+                    let (other_filter, final_rest) =
+                        parse_type_phrase_folding_with_ctx(sep_text, ctx);
+                    if !matches!(other_filter, TargetFilter::Any) {
+                        return (merge_or_filters(filter, other_filter), final_rest);
+                    }
+                }
+            }
+        }
+    }
+
     (filter, &text[pos..])
 }
 
@@ -20885,6 +20940,84 @@ mod tests {
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }
+    }
+
+    /// Issue #10364 (Doorman): a type union after a power suffix must survive.
+    /// `TYPE_SEPARATORS` used to run only before property suffixes, so
+    /// "creatures with power 2 or less and/or Walls" left "and/or Walls" in the
+    /// remainder and `CantBeBlockedBy` callers discarded the Walls leg.
+    #[test]
+    fn parse_type_phrase_power_suffix_then_and_or_subtype_union() {
+        let (filter, rest) =
+            parse_type_phrase_folding("creatures with power 2 or less and/or Walls");
+        assert!(
+            rest.trim().is_empty(),
+            "union must be consumed, remainder: {rest:?}"
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or union of power-qualified creatures and Walls, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2, "expected two Or legs, got {filters:?}");
+
+        let TargetFilter::Typed(power_leg) = &filters[0] else {
+            panic!("left leg must be Typed, got {:?}", filters[0]);
+        };
+        assert!(
+            power_leg.type_filters.contains(&TypeFilter::Creature),
+            "left leg must be creatures, got {:?}",
+            power_leg.type_filters
+        );
+        assert!(
+            power_leg.properties.contains(&FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }),
+            "left leg must keep power ≤ 2, got {:?}",
+            power_leg.properties
+        );
+
+        let TargetFilter::Typed(wall_leg) = &filters[1] else {
+            panic!("right leg must be Typed, got {:?}", filters[1]);
+        };
+        assert!(
+            wall_leg
+                .type_filters
+                .iter()
+                .any(|tf| matches!(tf, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Wall"))),
+            "right leg must be Walls, got {:?}",
+            wall_leg.type_filters
+        );
+        assert!(
+            !wall_leg.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    ..
+                }
+            )),
+            "Walls must not inherit the left power bound, got {:?}",
+            wall_leg.properties
+        );
+    }
+
+    /// Adjacent simple filter: power-only blocker restriction still parses and
+    /// leaves no rules-bearing remainder (#10364 coverage for the non-union arm).
+    #[test]
+    fn parse_type_phrase_power_suffix_alone_unchanged() {
+        let (filter, rest) = parse_type_phrase_folding("creatures with power 2 or less");
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 2 },
+        }));
     }
 
     #[test]

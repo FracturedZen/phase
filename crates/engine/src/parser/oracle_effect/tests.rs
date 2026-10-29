@@ -94301,3 +94301,73 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         assert!(unimplemented, "{text}: {def:?}");
     }
 }
+
+/// Issue #10364 (Doorman): until-EOT grant "can't be blocked by creatures with
+/// power 2 or less and/or Walls" must keep the Walls union leg. Discarding the
+/// type-phrase remainder after the power suffix would leave only the power
+/// filter and let Walls of any power block.
+#[test]
+fn doorman_cant_be_blocked_power_or_walls_union() {
+    use crate::types::statics::StaticMode;
+    let parsed = parse_oracle_text(
+        "{T}: Until end of turn, target creature can't be blocked by creatures with power 2 or less and/or Walls.",
+        "Doorman",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.kind == AbilityKind::Activated)
+        .expect("Doorman activation must parse");
+    let effects = chain_effects(activated);
+    let filter = effects.iter().find_map(|effect| match effect {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.iter().find_map(|s| match &s.mode {
+            StaticMode::CantBeBlockedBy { filter } => Some(filter.clone()),
+            _ => s.modifications.iter().find_map(|m| match m {
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlockedBy { filter },
+                } => Some(filter.clone()),
+                _ => None,
+            }),
+        }),
+        _ => None,
+    });
+    let Some(filter) = filter else {
+        panic!("expected CantBeBlockedBy grant in {effects:?}");
+    };
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or of power-qualified creatures and Walls, got {filter:?}");
+    };
+    assert_eq!(filters.len(), 2, "expected two Or legs, got {filters:?}");
+    assert!(
+        filters.iter().any(|leg| matches!(
+            leg,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::PtComparison {
+                            stat: PtStat::Power,
+                            comparator: Comparator::LE,
+                            ..
+                        }
+                    ))
+        )),
+        "missing power ≤ 2 creature leg in {filters:?}"
+    );
+    assert!(
+        filters.iter().any(|leg| matches!(
+            leg,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.iter().any(|t| matches!(
+                    t,
+                    TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Wall")
+                ))
+        )),
+        "missing Walls leg in {filters:?}"
+    );
+}
