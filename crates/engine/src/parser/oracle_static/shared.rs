@@ -3877,6 +3877,24 @@ pub(crate) fn parse_static_condition(text: &str) -> Option<StaticCondition> {
 }
 
 pub(crate) fn parse_attached_static_condition(text: &str) -> Option<StaticCondition> {
+    let trimmed = text.trim().trim_end_matches('.');
+    let lower = trimmed.to_lowercase();
+    // CR 201.5 + CR 122.1 + CR 611.3a: an attached-subject gate's counter
+    // clause names either the attachment ("~" / "this Equipment", after
+    // self-reference normalization — Gavel of the Righteous: "as long as this
+    // Equipment has four or more counters on it") or the host ("it has a
+    // counter on it"). `parse_recipient_has_counters` keeps that split: a
+    // source subject stays `HasCounters` (the attachment) and a pronoun
+    // subject becomes `RecipientHasCounters` (the enchanted/equipped
+    // creature). `parse_static_condition` collapses both onto source-scoped
+    // `HasCounters`, and the rebind below would then move a source gate onto
+    // the host — the equipped creature would be the one that needed four
+    // counters.
+    if let Ok((rest, condition)) = nom_condition::parse_recipient_has_counters(lower.trim()) {
+        if rest.trim().is_empty() {
+            return Some(condition);
+        }
+    }
     parse_static_condition(text).map(rebind_source_object_quantities_to_recipient)
 }
 
@@ -3996,6 +4014,12 @@ pub(crate) fn rebind_source_object_quantities_to_recipient(
         StaticCondition::Not { condition } => StaticCondition::Not {
             condition: Box::new(rebind_source_object_quantities_to_recipient(*condition)),
         },
+        // Pronoun subjects ("it has a counter") reach this arm already
+        // collapsed to source-scoped `HasCounters` by `parse_static_condition`
+        // (compound gates that `parse_recipient_has_counters` does not consume
+        // whole). A source subject ("~ has four or more counters") is returned
+        // earlier by `parse_attached_static_condition` and must not be moved
+        // onto the host. CR 201.5 + CR 122.1 + CR 611.3a.
         StaticCondition::HasCounters {
             counters,
             minimum,

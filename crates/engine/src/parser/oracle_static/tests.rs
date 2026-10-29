@@ -40342,6 +40342,79 @@ fn attached_subject_attacking_alone_rebind_covers_grants_and_unless_gates() {
     );
 }
 
+/// CR 201.5 + CR 122.1 + CR 611.3a: "as long as ~ has four or more counters on
+/// it" on an equipped/enchanted grant names the attachment, not the host.
+/// "it has a counter" stays on the host (the CantUntap case above).
+#[test]
+fn attached_subject_source_counter_gate_stays_on_the_attachment() {
+    use crate::types::counter::CounterMatch;
+
+    for (text, attachment) in [
+        (
+            "Equipped creature has double strike as long as ~ has four or more counters on it.",
+            FilterProp::EquippedBy,
+        ),
+        (
+            "Enchanted creature has flying as long as ~ has four or more counters on it.",
+            FilterProp::EnchantedBy,
+        ),
+    ] {
+        let def = parse_static_line(text).unwrap_or_else(|| panic!("{text}: no static"));
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![attachment])
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 4,
+                maximum: None,
+            }),
+            "{text}: a source subject must not be rebound onto the host, got {:?}",
+            def.condition
+        );
+    }
+
+    // The printed orientation, after "this Equipment" normalizes to "~".
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "At the beginning of combat on your turn, put a charge counter on this Equipment.\nEquipped creature gets +1/+1 for each counter on this Equipment.\nAs long as this Equipment has four or more counters on it, equipped creature has double strike.\nEquip—Pay {3} or remove a counter from this Equipment.",
+        "Gavel of the Righteous",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    let grant = parsed
+        .statics
+        .iter()
+        .find(|def| {
+            def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::DoubleStrike
+                    }
+                )
+            })
+        })
+        .expect("Gavel's double-strike static must parse");
+    assert!(
+        matches!(
+            grant.condition,
+            Some(StaticCondition::HasCounters {
+                counters: CounterMatch::Any,
+                minimum: 4,
+                maximum: None,
+            })
+        ),
+        "Gavel's gate must count counters on the Equipment, got {:?}",
+        grant.condition
+    );
+}
+
 /// CR 101.2 + CR 604.1: a leading "if <cond>," on "this spell can't be countered"
 /// attaches the typed condition instead of dropping it (Exquisite Firecraft class);
 /// a condition the static grammar cannot type, or an unmodeled tail after the
