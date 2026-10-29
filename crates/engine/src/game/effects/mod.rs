@@ -9658,6 +9658,8 @@ fn trigger_matchers_read_filter_population(
         destination_constraint: _,
         trigger_zones: _,
         phase: _,
+        // CR 505.1b: a main-phase ordinal reads the turn's step tally, no population.
+        main_phase_ordinal: _,
         optional: _,
         damage_kind: _,
         secondary: _,

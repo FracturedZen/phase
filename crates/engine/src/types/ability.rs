@@ -37617,6 +37617,13 @@ pub struct TriggerDefinition {
     pub trigger_zones: Vec<Zone>,
     #[serde(default)]
     pub phase: Option<Phase>,
+    /// CR 505.1b: "first main phase" / "second main phase" count the main
+    /// phases that have begun in the current turn. `Some(n)` fires only at the
+    /// beginning of the turn's n-th main phase; `None` fires at every phase
+    /// matching `phase` (CR 505.1a: "postcombat main phase" names each main
+    /// phase after combat, including added ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_phase_ordinal: Option<u32>,
     #[serde(default)]
     pub optional: bool,
     /// CR 120.2a + CR 120.2b: Filter for combat vs noncombat damage on damage triggers.
@@ -38374,6 +38381,7 @@ impl TriggerDefinition {
             destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![],
             phase: None,
+            main_phase_ordinal: None,
             optional: false,
             damage_kind: DamageKindFilter::Any,
             secondary: false,
@@ -47828,6 +47836,7 @@ mod tests {
             destination_constraint: DestinationConstraint::Any,
             trigger_zones: vec![Zone::Battlefield],
             phase: None,
+            main_phase_ordinal: None,
             optional: false,
             damage_kind: DamageKindFilter::Any,
             secondary: false,

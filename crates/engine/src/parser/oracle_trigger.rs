@@ -19688,6 +19688,7 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let phase = scan_for_phase(phase_text);
     let is_generic_main_phase = phase.is_none() && scan_for_generic_main_phase(phase_text);
     def.phase = phase;
+    def.main_phase_ordinal = scan_for_main_phase_ordinal(phase_text);
 
     // CR 503.1a / CR 507.1: Parse possessive qualifier and trailing suffix for turn constraint.
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid
@@ -23610,6 +23611,22 @@ fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, OracleError<'_>
         value(Phase::BeginCombat, tag("combat")),
     ))
     .parse(input)
+}
+
+/// CR 505.1b: "first main phase" / "second main phase" count the main phases
+/// of the current turn, so the ordinal is kept apart from the concrete phase
+/// ("second main phase" is a postcombat main phase, but not every postcombat
+/// main phase is the second main phase once an additional one is added).
+fn parse_main_phase_ordinal(input: &str) -> nom::IResult<&str, u32, OracleError<'_>> {
+    alt((
+        value(1, tag("first main phase")),
+        value(2, tag("second main phase")),
+    ))
+    .parse(input)
+}
+
+fn scan_for_main_phase_ordinal(text: &str) -> Option<u32> {
+    super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_main_phase_ordinal)
 }
 
 /// CR 505.1: "main phase" collectively names the precombat and postcombat

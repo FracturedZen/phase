@@ -1967,6 +1967,7 @@ mod scarblade_malice_delayed_dies_762;
 mod scry_choice_not_clobbered_by_triggers;
 mod scry_substituted_draw_per_card_replacement;
 mod scry_surveil_empty_library;
+mod second_main_phase_trigger_ordinal_9942;
 mod secret_of_bloodbending_control_window;
 mod security_bypass_attacking_alone;
 mod she_hulk_wallbreaker_becomes_blocked_4599;

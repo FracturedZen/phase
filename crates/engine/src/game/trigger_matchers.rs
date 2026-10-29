@@ -3080,10 +3080,25 @@ pub(super) fn match_phase(
         } else {
             true
         };
-        phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+        phase_matches
+            && main_phase_ordinal_matches(trigger, state)
+            && valid_player_matches(trigger, state, state.active_player, source_context)
     } else {
         false
     }
+}
+
+/// CR 505.1b: "first main phase" / "second main phase" count only the main
+/// phases that have begun in the current turn. The phase now beginning has
+/// already been recorded, and a skipped phase never began (CR 500.11), so the
+/// count of main phases begun this turn is the ordinal of the one beginning.
+fn main_phase_ordinal_matches(trigger: &TriggerDefinition, state: &GameState) -> bool {
+    let Some(ordinal) = trigger.main_phase_ordinal else {
+        return true;
+    };
+    let begun = state.steps_started_this_turn.count(crate::types::phase::Phase::PreCombatMain)
+        + state.steps_started_this_turn.count(crate::types::phase::Phase::PostCombatMain);
+    begun == ordinal
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.

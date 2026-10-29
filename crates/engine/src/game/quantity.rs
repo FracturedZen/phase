@@ -1422,6 +1422,8 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         destination_constraint: _,
         trigger_zones: _,
         phase: _,
+        // CR 505.1b: reads only the turn's step tally, which a cast never moves.
+        main_phase_ordinal: _,
         optional: _,
         damage_kind: _,
         secondary: _,

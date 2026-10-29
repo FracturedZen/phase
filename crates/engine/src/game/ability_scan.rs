@@ -3959,6 +3959,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         destination_constraint: _,
         trigger_zones: _,
         phase: _,
+        // CR 505.1b: a literal main-phase ordinal compared with the turn's
+        // step tally; like `phase`, it is a fire-window key, not a filter.
+        main_phase_ordinal: _,
         optional: _,
         damage_kind: _,
         secondary: _,

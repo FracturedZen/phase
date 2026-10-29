@@ -25610,7 +25610,21 @@ fn trigger_second_main_phase() {
     );
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::PostCombatMain));
+    // CR 505.1b: the ordinal is kept so only the turn's second main phase fires.
+    assert_eq!(def.main_phase_ordinal, Some(2));
     assert_eq!(def.constraint, None);
+}
+
+#[test]
+fn trigger_postcombat_main_phase_has_no_main_phase_ordinal() {
+    // CR 505.1a: "postcombat main phase" names every main phase after combat,
+    // added ones included, so it carries no ordinal.
+    let def = parse_trigger_line(
+        "At the beginning of your postcombat main phase, you gain 1 life.",
+        "Test Card",
+    );
+    assert_eq!(def.phase, Some(Phase::PostCombatMain));
+    assert_eq!(def.main_phase_ordinal, None);
 }
 
 // --- Plan 03: Attacks trigger sub-patterns ---
