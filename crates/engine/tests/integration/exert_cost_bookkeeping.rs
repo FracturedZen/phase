@@ -740,6 +740,65 @@ fn triggered_only_grant_omits_standalone_exert_permission() {
     }
 }
 
+/// CR 701.43d + CR 603.1 + CR 607.2h (#10188): Koh gains Glory-Bound
+/// Initiate's linked "when you do" trigger, but not the static "you may exert
+/// this creature as it attacks" option it is linked to. Koh attacks without an
+/// exert offer, and the copied payoff never happens through Koh.
+#[test]
+fn triggered_only_grant_of_linked_exert_paragraph_confers_no_exert() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let koh = scenario
+        .add_creature_from_oracle(P0, "Koh, the Face Stealer", 6, 6, KOH)
+        .id();
+    let mut provider_builder = scenario.add_creature_to_exile(P0, "Glory-Bound Initiate", 3, 1);
+    provider_builder.from_oracle_text(GLORY_BOUND_INITIATE);
+    let provider = provider_builder.id();
+    let mut runner = scenario.build();
+    let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&provider]);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&koh)
+        .unwrap()
+        .chosen_attributes
+        .push(ChosenAttribute::Card(pin));
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: provider,
+        source_id: koh,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    runner.state_mut().layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+
+    // Reach guard: the linked paragraph IS granted (it is a triggered ability).
+    let copied: Vec<_> = runner.state().objects[&koh]
+        .trigger_definitions
+        .iter_unchecked()
+        .filter(|entry| entry.definition.mode == TriggerMode::Exerted)
+        .collect();
+    assert_eq!(copied.len(), 1, "Koh gains the linked when-you-do trigger");
+    assert!(copied[0].definition.is_attack_exert_permission());
+    assert!(matches!(
+        copied[0].occurrence,
+        TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+    ));
+
+    declare_exert_attacker(&mut runner, koh);
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::ExertChoice { .. }),
+        "Koh has no static exert option, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_exert_priority(&runner, 0);
+    runner.advance_until_stack_empty();
+    assert!(!runner.state().exerted_this_turn.contains(&koh));
+    let koh_object = &runner.state().objects[&koh];
+    assert_eq!(koh_object.power, Some(6));
+    assert_eq!(koh_object.toughness, Some(6));
+    assert!(!koh_object.has_keyword(&Keyword::Lifelink));
+}
+
 /// Row 8, CR 701.43b: an already-exerted permanent can be exerted again; the
 /// event, effect and observer trigger happen again.
 #[test]

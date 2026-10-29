@@ -92,6 +92,23 @@ fn continue_declare_attackers_after_commit(
     finish_declare_attackers(state, events, declaration_start, attacks.is_empty())
 }
 
+/// CR 701.43d + CR 603.1 + CR 613.1f: whether this functioning occurrence
+/// lets its object be exerted as it attacks. "You may exert ~ as it attacks" is
+/// a static ability (CR 701.43d), so an object that gained only the linked
+/// "when you do" trigger through a triggered-only grant (Koh, the Face
+/// Stealer's "all activated and triggered abilities of the last chosen card",
+/// an `ExpandedGrant` occurrence) has no permission to exert. Its copied
+/// payoff stays a triggered ability that can never trigger (CR 607.2h).
+fn confers_attack_exert_permission(
+    active: &super::functioning_abilities::ActiveTriggerDefinition<'_>,
+) -> bool {
+    active.definition.is_attack_exert_permission()
+        && !matches!(
+            active.definition_ref.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::ExpandedGrant { .. }
+        )
+}
+
 /// CR 508.1g–j + CR 701.43b: Snapshot each eligible ability occurrence before
 /// paying any optional cost. An earlier exert does not prohibit another exert;
 /// only the permission's own pre-payment condition can do that.
@@ -109,7 +126,7 @@ fn exert_candidates(
                 .flat_map(move |object| {
                     super::functioning_abilities::active_trigger_definitions(state, object)
                         .filter(move |active| {
-                            active.definition.is_attack_exert_permission()
+                            confers_attack_exert_permission(active)
                                 && active.definition.attack_cost_condition.as_ref().is_none_or(
                                     |condition| {
                                         super::layers::evaluate_condition(
@@ -149,8 +166,7 @@ pub(super) fn validate_attack_exert_permission(
             })
             && super::functioning_abilities::active_trigger_definitions(state, object).any(
                 |active| {
-                    active.definition_ref == *permission
-                        && active.definition.is_attack_exert_permission()
+                    active.definition_ref == *permission && confers_attack_exert_permission(&active)
                 },
             )
     });
