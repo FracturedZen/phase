@@ -15192,12 +15192,7 @@ mod tests {
         let nth = LibraryPosition::NthFromTop { n: 3 };
         let (mut shared, pile) = dandan_pile();
         let p1c = pile[7];
-        reposition_library_origins_after_batch_delivery(
-            &mut shared,
-            &[p1c],
-            &[p1c],
-            &nth,
-        );
+        reposition_library_origins_after_batch_delivery(&mut shared, &[p1c], &[p1c], &nth);
         let mut expected: Vec<ObjectId> = pile.iter().copied().filter(|id| *id != p1c).collect();
         expected.insert(2, p1c);
         assert_eq!(
@@ -15213,12 +15208,7 @@ mod tests {
 
         let (mut standard, pile) = standard_libraries();
         let p1c = pile[7];
-        reposition_library_origins_after_batch_delivery(
-            &mut standard,
-            &[p1c],
-            &[p1c],
-            &nth,
-        );
+        reposition_library_origins_after_batch_delivery(&mut standard, &[p1c], &[p1c], &nth);
         assert_eq!(
             standard.players[1]
                 .library
