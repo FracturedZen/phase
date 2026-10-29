@@ -4564,6 +4564,20 @@ fn execute_zone_move_with_applied_terminal(
     else {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     };
+    // CR 111.8 + CR 614.12: A token that has left the battlefield can't change
+    // zones or come back onto the battlefield. Refuse BEFORE the replacement
+    // consult — the same hoisted guard `move_object_with_terminal` applies — so
+    // the raw movers the ChangeZone resolvers call (Ephemerate's "then return
+    // it") never apply an enters-with replacement (counters, `CounterAdded`) to
+    // a token that never enters. The primitive would reject the move anyway; the
+    // token ceases to exist at the next SBA (CR 704.5d).
+    if state
+        .objects
+        .get(&obj_id)
+        .is_some_and(|obj| zones::token_is_outside_battlefield_and_stack(state, obj))
+    {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
     // Saga therefore remains in exile after its final chapter resolves.
@@ -7559,5 +7573,98 @@ mod hand_entry_receiver_tests {
         assert!(state.players[1].hand.contains(&first));
         assert!(state.players[1].hand.contains(&second));
         assert_eq!(rebound_owners(&state), vec![Some(P0), Some(P0)]);
+    }
+}
+
+#[cfg(test)]
+mod raw_mover_token_guard_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::parser::oracle_replacement::parse_replacement_line;
+
+    /// Exile a Spike Feeder-class creature ("enters with two +1/+1 counters")
+    /// through the real pipeline, then return it to the battlefield through the
+    /// raw `execute_zone_move_with_terminal_and_controller` mover that the
+    /// ChangeZone resolvers use (Ephemerate's "then return it").
+    fn exile_then_return(is_token: bool) -> (GameState, ObjectId, Vec<GameEvent>) {
+        let mut sc = GameScenario::new();
+        let feeder = sc.add_creature(P0, "Spike Feeder", 0, 0).id();
+        let mut state = sc.state;
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it.",
+            "Spike Feeder",
+        )
+        .expect("Spike Feeder's enters-with line must parse");
+        let obj = state.objects.get_mut(&feeder).unwrap();
+        obj.replacement_definitions.push(def);
+        obj.is_token = is_token;
+
+        let mut events = Vec::new();
+        let exiled = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(feeder, Zone::Exile, feeder),
+            &mut events,
+        );
+        assert!(matches!(exiled, ZoneMoveResult::Done));
+        assert_eq!(state.objects[&feeder].zone, Zone::Exile);
+
+        let mut events = Vec::new();
+        let _ = execute_zone_move_with_terminal_and_controller(
+            &mut state,
+            feeder,
+            Zone::Exile,
+            Zone::Battlefield,
+            feeder,
+            None,
+            false,
+            EtbTapState::Unspecified,
+            false,
+            None,
+            &[],
+            None,
+            ExileConcealment::Public,
+            false,
+            None,
+            None,
+            None,
+            None,
+            &mut events,
+        );
+        (state, feeder, events)
+    }
+
+    /// CR 111.8 + CR 614.12: a token that has left the battlefield can't come
+    /// back onto it, so no entry happens and its enters-with replacement must not
+    /// apply: no +1/+1 counters are put on the token in exile and no
+    /// `CounterAdded` event is emitted (it could otherwise satisfy "whenever one
+    /// or more counters are put on…" triggers). Fails on revert: the raw mover
+    /// consulted replacements before the primitive's token guard, so the token
+    /// stayed in exile carrying two counters (issue #10396).
+    #[test]
+    fn raw_mover_does_not_apply_enters_with_counters_to_exiled_token() {
+        let (state, token, events) = exile_then_return(true);
+        let obj = &state.objects[&token];
+        assert_eq!(obj.zone, Zone::Exile, "CR 111.8: the token stays in exile");
+        assert!(
+            obj.counters.values().all(|&n| n == 0),
+            "no enters-with counters on a token that never entered: {:?}",
+            obj.counters
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::CounterAdded { .. })),
+            "no CounterAdded for a non-entry: {events:?}"
+        );
+    }
+
+    /// Reach guard: the same route returns a nontoken card with its enters-with
+    /// counters, so the token assertion above is not vacuous.
+    #[test]
+    fn raw_mover_returns_nontoken_card_with_enters_with_counters() {
+        let (state, card, _events) = exile_then_return(false);
+        let obj = &state.objects[&card];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(2));
     }
 }
