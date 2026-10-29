@@ -9096,6 +9096,14 @@ fn source_chosen_player(source: &SourceContext<'_>) -> Option<PlayerId> {
 /// Returns `None` when no ability is in scope, when the ability has no object
 /// targets, or when the referenced object has no record in either `state.objects`
 /// or `state.lki_cache`.
+/// CR 201.2 + CR 201.2a: two names are the same when they match
+/// case-insensitively, except that an object with no name (e.g. a face-down
+/// permanent or face-down exiled card, CR 708.2a) doesn't have the same name as
+/// any other object, including another object with no name.
+fn names_are_same(left: &str, right: &str) -> bool {
+    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
 fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
     let ability = ability?;
     let id = first_object_target(ability)?;
@@ -9792,13 +9800,13 @@ fn matches_filter_prop(
         // Falls back to the LKI cache when the targeted object has already left its zone
         // (e.g., the seed was just exiled by the preceding effect).
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_are_same(&obj.name, &name)),
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| obj.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_are_same(&obj.name, &exiled.name))
             })
         }
         // CR 201.2 + CR 201.2a: Matches if `obj.name` equals the name of any
@@ -10746,13 +10754,13 @@ fn zone_change_record_matches_property(
         // CR 201.2: Same-name match against the resolving ability's first object
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
-            .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+            .is_some_and(|name| names_are_same(&record.name, &name)),
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
                     .objects
                     .get(&link.exiled_id)
-                    .is_some_and(|exiled| record.name.eq_ignore_ascii_case(&exiled.name))
+                    .is_some_and(|exiled| names_are_same(&record.name, &exiled.name))
             })
         }
 
@@ -23006,6 +23014,141 @@ mod tests {
             ),
             "stale target id must fall through to the effect-context snapshot rung"
         );
+    }
+
+    /// CR 201.2a: a nameless parent target (here a face-down exiled card,
+    /// CR 708.2a) has the same name as nothing, so `SameNameAsParentTarget`
+    /// matches no candidate — not even another nameless object. Fails on
+    /// revert: the raw string comparison read `"" == ""` as a match.
+    #[test]
+    fn same_name_as_parent_target_nameless_target_matches_nothing() {
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
+        );
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let nameless_target = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(1),
+            String::new(),
+            Zone::Exile,
+        );
+        let named_target = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        let nameless_candidate = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(1),
+            String::new(),
+            Zone::Library,
+        );
+        let bears_candidate = create_object(
+            &mut state,
+            CardId(63),
+            PlayerId(1),
+            "GRIZZLY BEARS".to_string(),
+            Zone::Library,
+        );
+        let ability_targeting = |target: ObjectId| {
+            ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: String::new(),
+                    description: None,
+                },
+                vec![TargetRef::Object(target)],
+                source,
+                PlayerId(0),
+            )
+        };
+        let matches = |ability: &ResolvedAbility, candidate: ObjectId| {
+            super::matches_target_filter(
+                &state,
+                candidate,
+                &filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+
+        let nameless = ability_targeting(nameless_target);
+        assert!(
+            !matches(&nameless, nameless_candidate),
+            "CR 201.2a: two nameless objects do not share a name"
+        );
+        assert!(!matches(&nameless, bears_candidate));
+
+        // Reach: a named parent target still matches case-insensitively, and a
+        // nameless candidate still never matches it.
+        let named = ability_targeting(named_target);
+        assert!(matches(&named, bears_candidate));
+        assert!(!matches(&named, nameless_candidate));
+    }
+
+    /// CR 201.2a + CR 607.2a: a nameless card exiled by the source (e.g. exiled
+    /// face down, CR 708.2a) has the same name as nothing, so
+    /// `SameNameAsExiledBySource` doesn't match a nameless candidate. Fails on
+    /// revert: the raw string comparison read `"" == ""` as a match.
+    #[test]
+    fn same_name_as_exiled_by_source_nameless_exiled_card_matches_nothing() {
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::SameNameAsExiledBySource]),
+        );
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let nameless_exiled = create_object(
+            &mut state,
+            CardId(70),
+            PlayerId(1),
+            String::new(),
+            Zone::Exile,
+        );
+        state.exile_links.push(ExileLink {
+            exiled_id: nameless_exiled,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        let nameless_candidate = add_creature(&mut state, PlayerId(1), "Hidden Card");
+        crate::game::morph::apply_face_down_creature_characteristics(
+            state.objects.get_mut(&nameless_candidate).unwrap(),
+            &crate::types::ability::FaceDownProfile::vanilla_2_2(),
+        );
+        assert_eq!(state.objects[&nameless_candidate].name, "");
+        let forest = add_creature(&mut state, PlayerId(1), "forest");
+
+        assert!(
+            !matches_target_filter(&state, nameless_candidate, &filter, source),
+            "CR 201.2a: a nameless permanent does not share the nameless exiled card's name"
+        );
+        assert!(!matches_target_filter(&state, forest, &filter, source));
+
+        // Reach: once a named card is also linked, a same-named candidate
+        // matches case-insensitively while the nameless candidate still doesn't.
+        let named_exiled = create_object(
+            &mut state,
+            CardId(71),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(ExileLink {
+            exiled_id: named_exiled,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        assert!(matches_target_filter(&state, forest, &filter, source));
+        assert!(!matches_target_filter(
+            &state,
+            nameless_candidate,
+            &filter,
+            source
+        ));
     }
 
     /// CR 608.2h + CR 201.2a + CR 707.2: `SameNameAsParentTarget` reads the
