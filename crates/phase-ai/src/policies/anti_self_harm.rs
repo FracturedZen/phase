@@ -7389,6 +7389,7 @@ mod tests {
                 player: PlayerId(0),
                 gate: engine::types::ability::TurnGate::None,
                 binding: DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: false,
             }),
         )
     }
@@ -7469,6 +7470,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: engine::types::ability::TurnGate::None,
                     binding: DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(payment),
                 uses_tracked_set: false,
@@ -7602,6 +7604,7 @@ mod tests {
                 player: PlayerId(0),
                 gate: engine::types::ability::TurnGate::None,
                 binding: DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: false,
             }),
         );
 

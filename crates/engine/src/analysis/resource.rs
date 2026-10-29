@@ -6270,8 +6270,13 @@ fn delayed_trigger_acts_only_on_grown(
 ) -> bool {
     use crate::types::ability::DelayedTriggerCondition;
     let later_step = match trigger.condition {
-        DelayedTriggerCondition::AtNextPhase { phase }
-        | DelayedTriggerCondition::AtNextPhaseForPlayer { phase, .. } => phase > frame_phase,
+        DelayedTriggerCondition::AtNextPhase { phase } => phase > frame_phase,
+        // CR 505.1: an any-main-phase trigger also fires at the postcombat main.
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            any_main_phase,
+            ..
+        } => phase > frame_phase || (any_main_phase && Phase::PostCombatMain > frame_phase),
         _ => false,
     };
     later_step && trigger.one_shot && ability_acts_only_on_grown(&trigger.ability, grown)

@@ -451,6 +451,7 @@ fn a_delayed_main_phase_trigger_stands_the_draw_step_down() {
                 player,
                 gate: Default::default(),
                 binding: Default::default(),
+                any_main_phase: false,
             },
             Box::new(ResolvedAbility::new(*effect, vec![], ObjectId(1), AI)),
             AI,

@@ -15424,6 +15424,7 @@ fn delayed_trigger_event_with_index(
             // stamped `player` to a concrete id by the time this matcher
             // runs each phase change — nothing left here to read it for.
             binding: _,
+            any_main_phase,
         } => {
             if state.active_player != *player {
                 return None;
@@ -15449,10 +15450,18 @@ fn delayed_trigger_event_with_index(
                     // signal (caught by the paired test), never silent-never-fire.
                 }
             }
+            // CR 505.1: "your next main phase" is whichever of the precombat or
+            // postcombat main phase begins first (Mana Drain's mana arrives in
+            // the same turn's postcombat main phase when cast precombat).
+            let phase_matches = |p: &Phase| {
+                p == phase
+                    || (*any_main_phase
+                        && matches!(p, Phase::PreCombatMain | Phase::PostCombatMain))
+            };
             events
                 .iter()
                 .enumerate()
-                .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+                .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if phase_matches(p)))
                 .map(|(idx, event)| (idx, event.clone()))
         }
         // CR 603.7a + CR 500.6: the bound added phase begins. Its first step

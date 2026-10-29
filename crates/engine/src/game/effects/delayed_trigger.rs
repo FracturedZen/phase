@@ -2704,6 +2704,7 @@ mod tests {
                 player: PlayerId(0),
                 gate: Default::default(),
                 binding: Default::default(),
+                any_main_phase: false,
             }
         ));
         assert!(condition_uses_creation_time_provenance(
@@ -4755,6 +4756,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -4774,6 +4776,7 @@ mod tests {
                 player: PlayerId(1),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: false,
             },
             "placeholder player must be rewritten to ability.controller"
         );
@@ -4804,6 +4807,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: TurnGate::AfterCreationTurn,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -4823,6 +4827,7 @@ mod tests {
                 player: PlayerId(0),
                 gate: TurnGate::After(5),
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: false,
             },
             "AfterCreationTurn must be stamped to After(state.turn_number)"
         );
@@ -4847,6 +4852,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(effect_def),
                 uses_tracked_set: false,
@@ -4903,6 +4909,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
@@ -4977,6 +4984,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5084,6 +5092,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5143,6 +5152,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5196,6 +5206,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5256,6 +5267,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5305,6 +5317,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5362,6 +5375,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5414,6 +5428,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5476,6 +5491,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(delayed_inner),
                 uses_tracked_set: false,
@@ -5996,6 +6012,7 @@ mod tests {
                 player: PlayerId(0),
                 gate: Default::default(),
                 binding: Default::default(),
+                any_main_phase: false,
             }
         ));
 

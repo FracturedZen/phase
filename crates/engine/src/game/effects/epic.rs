@@ -87,6 +87,7 @@ pub(crate) fn epic_upkeep_trigger(epic: EpicEffectId, effect: &EpicEffect) -> De
             // passed through the placeholder-resolving `resolve()` path), so
             // `binding` is unread here; `Controller` is the accurate label.
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         },
         ability: Box::new(ResolvedAbility::new(
             Effect::EpicCopy { epic },

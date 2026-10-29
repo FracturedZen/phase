@@ -74,6 +74,7 @@ pub fn arm_rebound(
             // through the placeholder-resolving `resolve()` path), so
             // `binding` is unread here; `Controller` is the accurate label.
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         },
         ability: Box::new(inner),
         // CR 603.7d: controller of the delayed trigger is the player who

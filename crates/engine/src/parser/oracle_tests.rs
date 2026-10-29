@@ -8527,6 +8527,7 @@ fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
             player: PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         }
     );
 

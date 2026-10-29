@@ -6574,6 +6574,14 @@ pub enum DelayedTriggerCondition {
             skip_serializing_if = "DelayedTriggerPlayerBinding::is_controller"
         )]
         binding: DelayedTriggerPlayerBinding,
+        /// CR 505.1: "your next main phase" names the precombat and the
+        /// postcombat main phase alike, so the trigger fires at whichever main
+        /// phase of `player`'s begins first (Mana Drain, Mana Sculpt). When set,
+        /// `phase` is the nominal `PreCombatMain` and either main phase matches.
+        /// Skipped from JSON when false so existing serialized conditions
+        /// round-trip byte-identical.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        any_main_phase: bool,
     },
     /// CR 603.7a + CR 500.6: "at the beginning of that combat" — names the phase
     /// that the preceding instruction of the same resolution added (CR 500.8),

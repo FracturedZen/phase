@@ -101,10 +101,11 @@ fn mana_drain_card_data_has_counter_plus_delayed_trigger() {
             condition,
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
+                any_main_phase: true,
                 ..
             }
         ),
-        "expected AtNextPhaseForPlayer(PreCombatMain), got {condition:?}"
+        "CR 505.1: expected AtNextPhaseForPlayer(any main phase), got {condition:?}"
     );
 
     let Effect::Mana { produced, .. } = delayed_inner.effect.as_ref() else {
@@ -179,6 +180,8 @@ fn mana_drain_refunds_colorless_equal_to_countered_spells_mana_value() {
             player: PlayerId(0),
             gate: engine::types::ability::TurnGate::None,
             binding: engine::types::ability::DelayedTriggerPlayerBinding::Controller,
+            // CR 505.1: "your next main phase" — either main phase.
+            any_main_phase: true,
         },
         effect: Box::new(delayed_inner_def),
         uses_tracked_set: false,

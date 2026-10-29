@@ -7851,6 +7851,7 @@ fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTrigger
             player: crate::types::player::PlayerId(0),
             gate,
             binding,
+            any_main_phase: false,
         },
     ))
 }
@@ -7911,6 +7912,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: true,
             },
         ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
@@ -7925,6 +7927,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                any_main_phase: false,
             },
         ),
         // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step"
@@ -8065,6 +8068,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 tag("at the beginning of your next upkeep, "),
             ),
@@ -8074,6 +8078,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 tag("at the beginning of your next end step, "),
             ),
@@ -8091,6 +8096,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                     gate: crate::types::ability::TurnGate::AfterCreationTurn,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 tag("at the beginning of the end step on your next turn, "),
             ),
@@ -8109,6 +8115,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 tag("at the beginning of that turn's end step, "),
             ),
@@ -8121,6 +8128,7 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                     player: crate::types::player::PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: true,
                 },
                 tag("at the beginning of your next main phase, "),
             ),
@@ -15615,6 +15623,7 @@ mod tests {
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         };
 
         let (rest, cond) =

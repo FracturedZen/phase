@@ -24249,6 +24249,26 @@ fn strip_temporal_suffix_your_next_main_phase() {
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: true,
+        })
+    );
+}
+
+/// CR 505.1: only the grouped "main phase" matches either main phase; a named
+/// "precombat main phase" stays the precombat one (issue #9946).
+#[test]
+fn strip_temporal_suffix_your_next_precombat_main_phase_is_not_any_main() {
+    let (text, cond) =
+        strip_temporal_suffix("add {C}{C} at the beginning of your next precombat main phase");
+    assert_eq!(text, "add {C}{C}");
+    assert_eq!(
+        cond,
+        Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: Phase::PreCombatMain,
+            player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         })
     );
 }
@@ -24286,6 +24306,7 @@ fn strip_temporal_suffix_player_next_step_shapes() {
                     player: crate::types::player::PlayerId(0),
                     gate,
                     binding,
+                    any_main_phase: false,
                 }),
                 "{text}"
             );
@@ -24304,6 +24325,7 @@ fn strip_temporal_suffix_player_next_step_shapes() {
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         })
     );
     assert_eq!(
@@ -24391,6 +24413,7 @@ fn strip_temporal_prefix_your_next_main_phase() {
             player: crate::types::player::PlayerId(0),
             gate: crate::types::ability::TurnGate::None,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: true,
         })
     );
 }
@@ -24409,6 +24432,7 @@ fn temporal_end_step_on_your_next_turn_carries_after_creation_gate() {
         player: crate::types::player::PlayerId(0),
         gate: TurnGate::AfterCreationTurn,
         binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+        any_main_phase: false,
     };
 
     let (rest, cond) = strip_temporal_prefix(
@@ -24438,6 +24462,7 @@ fn your_next_end_step_keeps_none_gate_not_shadowed_by_kav_arm() {
         player: crate::types::player::PlayerId(0),
         gate: TurnGate::None,
         binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+        any_main_phase: false,
     };
 
     let (rest, cond) = strip_temporal_prefix(
@@ -24525,6 +24550,7 @@ fn kav_landseeker_etb_lowers_to_token_plus_delayed_sacrifice() {
             player: crate::types::player::PlayerId(0),
             gate: TurnGate::AfterCreationTurn,
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            any_main_phase: false,
         },
         "delayed condition must be End-step gated to the creating player's next turn"
     );
@@ -24718,10 +24744,11 @@ fn mana_sculpt_full_parse_tree() {
             delayed_cond,
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
+                any_main_phase: true,
                 ..
             }
         ),
-        "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
+        "CR 505.1: expected AtNextPhaseForPlayer(any main phase), got {delayed_cond:?}"
     );
 
     // Inner delayed effect: Mana(Colorless, Ref(triggering-spell spent-mana)).
@@ -24795,10 +24822,11 @@ fn mana_drain_full_parse_tree() {
             delayed_cond,
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::PreCombatMain,
+                any_main_phase: true,
                 ..
             }
         ),
-        "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
+        "CR 505.1: expected AtNextPhaseForPlayer(any main phase), got {delayed_cond:?}"
     );
 
     // Inner delayed effect: Mana(Colorless, Ref(ObjectManaValue{Demonstrative})).

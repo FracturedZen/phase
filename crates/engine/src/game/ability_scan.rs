@@ -4581,6 +4581,7 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
             player: _,
             gate: _,
             binding: _,
+            any_main_phase: _,
         } => Axes::NONE,
         // The same coordinate plus the identity of one added phase
         // (`ExtraPhaseId`). Neither reaches a filter or a quantity.
@@ -10901,6 +10902,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: TurnGate::AfterCreationTurn,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
             ),
             (

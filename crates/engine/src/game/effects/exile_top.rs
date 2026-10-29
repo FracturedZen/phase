@@ -726,6 +726,7 @@ mod tests {
                     player: PlayerId(0),
                     gate: crate::types::ability::TurnGate::None,
                     binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    any_main_phase: false,
                 },
                 effect: Box::new(recall_inner),
                 uses_tracked_set: true,

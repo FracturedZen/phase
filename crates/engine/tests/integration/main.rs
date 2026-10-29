@@ -1205,6 +1205,7 @@ mod mana_autotap_preference;
 mod mana_burn;
 mod mana_cost_reducers_issue_141;
 mod mana_display_self_sacrifice_clone_gate;
+mod mana_drain_next_main_phase_9946;
 mod mana_drain_refund;
 mod mana_payment_class_rows;
 mod mana_payment_preview;
