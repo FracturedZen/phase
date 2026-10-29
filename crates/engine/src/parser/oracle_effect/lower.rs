@@ -5272,7 +5272,9 @@ fn effect_targets_last_created(effect: &Effect) -> bool {
 /// Pattern: a bare single-flip `FlipCoins { win: None, lose: None }` followed by one or
 /// more single-flip `FlipCoins { win: Some(..), lose: None }` / `FlipCoins { win: None,
 /// lose: Some(..) }` defs produced by the "if you win/lose the flip" intercept in
-/// `parse_effect_clause`.
+/// `parse_effect_clause`. Compound outcome bodies that bare-`and` split (Goblin
+/// Archaeologist #10346: "destroy … and untap …") leave non-flip siblings between
+/// those stubs; they are folded onto the preceding branch so both arms share one flip.
 ///
 /// The three run shapes keep their pre-merge consolidation membership through the
 /// head's `flips`: a single flip absorbs only branch-only single-flip stubs, an
@@ -5297,6 +5299,14 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
         if let Some(flipper) = bare_single_flipper {
             let mut win = None;
             let mut lose = None;
+            // CR 705.2 + CR 608.2c (Goblin Archaeologist #10346): after a branch
+            // stub is claimed, bare-`and` conjuncts that sequence-split out of
+            // the outcome body ("destroy … and untap …") sit as top-level
+            // siblings between the win stub and the lose stub. Fold those
+            // non-flip siblings onto the preceding branch so both instructions
+            // share that one flip — never an unconditional middle step and
+            // never a second independent FlipCoins for the lose arm.
+            let mut last_branch_is_win: Option<bool> = None;
             let mut j = i + 1;
             while j < defs.len() && (win.is_none() || lose.is_none()) {
                 match &*defs[j].effect {
@@ -5307,6 +5317,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                         ..
                     } if flips.is_single_flip() && win.is_none() => {
                         win = Some(w.clone());
+                        last_branch_is_win = Some(true);
                         j += 1;
                     }
                     Effect::FlipCoins {
@@ -5316,6 +5327,20 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
                         ..
                     } if flips.is_single_flip() && lose.is_none() => {
                         lose = Some(l.clone());
+                        last_branch_is_win = Some(false);
+                        j += 1;
+                    }
+                    Effect::FlipCoins { .. } => break,
+                    _ if last_branch_is_win.is_some() => {
+                        let mut rider = defs[j].clone();
+                        rider.kind = AbilityKind::Spell;
+                        rider.sub_link = SubAbilityLink::SequentialSibling;
+                        let branch = if last_branch_is_win == Some(true) {
+                            win.as_mut().expect("win branch claimed")
+                        } else {
+                            lose.as_mut().expect("lose branch claimed")
+                        };
+                        super::append_to_deepest_sub_ability(branch, Some(Box::new(rider)));
                         j += 1;
                     }
                     _ => break,

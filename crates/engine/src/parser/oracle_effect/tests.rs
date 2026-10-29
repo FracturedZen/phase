@@ -50805,6 +50805,117 @@ fn single_flip_does_not_absorb_a_following_clause() {
     assert!(def.sub_ability.is_none());
 }
 
+/// CR 705.2 + CR 608.2c (Goblin Archaeologist #10346): compound win outcome
+/// "destroy … and untap …" bare-`and` splits, but both instructions must live
+/// under ONE FlipCoins win_effect. The lose arm is the same flip's lose_effect
+/// — never a second FlipCoins and never an unconditional Untap sibling.
+#[test]
+fn goblin_archaeologist_compound_win_stays_on_one_flip() {
+    let text = "Flip a coin. If you win the flip, destroy target artifact and untap this creature.         If you lose the flip, sacrifice this creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::FlipCoins {
+        flips,
+        win_effect: Some(win),
+        lose_effect: Some(lose),
+        ..
+    } = &*def.effect
+    else {
+        panic!(
+            "expected one FlipCoins with both branches, got {:?}",
+            def.effect
+        );
+    };
+    assert!(flips.is_single_flip(), "expected a single flip: {flips:?}");
+    assert!(
+        matches!(&*win.effect, Effect::Destroy { .. }),
+        "win head must destroy the artifact, got {:?}",
+        win.effect
+    );
+    let untap = win
+        .sub_ability
+        .as_deref()
+        .expect("untap must fold into win_effect, not hang as a top-level sibling");
+    assert!(
+        matches!(
+            &*untap.effect,
+            Effect::SetTapState {
+                state: TapStateChange::Untap,
+                ..
+            }
+        ),
+        "win body untap must be SetTapState(Untap), got {:?}",
+        untap.effect
+    );
+    assert!(
+        matches!(
+            &*lose.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "lose arm must sacrifice SelfRef on the SAME flip, got {:?}",
+        lose.effect
+    );
+    assert!(
+        def.sub_ability.is_none(),
+        "no unconditional sibling / second flip after consolidation, got {:?}",
+        def.sub_ability
+    );
+}
+
+/// Full-card path for #10346 — activated ability must expose one FlipCoins.
+#[test]
+fn goblin_archaeologist_activated_ability_one_flip() {
+    let parsed = parse_oracle_text(
+        "{R}, {T}: Flip a coin. If you win the flip, destroy target artifact and untap this creature. If you lose the flip, sacrifice this creature.",
+        "Goblin Archaeologist",
+        &[],
+        &["Creature".to_string()],
+        &["Goblin".to_string(), "Artificer".to_string()],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|a| a.cost.is_some())
+        .expect("activated ability");
+    let Effect::FlipCoins {
+        flips,
+        win_effect: Some(win),
+        lose_effect: Some(lose),
+        ..
+    } = &*activated.effect
+    else {
+        panic!(
+            "activated effect must be one FlipCoins with both arms, got {:?}",
+            activated.effect
+        );
+    };
+    assert!(flips.is_single_flip());
+    assert!(matches!(&*win.effect, Effect::Destroy { .. }));
+    assert!(
+        win.sub_ability.as_deref().is_some_and(|s| {
+            matches!(
+                &*s.effect,
+                Effect::SetTapState {
+                    state: TapStateChange::Untap,
+                    ..
+                }
+            )
+        }),
+        "untap must be inside win_effect: {:?}",
+        win.sub_ability
+    );
+    assert!(matches!(
+        &*lose.effect,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(activated.sub_ability.is_none());
+}
+
 /// CR 614.10: skipping a future turn replaces that turn with nothing.
 /// Controller and targeted phrases share the parser's optional count grammar.
 #[test]
