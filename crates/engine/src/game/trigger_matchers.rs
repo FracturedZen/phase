@@ -3096,8 +3096,12 @@ fn main_phase_ordinal_matches(trigger: &TriggerDefinition, state: &GameState) ->
     let Some(ordinal) = trigger.main_phase_ordinal else {
         return true;
     };
-    let begun = state.steps_started_this_turn.count(crate::types::phase::Phase::PreCombatMain)
-        + state.steps_started_this_turn.count(crate::types::phase::Phase::PostCombatMain);
+    let begun = state
+        .steps_started_this_turn
+        .count(crate::types::phase::Phase::PreCombatMain)
+        + state
+            .steps_started_this_turn
+            .count(crate::types::phase::Phase::PostCombatMain);
     begun == ordinal
 }
 
