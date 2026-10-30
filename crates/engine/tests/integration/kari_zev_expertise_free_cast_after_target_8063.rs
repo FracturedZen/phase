@@ -53,7 +53,12 @@ fn chain_has_free_cast(effect_chain: &engine::types::ability::AbilityDefinition)
 fn cast_and_accept(
     name: &str,
     oracle: &str,
-) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId, ObjectId) {
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
@@ -111,7 +116,10 @@ fn kari_zev_expertise_offers_hand_card_after_gaining_control() {
 
     // The control-gain half still applies to the targeted creature.
     let stolen = &runner.state().objects[&victim];
-    assert_eq!(stolen.controller, P0, "Kari Zev's Expertise steals the creature");
+    assert_eq!(
+        stolen.controller, P0,
+        "Kari Zev's Expertise steals the creature"
+    );
     assert!(!stolen.tapped, "the stolen creature is untapped");
     assert!(
         stolen.has_keyword(&Keyword::Haste),
@@ -146,8 +154,7 @@ fn kari_zev_expertise_offers_hand_card_after_gaining_control() {
 
 #[test]
 fn targeted_instruction_then_free_cast_from_hand_offers_hand_card() {
-    let (mut runner, victim, cheap, _pricey) =
-        cast_and_accept("Tap Then Cast", TAP_THEN_FREE_CAST);
+    let (mut runner, victim, cheap, _pricey) = cast_and_accept("Tap Then Cast", TAP_THEN_FREE_CAST);
     assert!(runner.state().objects[&victim].tapped);
     match &runner.state().waiting_for {
         WaitingFor::EffectZoneChoice { cards, .. } => {
