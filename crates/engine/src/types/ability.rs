@@ -11119,6 +11119,15 @@ pub(crate) fn effect_owns_resolution_zone_choice(
         {
             (target, target.extract_in_zone())
         }
+        // CR 608.2g + CR 115.10a: "You may cast a spell with mana value 2 or
+        // less from your hand without paying its mana cost" (Kari Zev's
+        // Expertise) picks its card from the printed zone while the effect
+        // resolves. That is a fresh, nontargeted choice, so it must not
+        // inherit the object an earlier instruction targeted ("Gain control of
+        // target creature …") as if that creature were the card to cast.
+        Effect::CastFromZone { target, .. } if timing == TargetChoiceTiming::Resolution => {
+            (target, None)
+        }
         _ => return false,
     };
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);

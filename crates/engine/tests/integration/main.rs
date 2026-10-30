@@ -1128,6 +1128,7 @@ mod kaho_minamo_historian_linked_exile;
 mod kaito_integration;
 mod kamigawa_flip_cards;
 mod karazikar_attack_scope_7189;
+mod kari_zev_expertise_free_cast_after_target_8063;
 mod kashi_tribe_damage_tap_freeze;
 mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
