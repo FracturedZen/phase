@@ -226,6 +226,7 @@ pub fn resolve_exile(
                         frequency: CastFrequency::Unlimited,
                         source_id: Some(source_id),
                         invalidation: None,
+                        grants_look: false,
                         exiled_by_ability_controller: Some(controller),
                         mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                         card_filter: None,

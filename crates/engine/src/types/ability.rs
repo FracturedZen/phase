@@ -5483,6 +5483,16 @@ pub enum CastingPermission {
         /// printed invalidation event occurs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         invalidation: Option<PlayPermissionInvalidation>,
+        /// CR 406.3: the grant also lets its grantee LOOK at the face-down
+        /// exiled card for as long as it remains exiled — independently of
+        /// `card_filter`, which scopes only which cards may be CAST. Arvinox,
+        /// the Mind Flail: "you may look at them, you may cast permanent spells
+        /// from among them" lets its controller look at an exiled instant they
+        /// can't cast. `grant_permission::resolve` realizes it through the
+        /// shared face-down look link (`exile_links::push_look_link`), the same
+        /// authority Hideaway and Heist use, so visibility needs no new path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        grants_look: bool,
         /// CR 305.1 + CR 406.3b + CR 118.9a: what kind of grant this is — a
         /// self-standing impulse-class permission or the land-play/look
         /// companion of an alternative-cost grant. See

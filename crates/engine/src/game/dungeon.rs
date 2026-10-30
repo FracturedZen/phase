@@ -728,6 +728,7 @@ pub fn room_effects(
                         frequency: crate::types::statics::CastFrequency::Unlimited,
                         source_id: None,
                         invalidation: None,
+                        grants_look: false,
                         exiled_by_ability_controller: None,
                         mana_spend_permission: None,
                         card_filter: None,

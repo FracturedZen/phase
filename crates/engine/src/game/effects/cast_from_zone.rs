@@ -2983,6 +2983,7 @@ fn record_lingering_permissions(
                     frequency: CastFrequency::Unlimited,
                     source_id: Some(ability.source_id),
                     invalidation: None,
+                    grants_look: false,
                     exiled_by_ability_controller: Some(ability.controller),
                     mana_spend_permission,
                     card_filter: None,

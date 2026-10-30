@@ -6008,6 +6008,7 @@ fn bind_search_found_definition(
                         without_paying_mana_cost: false,
                         land_enter_tapped,
                         invalidation: None,
+                        grants_look: false,
                         provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
                         mode: crate::types::ability::CardPlayMode::Play,
                     },

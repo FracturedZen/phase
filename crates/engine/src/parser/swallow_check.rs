@@ -16191,6 +16191,7 @@ mod detect_condition_if_replacement_exemption_tests {
             without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         };
         let ability = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -16270,6 +16271,7 @@ mod detect_condition_if_replacement_exemption_tests {
             without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         };
         let parsed = crate::parser::oracle::ParsedAbilities {
             abilities: vec![AbilityDefinition::new(

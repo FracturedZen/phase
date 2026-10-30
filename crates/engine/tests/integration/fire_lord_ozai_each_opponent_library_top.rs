@@ -504,6 +504,7 @@ fn paid_play_from_exile_sibling() -> CastingPermission {
         without_paying_mana_cost: false,
         land_enter_tapped: EtbTapState::Unspecified,
         invalidation: None,
+        grants_look: false,
         provenance: PlayFromExileProvenance::Impulse,
     }
 }

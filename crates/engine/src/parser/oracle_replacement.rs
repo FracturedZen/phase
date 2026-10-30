@@ -1079,6 +1079,7 @@ fn parse_search_found_replacement(original: &str, lower: &str) -> Option<Replace
                 without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
+                grants_look: false,
             },
             target: parsed.play_permission.target,
             grantee: parsed.play_permission.grantee,

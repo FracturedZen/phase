@@ -373,6 +373,7 @@ fn overlapping_exile_grant_pays_the_selected_permissions_cost_not_a_sibling_gran
                 frequency: CastFrequency::Unlimited,
                 source_id: None,
                 invalidation: None,
+                grants_look: false,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,

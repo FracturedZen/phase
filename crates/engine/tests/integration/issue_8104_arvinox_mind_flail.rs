@@ -96,10 +96,12 @@ fn arvinox_parses_static_exile_bottom_and_typed_cast_grant() {
                     card_filter,
                     mana_spend_permission,
                     single_use,
+                    grants_look,
                     ..
                 },
             ..
         } => {
+            assert!(*grants_look, "\"you may look at them\" rides on the grant");
             assert_eq!(*mana_spend_permission, Some(ManaSpendPermission::AnyColor));
             assert!(!*single_use, "permanent spells — not a single cast");
             let filter = card_filter.as_ref().expect("permanent filter");
@@ -219,4 +221,58 @@ fn arvinox_exiles_bottom_card_of_each_opponent_face_down_with_cast_grant() {
             "the top card stays in the library"
         );
     }
+}
+
+/// CR 406.3: "you may look at them" covers EVERY card exiled this way — an
+/// instant Arvinox's controller can't cast is still visible to them, while a
+/// player without the grant (another opponent) still can't see it.
+#[test]
+fn arvinox_controller_may_look_at_exiled_instant_it_cannot_cast() {
+    let mut scenario = GameScenario::new_n_player(3, 8104);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, NAME, 2, 5, ORACLE);
+    // Added first → the bottom card of P1's library.
+    let instant = scenario
+        .add_spell_to_library_top(P1, "Secret Bolt", true)
+        .id();
+    scenario.add_card_to_library_top(P1, "P1 Top");
+    let other = scenario.add_card_to_library_top(P2, "Other Secret");
+    scenario.add_card_to_library_top(P2, "P2 Top");
+    let mut runner = scenario.build();
+
+    reach_end_step(&mut runner);
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    for id in [instant, other] {
+        assert_eq!(state.objects[&id].zone, Zone::Exile);
+        assert!(state.objects[&id].face_down);
+    }
+    let seen = |viewer: PlayerId, id: ObjectId| {
+        engine::game::visibility::filter_state_for_viewer(state, viewer).objects[&id]
+            .name
+            .clone()
+    };
+    assert_eq!(
+        seen(P0, instant),
+        "Secret Bolt",
+        "Arvinox's controller may look at the exiled instant"
+    );
+    assert_eq!(seen(P0, other), "Other Secret");
+    assert_ne!(
+        seen(P2, instant),
+        "Secret Bolt",
+        "an opponent without the grant can't look at P1's face-down card"
+    );
+    // The look right is not cast authority: the instant fails the permanent
+    // filter, so the only grant on it never admits a cast.
+    let grant = state.objects[&instant]
+        .casting_permissions
+        .iter()
+        .find_map(|p| match p {
+            CastingPermission::PlayFromExile { card_filter, .. } => card_filter.clone(),
+            _ => None,
+        })
+        .expect("typed grant");
+    assert!(matches!(grant, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Permanent]));
 }

@@ -950,6 +950,7 @@ mod tests {
                 frequency: CastFrequency::Unlimited,
                 source_id: Some(source),
                 invalidation: None,
+                grants_look: false,
                 exiled_by_ability_controller: Some(PlayerId(0)),
                 mana_spend_permission: None,
                 card_filter: None,
@@ -1138,6 +1139,7 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         }
     }
 
@@ -2622,6 +2624,7 @@ mod object_sweep_sharing_tests {
             frequency: crate::types::statics::CastFrequency::Unlimited,
             source_id: Some(source_id),
             invalidation: None,
+            grants_look: false,
             exiled_by_ability_controller: None,
             mana_spend_permission: None,
             card_filter: None,

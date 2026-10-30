@@ -8880,6 +8880,7 @@ fn effect_fields_read_filter_population(
                         without_paying_mana_cost: _,
                         land_enter_tapped: _,
                         invalidation: _,
+                        grants_look: _,
                         provenance: _,
                     } => {
                         card_filter.as_ref().is_some_and(has_filter)
@@ -47082,6 +47083,7 @@ mod tests {
                     frequency: CastFrequency::OncePerTurn,
                     source_id: None,
                     invalidation: None,
+                    grants_look: false,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: Some(ManaSpendPermission::AnyTypeOrColor),
                     card_filter: None,
@@ -55414,6 +55416,7 @@ mod tests {
                     frequency: crate::types::statics::CastFrequency::Unlimited,
                     source_id: None,
                     invalidation: None,
+                    grants_look: false,
                     exiled_by_ability_controller: None,
                     mana_spend_permission: None,
                     card_filter: None,

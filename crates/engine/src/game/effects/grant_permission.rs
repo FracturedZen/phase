@@ -242,6 +242,31 @@ pub fn resolve(
             *source_id = Some(ability.source_id);
         }
         prune_replaced_play_from_exile_permissions(state, obj_id, &granted);
+        // CR 406.3: "you may look at them" — the grantee may look at the
+        // face-down exiled card for as long as it remains exiled, whether or
+        // not the grant's `card_filter` lets them cast it (Arvinox, the Mind
+        // Flail). Realized through the shared face-down look link — the same
+        // authority Hideaway/Heist use — which visibility already honors and
+        // which is pruned when the card leaves exile.
+        if matches!(
+            &granted,
+            CastingPermission::PlayFromExile {
+                grants_look: true,
+                ..
+            }
+        ) && state.objects.get(&obj_id).is_some_and(|o| {
+            o.zone == crate::types::zones::Zone::Exile && o.face_down
+        }) {
+            crate::game::exile_links::push_look_link(
+                state,
+                obj_id,
+                ability.source_id,
+                crate::types::game_state::LookGrant::Player {
+                    player: granted_to_pid,
+                },
+                granted_to_pid,
+            );
+        }
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 611.2a + CR 118.9: Bind `granted_to` for `ExileWithAltCost` and
             // `ExileWithAltAbilityCost` to the resolved grantee. Without this
@@ -422,6 +447,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::AbilityController,
@@ -489,6 +515,7 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: Some(PlayPermissionInvalidation::UntilNextGrantFromSameSource),
+            grants_look: false,
         };
         state
             .objects
@@ -573,6 +600,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::TrackedSet { id: tracked_set },
                 grantee: PermissionGrantee::AbilityController,
@@ -800,6 +828,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -861,6 +890,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ParentTargetController,
@@ -935,6 +965,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -1021,6 +1052,7 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         };
 
         state.objects.get_mut(&card_a).unwrap().casting_permissions = vec![mk_perm(
@@ -1103,6 +1135,7 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         };
         state
             .objects
@@ -1171,6 +1204,7 @@ mod tests {
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         }];
 
         // Simulate the ordering in `turns.rs`:
@@ -1212,6 +1246,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::Any,
                 grantee: PermissionGrantee::ObjectOwner,
@@ -1286,6 +1321,7 @@ mod tests {
                 without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
+                grants_look: false,
             }];
 
         prune_end_of_turn_casting_permissions(&mut state);
@@ -1333,6 +1369,7 @@ mod tests {
                 without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
+                grants_look: false,
             }];
 
         prune_untap_step_casting_permissions(&mut state, PlayerId(0));
@@ -1395,6 +1432,7 @@ mod tests {
                     without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                     invalidation: None,
+                    grants_look: false,
                 },
                 target: TargetFilter::TrackedSet {
                     id: TrackedSetId(0),

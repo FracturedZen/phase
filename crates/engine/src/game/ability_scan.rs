@@ -2312,6 +2312,7 @@ fn casting_permission_history(permission: &CastingPermission, mode: ScanMode) ->
             without_paying_mana_cost: _,
             land_enter_tapped: _,
             invalidation: _,
+            grants_look: _,
             provenance: _,
         } => {
             let mut reads = scan_duration(duration, mode).history;

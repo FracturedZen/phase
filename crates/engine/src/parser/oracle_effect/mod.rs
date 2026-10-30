@@ -17005,6 +17005,7 @@ fn try_parse_per_grantee_play_grant(
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),
@@ -17058,15 +17059,15 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     //     restricted to the typed filter.
     // The singular determiner ("a"/"an"/"one") encodes the single-use cap; the
     // optional type phrase encodes the card filter.
-    let ((card_filter, single_use, explicit_permission), rest_orig) =
+    let ((card_filter, single_use, explicit_permission, grants_look), rest_orig) =
         nom_on_lower(permission_tp.original, permission_tp.lower, |i| {
             // CR 406.3 + CR 611.2a: an optional leading look permission,
             // "[you may ]look at them, [and ]you may cast …" (Arvinox, the
-            // Mind Flail, #8104). It is the same object-local grant: holding a
-            // play-from-exile permission is what lets its grantee look at a
-            // face-down exiled card (`player_may_look_at_facedown_exile`), so
-            // the look clause adds no separate effect. It must be followed by
-            // an explicit "you may cast", never a bare imperative "cast".
+            // Mind Flail, #8104). The look right covers EVERY exiled card, even
+            // one the typed cast filter excludes, so it rides on the same grant
+            // as `grants_look` rather than being inferred from cast authority.
+            // It must be followed by an explicit "you may cast", never a bare
+            // imperative "cast".
             let (i, has_look_prefix) = opt((
                 opt(tag("you may ")),
                 tag("look at "),
@@ -17131,7 +17132,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
                 tag("them"),
             ))
             .parse(i)?;
-            Ok((i, (parsed.0, parsed.1, explicit_permission)))
+            Ok((i, (parsed.0, parsed.1, explicit_permission, has_look_prefix)))
         })?;
     if !explicit_permission && !owns_exile_lifetime {
         return None;
@@ -17165,6 +17166,7 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look,
         },
         // CR 603.7 + CR 608.2c: TrackedSet sentinel — the runtime resolver
         // normalizes `TrackedSetId(0)` to the most recently published set
@@ -17430,6 +17432,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation,
+            grants_look: false,
         },
         // CR 603.7 + CR 611.2a: The grant must reach the tracked exile set
         // (the cards exiled by the prior clause) rather than fall back to the
@@ -17538,6 +17541,7 @@ fn try_parse_play_the_exiled_card_grant(tp: TextPair) -> Option<ParsedEffectClau
             without_paying_mana_cost: false,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         },
         target: tracked_set_filter(),
         grantee: Default::default(),
@@ -17728,6 +17732,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
                 without_paying_mana_cost: false,
                 land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 invalidation: None,
+                grants_look: false,
             },
             target: TargetFilter::TrackedSet {
                 id: TrackedSetId(0),
@@ -33459,6 +33464,7 @@ fn single_use_tracked_set_cast_grant(
             without_paying_mana_cost: without_paying,
             land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             invalidation: None,
+            grants_look: false,
         },
         target: TargetFilter::TrackedSet {
             id: TrackedSetId(0),

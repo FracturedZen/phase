@@ -255,6 +255,7 @@ fn exiled_card_with_play_permission_stays_on_exile_path() {
                 frequency: engine::types::statics::CastFrequency::Unlimited,
                 source_id: None,
                 invalidation: None,
+                grants_look: false,
                 exiled_by_ability_controller: None,
                 mana_spend_permission: None,
                 card_filter: None,
