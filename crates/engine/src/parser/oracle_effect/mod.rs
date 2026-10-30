@@ -50058,6 +50058,39 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
     false
 }
 
+/// CR 608.2c + CR 707.2: "For each <type> card <verb>ed this way, create a
+/// token that's a copy of that card" (Haunting Imitation, issue #8096) — "that
+/// card" is each counted member of the chain's tracked set in turn, not the
+/// parent target. Rebind the copy's source to the filtered tracked set itself
+/// (`CopyTokenOf` already copies every member of a `TrackedSetFiltered`
+/// source) instead of looping a `ParentTarget` copy, whose empty target list
+/// fell back to the resolving spell and copied the sorcery itself.
+pub(super) fn try_fold_copy_repeat_into_tracked_members(
+    effect: &mut Effect,
+    qty: &QuantityExpr,
+) -> bool {
+    let QuantityExpr::Ref {
+        qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+    } = qty
+    else {
+        return false;
+    };
+    let Effect::CopyTokenOf { target, count, .. } = effect else {
+        return false;
+    };
+    if !matches!(target, TargetFilter::ParentTarget)
+        || !matches!(count, QuantityExpr::Fixed { value: 1 })
+    {
+        return false;
+    }
+    *target = TargetFilter::TrackedSetFiltered {
+        id: crate::types::identifiers::TrackedSetId(0),
+        filter: filter.clone(),
+        caused_by: *caused_by,
+    };
+    true
+}
+
 /// CR 608.2c: a "for each <players>" iteration folded into one token batch
 /// makes "that player" each counted player in turn, so the token names one
 /// destination for each counted player.

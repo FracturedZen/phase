@@ -2155,7 +2155,55 @@ pub(super) fn strip_milled_shared_quality_conditional(
     }
 }
 
+/// CR 608.2c + CR 701.20a: `"If no <types> cards were revealed this way, …"`
+/// (Haunting Imitation, issue #8096) — the negative counterpart of
+/// `parse_if_revealed_card_type_conditional`, over a reveal that may produce
+/// several cards ("each player reveals the top card of their library"). It
+/// asks about the whole revealed population, so it is a zero-count check on
+/// the chain's tracked set — the same population the sibling "for each
+/// creature card revealed this way" count reads — rather than a single-subject
+/// `RevealedHasCardType` gate.
+fn parse_if_no_revealed_card_type_conditional(text: &str) -> Option<(AbilityCondition, String)> {
+    let lower = text.to_lowercase();
+    let (type_filters, remainder) = nom_on_lower(text, &lower, |input| {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("if no ").parse(input)?;
+        let (rest, type_filters) = nom_quantity::parse_type_filter_list(rest)?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>(" cards were revealed this way"),
+            tag::<_, _, OracleError<'_>>(" card was revealed this way"),
+        ))
+        .parse(rest)?;
+        Ok((rest, type_filters))
+    })?;
+    if !type_filters
+        .iter()
+        .any(|type_filter| type_filter_to_core_type(type_filter).is_some())
+    {
+        return None;
+    }
+    Some((
+        AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: None,
+                        properties: vec![],
+                    })),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+        remainder_after_optional_comma(remainder).to_string(),
+    ))
+}
+
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    if let Some((condition, remainder)) = parse_if_no_revealed_card_type_conditional(text) {
+        return (Some(condition), remainder);
+    }
     if let Some((condition, remainder)) = parse_if_revealed_card_type_conditional(text) {
         return (Some(condition), remainder);
     }

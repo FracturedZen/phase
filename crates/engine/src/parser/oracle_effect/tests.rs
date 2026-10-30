@@ -95270,3 +95270,65 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+/// Issue #8096 — Haunting Imitation: "For each creature card revealed this
+/// way, create a token that's a copy of that card, …" copies each member of
+/// the revealed set (CR 608.2c + CR 707.2), and "If no creature cards were
+/// revealed this way" gates the return on a zero count of that same set
+/// instead of being swallowed.
+#[test]
+fn haunting_imitation_copies_revealed_set_and_gates_return() {
+    let parsed = parse_oracle_text(
+        "Each player reveals the top card of their library. For each creature card revealed \
+         this way, create a token that's a copy of that card, except it's 1/1, it's a Spirit in \
+         addition to its other types, and it has flying. If no creature cards were revealed this \
+         way, return Haunting Imitation to its owner's hand.",
+        "Haunting Imitation",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "no clause may be swallowed: {:?}",
+        parsed.parse_warnings
+    );
+    let reveal = &parsed.abilities[0];
+    assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
+    let copy = reveal.sub_ability.as_deref().expect("copy step");
+    let creature_filter = TargetFilter::Typed(TypedFilter {
+        type_filters: vec![TypeFilter::Creature],
+        controller: None,
+        properties: vec![],
+    });
+    match copy.effect.as_ref() {
+        Effect::CopyTokenOf { target, count, .. } => {
+            assert_eq!(
+                target,
+                &TargetFilter::TrackedSetFiltered {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                    filter: Box::new(creature_filter.clone()),
+                    caused_by: None,
+                }
+            );
+            assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+        }
+        other => panic!("expected CopyTokenOf, got {other:?}"),
+    }
+    assert!(copy.repeat_for.is_none(), "the copy is not a ParentTarget loop");
+    let bounce = copy.sub_ability.as_deref().expect("return step");
+    assert!(matches!(*bounce.effect, Effect::Bounce { .. }));
+    assert_eq!(
+        bounce.condition,
+        Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(creature_filter),
+                    caused_by: None,
+                },
+            },
+            comparator: Comparator::EQ,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        })
+    );
+}

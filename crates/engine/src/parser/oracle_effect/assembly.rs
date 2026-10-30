@@ -3358,6 +3358,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // reads `clause_ir.parsed.sub_ability` (the non-TargetOnly path
                 // attaches it after this point via `clause_sub`, so
                 // `def.sub_ability` is not yet populated here).
+            } else if super::try_fold_copy_repeat_into_tracked_members(def.effect.as_mut(), qty)
+            {
+                // CR 608.2c + CR 707.2: "for each <type> card … this way, create a
+                // token that's a copy of that card" copies every counted member of
+                // the tracked set — see the helper.
             } else {
                 release_iteration_destination(def.effect.as_mut(), qty);
                 def.repeat_for = Some(qty.clone());

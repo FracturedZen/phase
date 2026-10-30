@@ -566,6 +566,7 @@ mod half_life_activation_cost;
 mod hand_alternative_cost_legal_action_offer;
 mod harms_way_redirect;
 mod harrow_regression;
+mod haunting_imitation_no_creature_return_8096;
 mod hatchery_sliver_dynamic_replicate;
 mod havi_the_all_father;
 mod hawkeye_avenging_archer_dealt_damage_draw;
