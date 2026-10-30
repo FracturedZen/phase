@@ -98,7 +98,11 @@ fn attack(s: &mut Setup, pick: Option<ObjectId>) {
 }
 
 fn library(s: &Setup) -> Vec<ObjectId> {
-    s.runner.state().players[0].library.iter().copied().collect()
+    s.runner.state().players[0]
+        .library
+        .iter()
+        .copied()
+        .collect()
 }
 
 /// The untouched cards are now on top, and exactly `rest` fill the bottom.
