@@ -11631,7 +11631,16 @@ pub(super) fn parse_exile_ast(
         }
     }
 
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
+    // CR 401.2 + CR 701.13a: the library edge is its own grammar axis —
+    // "exile the top card of …" and "exile the bottom card of each opponent's
+    // library face down" (Arvinox, the Mind Flail, #8104) share the count,
+    // owner and face-down axes and differ only in `LibraryPosition`.
+    if let Ok((rest, edge)) = preceded(
+        tag::<_, _, OracleError<'_>>("exile the "),
+        terminated(parse_exile_library_edge, tag(" ")),
+    )
+    .parse(lower)
+    {
         let (remainder, initial_count) = parse_exile_top_count(rest).ok()?;
         // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
         // library" suffix and resolve the library owner via the shared
@@ -11658,7 +11667,7 @@ pub(super) fn parse_exile_ast(
             return Some(ZoneCounterImperativeAst::ExileTop {
                 player,
                 count,
-                position: LibraryPosition::Top,
+                position: edge,
                 face_down,
                 actor: crate::types::ability::LibraryInstructionActor::Controller,
             });
@@ -11697,7 +11706,10 @@ pub(super) fn parse_exile_ast(
             ))
             .parse(boundary)
             .is_ok();
-            if not_qualified && at_boundary {
+            // The unqualified fallback is the implicit-controller TOP exile
+            // only; a bare "exile the bottom card" has no printed precedent.
+            let is_top = matches!(edge, LibraryPosition::Top);
+            if is_top && not_qualified && at_boundary {
                 // CR 406.3: honor a trailing "face down" suffix exactly as the
                 // twelve qualified patterns do.
                 let (after_lib, face_down) = strip_exile_top_face_down(after_noun);

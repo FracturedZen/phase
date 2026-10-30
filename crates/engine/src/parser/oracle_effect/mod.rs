@@ -17060,11 +17060,30 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
     // optional type phrase encodes the card filter.
     let ((card_filter, single_use, explicit_permission), rest_orig) =
         nom_on_lower(permission_tp.original, permission_tp.lower, |i| {
+            // CR 406.3 + CR 611.2a: an optional leading look permission,
+            // "[you may ]look at them, [and ]you may cast …" (Arvinox, the
+            // Mind Flail, #8104). It is the same object-local grant: holding a
+            // play-from-exile permission is what lets its grantee look at a
+            // face-down exiled card (`player_may_look_at_facedown_exile`), so
+            // the look clause adds no separate effect. It must be followed by
+            // an explicit "you may cast", never a bare imperative "cast".
+            let (i, has_look_prefix) = opt((
+                opt(tag("you may ")),
+                tag("look at "),
+                alt((tag("those exiled cards"), tag("those cards"), tag("them"))),
+                tag(", "),
+                opt(tag("and ")),
+            ))
+            .map(|look| look.is_some())
+            .parse(i)?;
             let (i, explicit_permission) = alt((
                 value(true, tag("you may cast ")),
                 value(false, tag("cast ")),
             ))
             .parse(i)?;
+            if has_look_prefix && !explicit_permission {
+                return nom::combinator::fail().parse(i);
+            }
             // Singular bounded: a[n]/one [type-phrase] spell → single-use + filter.
             let singular = |i| {
                 let (i, _) = alt((tag("an "), tag("a "), tag("one "))).parse(i)?;
@@ -17096,9 +17115,22 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
             };
             // Plural unbounded: "spells" → unlimited within the window, any type.
             let plural = value((None, false), tag("spells"));
-            let (i, parsed) = alt((singular, plural)).parse(i)?;
+            // CR 601.2a: plural typed — "permanent spells" (Arvinox) → unlimited
+            // within the window, restricted to the printed type phrase.
+            let plural_typed = |i| {
+                let (i, filter) = super::oracle_nom::target::parse_type_phrase.parse(i)?;
+                let (i, _) = tag(" spells").parse(i)?;
+                Ok((i, (Some(filter), false)))
+            };
+            let (i, parsed) = alt((singular, plural, plural_typed)).parse(i)?;
             let (i, _) = tag(" from among ").parse(i)?;
-            let (i, _) = alt((tag("those exiled cards"), tag("the exiled cards"))).parse(i)?;
+            let (i, _) = alt((
+                tag("those exiled cards"),
+                tag("the exiled cards"),
+                tag("those cards"),
+                tag("them"),
+            ))
+            .parse(i)?;
             Ok((i, (parsed.0, parsed.1, explicit_permission)))
         })?;
     if !explicit_permission && !owns_exile_lifetime {

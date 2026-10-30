@@ -571,6 +571,12 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
     "all lands are ",
     "lands you control are ",
     "you may spend mana as though",
+    // CR 205.1a + CR 613.1d + CR 611.3a: a self-subject layer-4 type-removal
+    // static gated by an "unless" rider — "~ isn't a creature unless you
+    // control three or more permanents you don't own" (Arvinox, the Mind
+    // Flail, #8104). Without this route the line fell to the spell-ability
+    // pipeline. The static parser's `isn't a` block owns the lowering.
+    "~ isn't a ",
 ];
 
 pub(crate) fn is_static_pattern(lower: &str) -> bool {

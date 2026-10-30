@@ -2263,10 +2263,20 @@ pub(crate) fn parse_static_line_inner(
     // "as long as enchanted artifact isn't a creature") is NOT the
     // modification — that card removes nothing and instead animates. Scope the
     // scan to the pre-condition slice so the condition body cannot drive it.
-    let (effect_slice_tp, trailing_condition_tp) = match tp.split_around(" as long as ") {
-        Some((before, after)) => (before, Some(after)),
-        None => (tp, None),
-    };
+    //
+    // CR 611.3a: the negated rider "~ isn't a creature unless you control three
+    // or more permanents you don't own" (Arvinox, the Mind Flail, #8104) removes
+    // the type exactly while the condition is false. It is scoped the same way:
+    // the effect slice ends at " unless ", and the rider is gated through the
+    // shared `parse_unless_static_condition` (one negation-polarity authority).
+    let (effect_slice_tp, trailing_condition_tp, unless_condition_tp) =
+        match tp.split_around(" as long as ") {
+            Some((before, after)) => (before, Some(after), None),
+            None => match tp.split_around(" unless ") {
+                Some((before, _)) => (before, None, Some(tp)),
+                None => (tp, None, None),
+            },
+        };
     if let Ok((_, (_, type_rest))) =
         nom_primitives::split_once_on(effect_slice_tp.lower, "isn't a ")
     {
@@ -2305,6 +2315,13 @@ pub(crate) fn parse_static_line_inner(
                     unparsed_gate_condition(cond_text, ConditionGatePolarity::Positive)
                 });
                 def = def.condition(condition);
+            } else if let Some(unless_tp) = unless_condition_tp {
+                if let Some(condition) = super::shared::parse_unless_static_condition(
+                    &unless_tp,
+                    Some(&TargetFilter::SelfRef),
+                ) {
+                    def = def.condition(condition);
+                }
             }
             return Some(def);
         }
