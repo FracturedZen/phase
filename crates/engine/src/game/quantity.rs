@@ -1670,6 +1670,8 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         saga_chapter: _,
         unless_pay: None,
         batched: _,
+        // CR 700.1: plural-recipient grammar. A bool; it reads no game fact.
+        counter_recipients_are_one_event: _,
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,

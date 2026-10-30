@@ -11134,6 +11134,40 @@ fn trigger_you_put_counters_on_creature_you_control() {
             TypedFilter::creature().controller(ControllerRef::You)
         ))
     );
+    assert!(
+        !def.counter_recipients_are_one_event,
+        "a singular recipient stays one occurrence per object"
+    );
+}
+
+/// CR 700.1 + CR 603.2c: "on one or more other Heroes" is one event for the
+/// whole set. The singular "on another creature" form stays per recipient.
+#[test]
+fn trigger_counters_on_one_or_more_recipients_are_one_event() {
+    let plural = parse_trigger_line(
+        "Whenever you put one or more +1/+1 counters on one or more other Heroes you control, you may create a 0/4 colorless Wall creature token with defender.",
+        "Invisible Woman, Sue Storm",
+    );
+    assert_eq!(plural.mode, TriggerMode::CounterAdded);
+    assert!(
+        plural.counter_recipients_are_one_event,
+        "the plural recipient set is one counter-placement event"
+    );
+    assert!(plural.batched, "the set must take the aggregate batch arm");
+
+    let singular = parse_trigger_line(
+        "Whenever you put one or more counters on another creature, if it's not a Kree, you may put the same number and kind of counters on Captain Marvel.",
+        "Captain Marvel, Apex Avenger",
+    );
+    assert_eq!(singular.mode, TriggerMode::CounterAdded);
+    assert!(
+        !singular.counter_recipients_are_one_event,
+        "a singular recipient still fires once per object"
+    );
+    assert!(
+        singular.batched,
+        "kind-agnostic one-or-more counters stay batched per recipient"
+    );
 }
 
 #[test]

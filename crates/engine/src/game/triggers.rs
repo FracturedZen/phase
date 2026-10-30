@@ -1513,20 +1513,25 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
             .is_some_and(|filter| filter.is_player_scope())
 }
 
-/// CR 603.2c: Whether a `CounterAdded` trigger fires once PER RECIPIENT object
-/// rather than once for the whole simultaneous batch.
+/// CR 603.2c + CR 700.1: Whether a `CounterAdded` trigger fires once PER
+/// RECIPIENT object rather than once for the whole simultaneous batch.
 ///
-/// This is a property of the TRIGGER PHRASING, not of the effect. The only
-/// phrasing that marks a `CounterAdded` trigger `batched` is the kind-agnostic
-/// "one or more counters on a <singular recipient>" form (set by
-/// `try_parse_counter_trigger`, re-gated off for still-`Unimplemented` effects by
-/// `lower_trigger_ir`). Under CR 603.2c a single event that places counters on
-/// several recipients "contains multiple occurrences", so the ability triggers
-/// once for EACH recipient — while a multi-KIND placement on ONE recipient folds
-/// into a single occurrence. `matching_counter_added_events_by_recipient`
-/// realizes exactly that granularity (group by `object_id`), so the per-recipient
-/// intervening-if ("if it's not a Kree") binds "it" to a single recipient and any
-/// effect — reproduction, draw, damage — resolves once per recipient.
+/// This is a property of the TRIGGER PHRASING, not of the effect. A singular
+/// recipient ("one or more counters on a creature" / "on another creature")
+/// is marked `batched` by `try_parse_counter_trigger` and re-gated off for
+/// still-`Unimplemented` effects by `lower_trigger_ir`. Under CR 603.2c a
+/// single event that places counters on several such recipients "contains
+/// multiple occurrences", so the ability triggers once for EACH recipient —
+/// while a multi-KIND placement on ONE recipient folds into a single
+/// occurrence. `matching_counter_added_events_by_recipient` realizes exactly
+/// that granularity (group by `object_id`), so the per-recipient
+/// intervening-if ("if it's not a Kree") binds "it" to a single recipient and
+/// any effect — reproduction, draw, damage — resolves once per recipient.
+///
+/// A plural recipient set ("on one or more other Heroes") is a different
+/// event (CR 700.1: the ability text defines the event). That phrasing sets
+/// `counter_recipients_are_one_event` and stays on the aggregate batch arm:
+/// one firing for every matching recipient in the simultaneous placement.
 ///
 /// Gating this on the trigger structure keeps the firing-granularity decision
 /// class-level. Keying it on a specific `Effect` leaf (e.g. only
@@ -1534,7 +1539,9 @@ fn attack_fires_per_defending_player(trig_def: &TriggerDefinition) -> bool {
 /// non-reproduction effect through to the all-in-one arm, collapsing their
 /// per-recipient occurrences into a single wrong firing (CR 603.2c violation).
 fn counter_added_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
-    trig_def.batched && matches!(trig_def.mode, TriggerMode::CounterAdded)
+    trig_def.batched
+        && matches!(trig_def.mode, TriggerMode::CounterAdded)
+        && !trig_def.counter_recipients_are_one_event
 }
 
 /// CR 603.2c: a "one or more … deal damage to a player" trigger fires once for
@@ -1962,7 +1969,8 @@ fn trigger_firing_groups(
     let groups = if counter_added_fires_per_recipient(trig_def) {
         // CR 603.2c: the "one or more counters on a <singular recipient>"
         // class fires once per recipient object, folding that recipient's
-        // whole kind-multiset into one firing. A class-level property of the
+        // whole kind-multiset into one firing. A plural recipient set stays
+        // on the aggregate batch arm below. A class-level property of the
         // trigger phrasing (see `counter_added_fires_per_recipient`), not of
         // the effect leaf.
         indexed_groups(matching_counter_added_events_by_recipient(

@@ -4019,6 +4019,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         counter_filter: _,
         saga_chapter: _,
         batched: _,
+        // CR 700.1: plural-recipient grammar for a counter trigger. A bool
+        // discriminator; it reaches no filter or quantity.
+        counter_recipients_are_one_event: _,
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,

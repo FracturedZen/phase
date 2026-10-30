@@ -2489,20 +2489,23 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     // that must not consume a multi-event batch).
     //
     // Any non-`Unimplemented` effect keeps `def.batched = true`. At runtime, a
-    // batched `CounterAdded` trigger fires once per recipient object
+    // batched `CounterAdded` trigger whose recipient is singular ("on a
+    // creature", "on another creature") fires once per recipient object
     // (`counter_added_fires_per_recipient` → `matching_counter_added_events_by_
-    // recipient` in game/triggers.rs) — a class-level CR 603.2c property of the
-    // "one or more counters on a <singular recipient>" phrasing, NOT of the
-    // effect leaf. That granularity binds a per-recipient intervening-if ("if
-    // it's not a Kree") to a single recipient and resolves the effect once per
-    // recipient, whether it is the reproduction class ("same number and kind" /
-    // "one of each of those kinds" — Captain Marvel, Apex Avenger; Bold
-    // Plagiarist; Aragorn, Company Leader → `Effect::ReproduceEventCounters`) or
-    // a non-reproduction effect ("draw a card", "deals that much damage"). The
-    // reproduction resolver reads `state.current_trigger_events` (that
-    // recipient's whole multiset) directly; magnitude effects read the same
-    // per-recipient batch, so a single-recipient multi-kind placement still
-    // aggregates within one firing.
+    // recipient` in game/triggers.rs) — a class-level CR 603.2c property of
+    // that phrasing, NOT of the effect leaf. That granularity binds a
+    // per-recipient intervening-if ("if it's not a Kree") to a single
+    // recipient and resolves the effect once per recipient, whether it is the
+    // reproduction class ("same number and kind" / "one of each of those
+    // kinds" — Captain Marvel, Apex Avenger; Bold Plagiarist; Aragorn, Company
+    // Leader → `Effect::ReproduceEventCounters`) or a non-reproduction effect
+    // ("draw a card", "deals that much damage"). The reproduction resolver
+    // reads `state.current_trigger_events` (that recipient's whole multiset)
+    // directly; magnitude effects read the same per-recipient batch, so a
+    // single-recipient multi-kind placement still aggregates within one
+    // firing. A plural recipient set ("on one or more other Heroes",
+    // `counter_recipients_are_one_event`) stays one firing for the whole
+    // simultaneous batch (CR 700.1).
     if def.mode == TriggerMode::CounterAdded && def.batched {
         def.batched = execute.as_deref().is_some_and(|ability| {
             !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })
@@ -22250,6 +22253,21 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         };
         let (filter, _) = parse_single_subject(subject_text, &mut subject_ctx);
         def.valid_card = Some(filter);
+    }
+
+    // CR 700.1 + CR 603.2c: "on one or more <objects>" names one event — the
+    // set of objects that received counters together — however many of them
+    // there are and however many counters each received. The kind-agnostic
+    // "one or more counters" arm above does not see this recipient quantifier,
+    // and a kind-filtered form ("one or more +1/+1 counters") is otherwise
+    // left non-batched. Record the set grammar and batch the trigger so the
+    // runtime keeps the whole simultaneous placement as one firing.
+    if tag::<_, _, OracleError<'_>>("one or more ")
+        .parse(subject_text)
+        .is_ok()
+    {
+        def.counter_recipients_are_one_event = true;
+        def.batched = true;
     }
 
     Some((TriggerMode::CounterAdded, def))

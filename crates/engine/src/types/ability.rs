@@ -41303,6 +41303,13 @@ pub struct TriggerDefinition {
     /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
     #[serde(default)]
     pub batched: bool,
+    /// CR 700.1 + CR 603.2c: the counter-placement recipient is a plural set
+    /// ("on one or more other Heroes"), so those simultaneous placements are
+    /// one trigger event. A singular recipient ("on a creature", "on another
+    /// creature") leaves this false, and a batched counter trigger still fires
+    /// once per recipient.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub counter_recipients_are_one_event: bool,
     /// CR 706.2: Optional sides filter for die-roll triggers such as
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -42090,6 +42097,7 @@ impl TriggerDefinition {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
+            counter_recipients_are_one_event: false,
             die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,
@@ -52282,6 +52290,7 @@ mod tests {
             saga_chapter: None,
             unless_pay: None,
             batched: false,
+            counter_recipients_are_one_event: false,
             die_sides: None,
             expend_threshold: None,
             attack_target_filter: None,

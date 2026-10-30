@@ -9705,6 +9705,8 @@ fn trigger_matchers_read_filter_population(
         saga_chapter: _,
         unless_pay,
         batched: _,
+        // CR 700.1: plural-recipient grammar. A bool; it names no population.
+        counter_recipients_are_one_event: _,
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,

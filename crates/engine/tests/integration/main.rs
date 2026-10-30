@@ -607,6 +607,7 @@ mod intensity_triggered_source_read;
 mod interaction_contract;
 mod invasion_of_alara_8750;
 mod investigate_that_many_times;
+mod invisible_woman_one_event_8120;
 mod invoke_calamity_free_cast;
 mod ir_spell_node_readers;
 mod ironsoul_enforcer_commander_attacks_alone;
