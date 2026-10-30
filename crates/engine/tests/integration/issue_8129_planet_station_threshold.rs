@@ -71,7 +71,11 @@ fn planet_threshold_activated_abilities_carry_charge_gate() {
         let base = parsed
             .abilities
             .iter()
-            .find(|a| a.description.as_deref().is_some_and(|d| d.starts_with("{T}: Add")))
+            .find(|a| {
+                a.description
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with("{T}: Add"))
+            })
             .expect("base mana ability");
         assert!(base.activation_restrictions.is_empty());
     }
@@ -98,7 +102,11 @@ fn kavaron_runner() -> (GameRunner, ObjectId, usize) {
     let idx = r.state().objects[&k]
         .abilities
         .iter()
-        .position(|a| a.description.as_deref().is_some_and(|d| d.contains("Robot")))
+        .position(|a| {
+            a.description
+                .as_deref()
+                .is_some_and(|d| d.contains("Robot"))
+        })
         .expect("Kavaron robot ability");
     (r, k, idx)
 }
