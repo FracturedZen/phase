@@ -294,7 +294,7 @@ fn compute_hand_pick_eligible(
 /// with the performed flag false — rather than prompting for a choice that can
 /// select nothing. Returns `Some(is_empty)` for a hand-scoped pick with no
 /// pre-bound object targets; `None` when this ability is not such a pick (an
-/// untargeted free graveyard pick is decided by
+/// untargeted graveyard pick is decided by
 /// `graveyard_pick_eligible_is_empty`; the caller keeps its whole-ability
 /// dry-run for the exile/`LastRevealed` classes).
 pub(crate) fn hand_pick_eligible_is_empty(
@@ -417,16 +417,37 @@ fn is_free_immediate_cast(effect: &Effect) -> bool {
     )
 }
 
-/// CR 608.2g + CR 115.1: an untargeted free cast from a graveyard ("you may
-/// cast an instant or sorcery spell from your graveyard without paying its mana
-/// cost" — Diviner of Mist; "… from that player's graveyard" — Sorcerous Squall)
-/// names no card, so the card is chosen and cast while the ability resolves.
-/// The parser marks the untargeted shape (`TargetChoiceTiming::Resolution`); a
-/// "target … card" cast (Diluvian Primordial's "up to one target") is chosen on
-/// the stack, and choosing none of it casts nothing.
-fn is_free_immediate_graveyard_pick(ability: &ResolvedAbility) -> bool {
+/// CR 608.2g + CR 601.2f: the PAID counterpart of [`is_free_immediate_cast`] —
+/// a bare "you may cast <card> from <zone>" with no lingering duration, no
+/// alternative cost and no "without paying" clause. The caster pays the card's
+/// total cost (plus any printed additional cost) as the ability resolves.
+fn is_paid_immediate_cast(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CastFromZone {
+            without_paying_mana_cost: false,
+            alt_ability_cost: None,
+            duration: None,
+            mode: crate::types::ability::CardPlayMode::Cast,
+            ..
+        }
+    )
+}
+
+/// CR 608.2g + CR 115.1: an untargeted cast from a graveyard names no card, so
+/// the card is chosen and cast while the ability resolves. Covers the free form
+/// ("you may cast an instant or sorcery spell from your graveyard without paying
+/// its mana cost" — Diviner of Mist; "… from that player's graveyard" —
+/// Sorcerous Squall) and the paid form ("Whenever Bilbo attacks, you may cast an
+/// artifact, instant, or sorcery spell from your graveyard" — Bilbo, Thief in
+/// the Night, issue #8139), where the caster pays the chosen spell's cost
+/// during that resolution (CR 601.2f-h). The parser marks the untargeted shape
+/// (`TargetChoiceTiming::Resolution`); a "target … card" cast (Diluvian
+/// Primordial's "up to one target") is chosen on the stack, and choosing none
+/// of it casts nothing.
+fn is_immediate_graveyard_pick(ability: &ResolvedAbility) -> bool {
     ability.target_choice_timing == crate::types::ability::TargetChoiceTiming::Resolution
-        && is_free_immediate_cast(&ability.effect)
+        && (is_free_immediate_cast(&ability.effect) || is_paid_immediate_cast(&ability.effect))
         && matches!(
             &ability.effect,
             Effect::CastFromZone { target, .. } if target.extract_in_zone() == Some(Zone::Graveyard)
@@ -434,7 +455,7 @@ fn is_free_immediate_graveyard_pick(ability: &ResolvedAbility) -> bool {
 }
 
 /// CR 608.2d: A player can't choose an impossible option. An optional
-/// untargeted free graveyard pick ([`is_free_immediate_graveyard_pick`]) with
+/// untargeted graveyard pick ([`is_immediate_graveyard_pick`]) with
 /// nothing castable can't cast, so the "you may" is declined: accepting it would
 /// record a performed cast and run an "If you do" rider anyway (Jarsyl, Dark
 /// Age Scion intensifying with no spell of its intensity in the graveyard).
@@ -448,7 +469,7 @@ pub(crate) fn graveyard_pick_eligible_is_empty(
     let Effect::CastFromZone { target, .. } = &ability.effect else {
         return None;
     };
-    if !is_free_immediate_graveyard_pick(ability)
+    if !is_immediate_graveyard_pick(ability)
         || ability
             .targets
             .iter()
@@ -567,8 +588,12 @@ fn private_zone_pick_stash(
     // the one exception: it must be offered and cast while this ability
     // resolves. Store that mechanism on the continuation, rather than inferring
     // it later from the target zone.
-    let during_resolution = matches!(source_zone, Zone::Hand | Zone::Graveyard)
-        && is_free_immediate_cast(&stash.effect);
+    // CR 608.2g: an untargeted graveyard pick is cast during this resolution
+    // whether free or paid (Bilbo, Thief in the Night, issue #8139); a paid
+    // hand pick keeps its lingering-permission semantics.
+    let during_resolution = (matches!(source_zone, Zone::Hand | Zone::Graveyard)
+        && is_free_immediate_cast(&stash.effect))
+        || (source_zone == Zone::Graveyard && is_immediate_graveyard_pick(&stash));
     if let Effect::CastFromZone { target, driver, .. } = &mut stash.effect {
         *target = stored_filter.clone();
         if during_resolution {
@@ -1014,9 +1039,9 @@ pub fn resolve(
 
     if target_ids.is_empty() {
         if let Some(source_zone) = target_filter.extract_in_zone() {
-            // CR 608.2g: an untargeted free graveyard cast is picked while this
-            // ability resolves, the way a free cast "from your hand" is.
-            if source_zone == Zone::Hand || is_free_immediate_graveyard_pick(ability) {
+            // CR 608.2g: an untargeted graveyard cast, free or paid, is picked
+            // while this ability resolves, the way a free cast "from your hand" is.
+            if source_zone == Zone::Hand || is_immediate_graveyard_pick(ability) {
                 return open_private_zone_cast_selection(
                     state,
                     ability,

@@ -16265,7 +16265,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // `Play` grant is always grantable and stays unprobed.
             let resolves_play_now = mode.is_play() && driver.is_during_resolution();
             if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
-                // CR 608.2d: an untargeted free graveyard pick with nothing
+                // CR 608.2d: an untargeted graveyard pick (free or paid) with nothing
                 // castable is impossible whatever follows it, so an "If you do"
                 // rider (Jarsyl, Dark Age Scion) does not run on a no-op.
                 if let Some(true) = cast_from_zone::graveyard_pick_eligible_is_empty(state, ability)
