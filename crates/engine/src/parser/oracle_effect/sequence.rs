@@ -745,7 +745,10 @@ fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRest
 /// CR 400.5 + CR 608.2c: "in a random order" is an instruction distinct from
 /// the player-chosen ordering in "in any order".
 fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> {
-    let (input, _) = tag("put the rest on the bottom of your library").parse(input)?;
+    let (input, _) = tag("put the rest").parse(input)?;
+    // "the rest of the cards" (Winota, Joiner of Forces) names the same remainder.
+    let (input, _) = opt(alt((tag(" of the cards"), tag(" of those cards")))).parse(input)?;
+    let (input, _) = tag(" on the bottom of your library").parse(input)?;
     let (input, rest_order) = opt(alt((
         value(DigRestOrder::Random, tag(" in a random order")),
         value(DigRestOrder::Preserve, tag(" in any order")),
@@ -14791,6 +14794,64 @@ mod tests {
     ///
     /// Before the issue #4273 fix the Dig was assembled with dest=Battlefield and
     /// the full filter, presenting WaitingFor::DigChoice BEFORE the sacrifice.
+    /// CR 608.2c + CR 401.4 (Winota, Joiner of Forces, #8132): a rider on the
+    /// kept card ("It gains indestructible until end of turn.") between the
+    /// "from among them" selection and "Put the rest of the cards on the bottom
+    /// of your library in a random order." must not orphan the rest clause into
+    /// a standalone one-card put-on-bottom: it patches the Dig's rest pile.
+    #[test]
+    fn winota_rest_of_the_cards_patches_dig_across_kept_card_rider() {
+        use super::super::parse_effect_chain;
+        let def = parse_effect_chain(
+            "look at the top six cards of your library. You may put a Human creature card \
+             from among them onto the battlefield tapped and attacking. It gains \
+             indestructible until end of turn. Put the rest of the cards on the bottom of \
+             your library in a random order.",
+            AbilityKind::Spell,
+        );
+        let mut node = Some(&def);
+        let mut digs = Vec::new();
+        while let Some(d) = node {
+            assert!(
+                !matches!(
+                    &*d.effect,
+                    Effect::PutAtLibraryPosition { .. } | Effect::Unimplemented { .. }
+                ),
+                "rest clause must not lower standalone: {def:?}"
+            );
+            if let Effect::Dig {
+                rest_destination,
+                rest_order,
+                ..
+            } = &*d.effect
+            {
+                digs.push((*rest_destination, *rest_order));
+            }
+            node = d.sub_ability.as_deref();
+        }
+        assert_eq!(
+            digs,
+            vec![(Some(Zone::Library), DigRestOrder::Random)],
+            "{def:?}"
+        );
+    }
+
+    #[test]
+    fn put_rest_of_the_cards_line_parses_random_order() {
+        assert_eq!(
+            parse_put_rest_on_bottom_line(
+                "put the rest of the cards on the bottom of your library in a random order."
+            )
+            .map(|(_, o)| o)
+            .ok(),
+            Some(DigRestOrder::Random)
+        );
+        assert!(parse_put_rest_on_bottom_line(
+            "put the rest of the exiled cards on the bottom of your library"
+        )
+        .is_err());
+    }
+
     #[test]
     fn birthing_ritual_assembles_dig_battlefield_sacrifice_chain() {
         use super::super::parse_effect_chain;

@@ -49312,6 +49312,45 @@ fn parse_effect_chain_ir_body(
                     })
                 })
                 .or_else(|| {
+                    // CR 608.2c + CR 401.4: "Put the rest ... on the bottom of your
+                    // library" disposes of the cards an earlier "look at the top N"
+                    // left behind, even when a rider on the KEPT card sits between
+                    // them (Winota, Joiner of Forces: "You may put a Human creature
+                    // card from among them onto the battlefield ... It gains
+                    // indestructible until end of turn. Put the rest of the cards on
+                    // the bottom ..."). A continuous-effect / pump rider neither
+                    // selects nor re-binds the looked-at pile, so the scan may pass
+                    // over it (and over Dig-lookback-transparent clauses); any other
+                    // clause ends the scan, and only a `PutRest` binds.
+                    let nearest = effective_prev_effect.as_ref()?;
+                    let is_rider = |effect: &Effect| {
+                        effect_installs_continuous_effect(effect)
+                            || matches!(effect, Effect::Pump { .. })
+                    };
+                    if !is_rider(nearest) {
+                        return None;
+                    }
+                    for c in non_absorbed.iter().skip(1) {
+                        let deeper = effective_effect_of(c);
+                        if matches!(deeper, Effect::Dig { .. }) {
+                            return match parse_followup_continuation_ast(
+                                normalized_text,
+                                &deeper,
+                                ctx,
+                            ) {
+                                Some(continuation @ ContinuationAst::PutRest { .. }) => {
+                                    Some(continuation)
+                                }
+                                _ => None,
+                            };
+                        }
+                        if !(is_rider(&deeper) || clause_is_dig_lookback_transparent(&deeper)) {
+                            return None;
+                        }
+                    }
+                    None
+                })
+                .or_else(|| {
                     // CR 701.20a + CR 608.2c: A clause disposing of cards revealed by an
                     // earlier `RevealUntil` ("put all cards revealed this way...",
                     // "put the nonland card into your hand and the rest...", "put the revealed cards...")
