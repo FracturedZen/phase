@@ -66,7 +66,13 @@ fn zone(runner: &GameRunner, id: ObjectId) -> Zone {
 }
 
 fn life(runner: &GameRunner, p: PlayerId) -> i32 {
-    runner.state().players.iter().find(|x| x.id == p).unwrap().life
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|x| x.id == p)
+        .unwrap()
+        .life
 }
 
 /// Activate the Priest targeting `targets`, pay the sacrifice cost with the
@@ -111,9 +117,7 @@ fn activate_and_resolve(board: &mut Board, targets: Vec<PlayerId>) -> Vec<Player
                 if runner.state().stack.is_empty() {
                     return choosers;
                 }
-                runner
-                    .act(GameAction::PassPriority)
-                    .expect("pass priority");
+                runner.act(GameAction::PassPriority).expect("pass priority");
             }
             other => panic!("unexpected prompt: {other:?}"),
         }
@@ -150,16 +154,42 @@ fn each_target_opponent_loses_life_and_sacrifices_their_creature() {
     let choosers = activate_and_resolve(&mut board, vec![P1, P2]);
     let runner = &board.runner;
 
-    assert!(!choosers.contains(&P0), "controller must not sacrifice: {choosers:?}");
-    assert_eq!(zone(runner, board.p1_bear), Zone::Graveyard, "P1 sacrifices");
-    assert_eq!(zone(runner, board.p2_bear), Zone::Graveyard, "P2 sacrifices");
-    assert_eq!(zone(runner, board.keeper), Zone::Battlefield, "P0 keeps Keeper");
+    assert!(
+        !choosers.contains(&P0),
+        "controller must not sacrifice: {choosers:?}"
+    );
+    assert_eq!(
+        zone(runner, board.p1_bear),
+        Zone::Graveyard,
+        "P1 sacrifices"
+    );
+    assert_eq!(
+        zone(runner, board.p2_bear),
+        Zone::Graveyard,
+        "P2 sacrifices"
+    );
+    assert_eq!(
+        zone(runner, board.keeper),
+        Zone::Battlefield,
+        "P0 keeps Keeper"
+    );
     assert_eq!(zone(runner, board.priest), Zone::Battlefield);
-    assert_eq!([life(runner, P0), life(runner, P1), life(runner, P2)], [20, 18, 18]);
+    assert_eq!(
+        [life(runner, P0), life(runner, P1), life(runner, P2)],
+        [20, 18, 18]
+    );
 
     let p0 = &runner.state().players[0];
-    assert_eq!(p0.mana_pool.count_color(ManaType::Black), 2, "You add {{B}}{{B}} once");
-    assert_eq!(p0.hand.len(), hand_before + 1, "controller draws exactly one card");
+    assert_eq!(
+        p0.mana_pool.count_color(ManaType::Black),
+        2,
+        "You add {{B}}{{B}} once"
+    );
+    assert_eq!(
+        p0.hand.len(),
+        hand_before + 1,
+        "controller draws exactly one card"
+    );
 }
 
 #[test]
@@ -168,11 +198,25 @@ fn single_target_player_sacrifices_and_others_are_untouched() {
     let choosers = activate_and_resolve(&mut board, vec![P2]);
     let runner = &board.runner;
 
-    assert!(!choosers.contains(&P0), "controller must not sacrifice: {choosers:?}");
-    assert_eq!(zone(runner, board.p2_bear), Zone::Graveyard, "P2 sacrifices");
-    assert_eq!(zone(runner, board.p1_bear), Zone::Battlefield, "P1 was not targeted");
+    assert!(
+        !choosers.contains(&P0),
+        "controller must not sacrifice: {choosers:?}"
+    );
+    assert_eq!(
+        zone(runner, board.p2_bear),
+        Zone::Graveyard,
+        "P2 sacrifices"
+    );
+    assert_eq!(
+        zone(runner, board.p1_bear),
+        Zone::Battlefield,
+        "P1 was not targeted"
+    );
     assert_eq!(zone(runner, board.keeper), Zone::Battlefield);
-    assert_eq!([life(runner, P0), life(runner, P1), life(runner, P2)], [20, 20, 18]);
+    assert_eq!(
+        [life(runner, P0), life(runner, P1), life(runner, P2)],
+        [20, 20, 18]
+    );
 }
 
 #[test]
@@ -187,8 +231,18 @@ fn targeting_self_and_opponent_each_sacrifice_their_own() {
         .iter()
         .filter(|&&id| zone(runner, id) == Zone::Battlefield)
         .count();
-    assert_eq!(p0_left, 1, "P0 sacrifices exactly one creature ({choosers:?})");
-    assert_eq!(zone(runner, board.p1_bear), Zone::Graveyard, "P1 sacrifices");
+    assert_eq!(
+        p0_left, 1,
+        "P0 sacrifices exactly one creature ({choosers:?})"
+    );
+    assert_eq!(
+        zone(runner, board.p1_bear),
+        Zone::Graveyard,
+        "P1 sacrifices"
+    );
     assert_eq!(zone(runner, board.p2_bear), Zone::Battlefield);
-    assert_eq!([life(runner, P0), life(runner, P1), life(runner, P2)], [18, 18, 20]);
+    assert_eq!(
+        [life(runner, P0), life(runner, P1), life(runner, P2)],
+        [18, 18, 20]
+    );
 }
