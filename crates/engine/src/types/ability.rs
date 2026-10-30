@@ -964,6 +964,12 @@ pub enum SearchSelectionConstraint {
 }
 
 impl SearchSelectionConstraint {
+    /// True for the default `None` variant (no set-level constraint). Used as
+    /// the serde skip predicate so unconstrained effects serialize unchanged.
+    pub fn is_unconstrained(&self) -> bool {
+        matches!(self, SearchSelectionConstraint::None)
+    }
+
     /// CR 701.23b vs CR 701.23d: a *stated-quality* search (any constrained
     /// variant) may find fewer cards than requested — including none. A pure
     /// *quantity* search (`None`) must find as many as possible. Drives the
@@ -23331,6 +23337,17 @@ pub enum Effect {
         /// Determines where the resolver reads the card set from. See [`DigSource`].
         #[serde(default, skip_serializing_if = "DigSource::is_library")]
         source: DigSource,
+        /// CR 701.20a + CR 608.2c: A set-level constraint on the kept cards,
+        /// beyond the per-card `filter`. `MatchEachFilter` models "reveal an
+        /// Angel card, a Demon card, and/or a Dragon card from among them"
+        /// (Kaalia, Zenith Seeker): each kept card must claim a distinct printed
+        /// description, so the selection holds at most one card per
+        /// description. `None` (the default) keeps the plain per-card filter.
+        #[serde(
+            default,
+            skip_serializing_if = "SearchSelectionConstraint::is_unconstrained"
+        )]
+        selection_constraint: SearchSelectionConstraint,
     },
     GainControl {
         #[serde(default = "default_target_filter_any")]

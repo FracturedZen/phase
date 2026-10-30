@@ -7635,6 +7635,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             }
         }
         fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {

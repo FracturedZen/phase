@@ -1122,6 +1122,7 @@ mod jeskai_ascendancy_pump_untap_anaphora_6857;
 mod jill_shiva_cold_snap_return_prompt_pollution;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
+mod kaalia_zenith_seeker_dig_each_type_8068;
 mod kaho_minamo_historian_linked_exile;
 mod kaito_integration;
 mod kamigawa_flip_cards;

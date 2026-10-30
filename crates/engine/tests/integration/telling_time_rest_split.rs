@@ -1009,6 +1009,7 @@ fn a_library_bound_remainder_with_no_split_routes_uniformly() {
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
 
     runner
@@ -1060,6 +1061,7 @@ fn non_splitting_dig_still_auto_routes_its_whole_remainder() {
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
 
     runner
@@ -1139,6 +1141,7 @@ fn cross_player_split_cast_revealing(
         enter_tapped: false,
         enters_attacking: false,
         source: DigSource::Library,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     });
     let spell_id = builder.id();
     let mut runner = scenario.build();

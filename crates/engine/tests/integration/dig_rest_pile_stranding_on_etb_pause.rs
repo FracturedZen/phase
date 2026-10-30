@@ -69,6 +69,7 @@ fn dig_rest_pile_not_stranded_when_kept_aura_pauses_on_attachment_choice() {
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
 
     runner

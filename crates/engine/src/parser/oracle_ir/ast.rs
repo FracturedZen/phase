@@ -601,6 +601,12 @@ pub(crate) enum ContinuationAst {
         /// action-agnostic (`None`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        /// CR 701.20a + CR 608.2c: Set-level keep constraint carried onto the
+        /// patched `Dig` — `MatchEachFilter` for "an Angel card, a Demon card,
+        /// and/or a Dragon card" (one card per description). Boxed to keep the
+        /// variant size within `clippy::large_enum_variant`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selection_constraint: Option<Box<crate::types::ability::SearchSelectionConstraint>>,
     },
     /// CR 708.2a + CR 205.1a: "They're N/M [types] [subtypes] creatures." after a
     /// put-face-down clause — refines the preceding face-down move's profile.

@@ -957,6 +957,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             source: _,
             keep_count_expr,
             rest_split_top_count,
+            selection_constraint: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(player, target_ctx, mode));

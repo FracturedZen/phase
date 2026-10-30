@@ -49944,6 +49944,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     source: DigSource::Library,
+                    selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 }),
             ),
             (
@@ -50871,6 +50872,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     source: crate::types::ability::DigSource::Library,
+                    selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                 })),
             ),
             (
@@ -58381,6 +58383,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
         )
         .sub_ability(sub)
@@ -59453,6 +59456,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
         )
         .sub_ability(cast_sub);
@@ -64022,6 +64026,7 @@ mod parser_oracle_effect_tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: crate::types::ability::DigSource::default(),
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             Effect::ExileHaunting {
                 target: TargetFilter::Any,

@@ -36,7 +36,8 @@ use crate::types::ability::{
     ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
     PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter, TypedFilter,
+    SearchSelectionConstraint, TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -5786,7 +5787,14 @@ pub(super) fn apply_clause_continuation(
             enters_attacking,
             reveal_verb,
             caused_by,
+            selection_constraint: continuation_selection_constraint,
         } => {
+            // CR 701.20a + CR 608.2c: set-level keep constraint (Kaalia's one
+            // card per printed description) rides onto whichever Dig makes
+            // the keep choice.
+            let continuation_selection_constraint = continuation_selection_constraint
+                .map(|boxed| *boxed)
+                .unwrap_or_default();
             // CR 608.2c: the "from among those cards" continuation patches the
             // earlier "look at the top N" instruction. When a transparent
             // clause (e.g. `Sacrifice` — Birthing Ritual) sits between the
@@ -5875,6 +5883,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 source: DigSource::PriorLook,
+                                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                             },
                         );
 
@@ -5899,6 +5908,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped,
                                 enters_attacking,
                                 source: DigSource::PriorLook,
+                                selection_constraint: continuation_selection_constraint,
                             },
                         );
                         // Gate on sacrifice having been performed.
@@ -5943,6 +5953,7 @@ pub(super) fn apply_clause_continuation(
                 reveal,
                 enter_tapped: dig_enter_tapped,
                 enters_attacking: dig_enters_attacking,
+                selection_constraint: dig_selection_constraint,
                 ..
             } = &mut *previous.effect
             {
@@ -6001,6 +6012,7 @@ pub(super) fn apply_clause_continuation(
                 *rest_order = continuation_rest_order;
                 *dig_enter_tapped = enter_tapped;
                 *dig_enters_attacking = enters_attacking;
+                *dig_selection_constraint = continuation_selection_constraint;
             } else if let Effect::Mill {
                 destination: mill_destination,
                 ..
@@ -7268,6 +7280,56 @@ pub(super) fn parse_intrinsic_continuation_ast(
     }
 }
 
+/// CR 701.20a + CR 608.2c: Parse an article-led list of two or more singular
+/// card descriptions joined by commas and a final "and/or" — "an angel card, a
+/// demon card, and/or a dragon card" (Kaalia, Zenith Seeker). Returns one
+/// filter per description; `None` for any other shape (a plain "an angel or
+/// demon card" names ONE card and stays on the ordinary article arm).
+fn parse_dig_each_description_list(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<Vec<TargetFilter>> {
+    let (mut remaining, _) = nom_primitives::parse_article.parse(text).ok()?;
+    let mut descriptions: Vec<&str> = Vec::new();
+    let mut saw_and_or = false;
+    loop {
+        let (after_desc, desc) = terminated(
+            take_until::<_, _, OracleError<'_>>(" card"),
+            tag(" card"),
+        )
+        .parse(remaining)
+        .ok()?;
+        if desc.is_empty() || desc.contains(',') || saw_and_or && !after_desc.is_empty() {
+            return None;
+        }
+        descriptions.push(desc);
+        if after_desc.is_empty() {
+            break;
+        }
+        let (after_sep, and_or) = alt((
+            value(true, tag::<_, _, OracleError<'_>>(", and/or ")),
+            value(true, tag(" and/or ")),
+            value(false, tag(", ")),
+        ))
+        .parse(after_desc)
+        .ok()?;
+        saw_and_or |= and_or;
+        let (after_article, _) = nom_primitives::parse_article.parse(after_sep).ok()?;
+        remaining = after_article;
+    }
+    if !saw_and_or || descriptions.len() < 2 {
+        return None;
+    }
+    let filters: Vec<TargetFilter> = descriptions
+        .iter()
+        .map(|desc| parse_dig_from_among_filter(&format!("{desc} card"), ctx))
+        .collect();
+    if filters.iter().any(|f| matches!(f, TargetFilter::Any)) {
+        return None;
+    }
+    Some(filters)
+}
+
 /// CR 608.2c + CR 608.2k: Parse a Dig continuation's reveal/put filter with
 /// the enclosing context, so anaphoric references bind to a triggering subject
 /// when one exists.
@@ -7463,6 +7525,7 @@ pub(super) fn parse_dig_from_among(
             enters_attacking,
             reveal_verb,
             caused_by: Some(ThisWayCause::Milled),
+            selection_constraint: None,
         });
     }
 
@@ -7497,6 +7560,42 @@ pub(super) fn parse_dig_from_among(
                 Ok((rest, _)) => (rest, true),
                 Err(_) => (after_put, false),
             };
+
+        // CR 701.20a + CR 608.2c: "an Angel card, a Demon card, and/or a Dragon
+        // card" (Kaalia, Zenith Seeker) names one card per description — up to
+        // one of each, with each kept card filling a distinct description.
+        let each_description = if mass {
+            None
+        } else {
+            parse_dig_each_description_list(after_put, ctx)
+        };
+        if let Some(filters) = each_description {
+            let enters_under = None;
+            let face_down_profile = None;
+            let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
+                .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
+                    (Some(destination), order)
+                });
+            return Some(ContinuationAst::DigFromAmong {
+                quantity: PutCount::up(filters.len() as u32),
+                filter: TargetFilter::Or {
+                    filters: filters.clone(),
+                },
+                destination,
+                rest_destination,
+                rest_split_top_count: None,
+                rest_order,
+                enters_under,
+                face_down_profile,
+                enter_tapped,
+                enters_attacking,
+                reveal_verb,
+                caused_by: None,
+                selection_constraint: Some(Box::new(SearchSelectionConstraint::MatchEachFilter {
+                    filters,
+                })),
+            });
+        }
 
         // Parse "up to N" or "a/an" or just a number
         // Delegate to nom combinator (input already lowercase from lower).
@@ -7571,6 +7670,7 @@ pub(super) fn parse_dig_from_among(
             enters_attacking,
             reveal_verb,
             caused_by: None,
+            selection_constraint: None,
         });
     }
 
@@ -7648,6 +7748,7 @@ pub(super) fn parse_dig_from_among(
                 enters_attacking,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             });
         }
     }
@@ -8989,6 +9090,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 // "put one of those cards onto the battlefield" — a put, not a reveal.
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         }
         // "You may put one of those cards back on top of your library" after
@@ -9014,6 +9116,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 // "put one ... back on top" — a put, not a reveal.
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         }
         // "put them back in any order" after Dig means all looked-at cards
@@ -13134,6 +13237,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         }
     }
 
@@ -13330,6 +13434,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -13358,6 +13463,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -13391,6 +13497,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -13418,6 +13525,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -13445,6 +13553,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -13474,6 +13583,7 @@ mod tests {
                     enters_attacking: false,
                     reveal_verb: false,
                     caused_by: None,
+                    selection_constraint: None,
                 }),
                 "{text}"
             );
@@ -13775,6 +13885,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             },
             AbilityKind::Spell,
             &env,
@@ -14057,6 +14168,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             },
             AbilityKind::Spell,
             &env,
@@ -14109,6 +14221,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             },
             AbilityKind::Spell,
             &env,
@@ -14179,6 +14292,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             },
             AbilityKind::Spell,
             &env,
@@ -15315,6 +15429,7 @@ mod tests {
                 enters_attacking: false,
                 reveal_verb: false,
                 caused_by: None,
+                selection_constraint: None,
             })
         );
     }
@@ -16972,6 +17087,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         }
     }
 

@@ -4681,6 +4681,7 @@ pub(crate) fn deterministic_choice(
         selectable_cards,
         keep_count,
         up_to,
+        selection_constraint,
         ..
     } = &state.waiting_for
     {
@@ -4695,8 +4696,27 @@ pub(crate) fn deterministic_choice(
         let kept: Vec<_> = if *up_to && scored.first().is_some_and(|(_, v)| *v < 0.1) {
             // Up-to selection with no valuable cards — take nothing
             Vec::new()
-        } else {
+        } else if selection_constraint.is_unconstrained() {
             scored.iter().take(*keep_count).map(|(id, _)| *id).collect()
+        } else {
+            // CR 701.20a + CR 608.2c: under a set-level keep constraint
+            // (Kaalia's one Angel / one Demon / one Dragon), add cards best-first
+            // only while the kept set stays assignable to the printed slots.
+            let mut kept = Vec::new();
+            for (id, _) in &scored {
+                if kept.len() >= *keep_count {
+                    break;
+                }
+                kept.push(*id);
+                if !engine::game::effects::search_library::selection_satisfies_constraint(
+                    state,
+                    &kept,
+                    selection_constraint,
+                ) {
+                    kept.pop();
+                }
+            }
+            kept
         };
         return Some(GameAction::SelectCards { cards: kept });
     }
@@ -17421,6 +17441,7 @@ mod tests {
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -17548,6 +17569,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             }
         });
         push("SurveilChoice", &|state| WaitingFor::SurveilChoice {
@@ -18821,6 +18843,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: engine::types::ability::DigSource::Library,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         });
         let spell_id = builder.id();
         let mut runner = scenario.build();

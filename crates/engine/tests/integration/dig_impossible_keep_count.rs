@@ -52,6 +52,7 @@ fn filtered_dig_runner() -> (engine::game::scenario::GameRunner, Vec<ObjectId>) 
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
     (runner, looked_at)
 }

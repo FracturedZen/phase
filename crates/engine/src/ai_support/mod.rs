@@ -968,6 +968,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 selectable_cards,
                 keep_count,
                 up_to,
+                selection_constraint,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
@@ -979,6 +980,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             };
             selection_mismatch(chosen, selectable_cards, exact)
                 || (*up_to && chosen.len() > *keep_count)
+                // CR 701.20a + CR 608.2c: set-level keep constraint
+                // (Kaalia's one-per-description reveal).
+                || !crate::game::effects::search_library::selection_satisfies_constraint(
+                    state,
+                    chosen,
+                    selection_constraint,
+                )
         }
         // CR 401.2 + CR 401.4 + CR 608.2c: the response is a full ARRANGEMENT
         // of the fixed remainder pile, not a subset of it — the leading

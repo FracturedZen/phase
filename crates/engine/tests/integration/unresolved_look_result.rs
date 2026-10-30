@@ -85,6 +85,7 @@ fn dig(keep: u32, count: i32, source: DigSource) -> Effect {
         enter_tapped: false,
         enters_attacking: false,
         source,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     }
 }
 

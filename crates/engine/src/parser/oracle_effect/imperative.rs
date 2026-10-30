@@ -4025,6 +4025,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {
             player,

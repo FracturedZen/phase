@@ -93,6 +93,7 @@ fn hideaway_trigger(n: u32) -> TriggerDefinition {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         },
     )
     // CR 608.2c: continuation — conceal the just-exiled card (ParentTarget).

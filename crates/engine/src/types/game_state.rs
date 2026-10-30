@@ -16962,6 +16962,15 @@ pub enum WaitingFor {
         /// attacking rather than being declared as attackers.
         #[serde(default)]
         enters_attacking: bool,
+        /// CR 701.20a + CR 608.2c: Set-level constraint on the kept cards,
+        /// carried from `Effect::Dig::selection_constraint`. `MatchEachFilter`
+        /// requires each kept card to claim a distinct printed description
+        /// (Kaalia, Zenith Seeker). Validated at submission.
+        #[serde(
+            default,
+            skip_serializing_if = "SearchSelectionConstraint::is_unconstrained"
+        )]
+        selection_constraint: SearchSelectionConstraint,
     },
     /// CR 401.2 + CR 701.20e + CR 608.2c: After a `DigChoice`'s keep-selection
     /// has been routed to its destination, a Telling Time-class dig partitions
@@ -49102,6 +49111,7 @@ mod tests {
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         }));
         variants.push(Box::new(WaitingFor::new_dig_rest_split(
             PlayerId(0),

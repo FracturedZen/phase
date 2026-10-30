@@ -658,6 +658,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         }));
         let f = detect(&[entry(c, 4)]);
         assert_eq!(f.cantrip_count, 4);
@@ -684,6 +685,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         }));
         let f = detect(&[entry(c, 4)]);
         // impulse-dig should NOT count as cantrip

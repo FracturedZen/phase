@@ -4704,6 +4704,7 @@ pub(super) fn handle_resolution_choice(
                 enter_tapped,
                 enters_attacking,
                 source_id: dig_source_id,
+                selection_constraint,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -4743,6 +4744,20 @@ pub(super) fn handle_resolution_choice(
             // at validation entirely whenever `selectable_cards` was empty, so a
             // filtered dig that matched nothing accepted arbitrary object ids.
             validate_dig_selection(&kept, &cards, &selectable_cards)?;
+            // CR 701.20a + CR 608.2c: a set-level keep constraint ("an Angel
+            // card, a Demon card, and/or a Dragon card" — Kaalia, Zenith
+            // Seeker) requires each kept card to claim a distinct printed
+            // description. Shares the search selection-constraint authority.
+            if !crate::game::effects::search_library::selection_satisfies_constraint(
+                state,
+                &kept,
+                &selection_constraint,
+            ) {
+                return Err(EngineError::InvalidAction(
+                    "dig selection does not satisfy the effect's selection constraint"
+                        .to_string(),
+                ));
+            }
 
             let mut unkept: Vec<_> = cards
                 .iter()
@@ -14112,6 +14127,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             GameAction::SelectCards { cards: vec![white] },
             &mut events,
@@ -14196,6 +14212,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,
@@ -14237,6 +14254,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,

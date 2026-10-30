@@ -6112,6 +6112,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
         source: DigSource::Library,
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
     };
 
     Some(AbilityIr {

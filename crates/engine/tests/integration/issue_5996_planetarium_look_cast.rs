@@ -513,6 +513,7 @@ fn missing_look_referent_does_not_play_inherited_unrelated_object() {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         },
         vec![TargetRef::Object(unrelated)],
         source,

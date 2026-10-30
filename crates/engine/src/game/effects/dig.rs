@@ -2,7 +2,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     DigRestOrder, DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason,
-    ResolvedAbility, TargetFilter,
+    ResolvedAbility, SearchSelectionConstraint, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -29,6 +29,7 @@ pub fn resolve(
         enter_tapped,
         enters_attacking,
         dig_source,
+        selection_constraint,
     ) = match &ability.effect {
         Effect::Dig {
             player,
@@ -45,6 +46,7 @@ pub fn resolve(
             enter_tapped,
             enters_attacking,
             source,
+            selection_constraint,
         } => {
             let resolved_count =
                 resolve_quantity_with_targets(state, count, ability).max(0) as usize;
@@ -80,6 +82,7 @@ pub fn resolve(
                 *enter_tapped,
                 *enters_attacking,
                 *source,
+                selection_constraint.clone(),
             )
         }
         _ => (
@@ -96,6 +99,7 @@ pub fn resolve(
             false,
             false,
             DigSource::Library,
+            SearchSelectionConstraint::None,
         ),
     };
 
@@ -134,6 +138,7 @@ pub fn resolve(
             rest_order,
             enter_tapped,
             enters_attacking,
+            selection_constraint,
         );
     }
 
@@ -297,6 +302,7 @@ pub fn resolve(
         source_id: Some(ability.source_id),
         enter_tapped,
         enters_attacking,
+        selection_constraint,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -336,6 +342,7 @@ fn resolve_from_prior_look(
     rest_order: DigRestOrder,
     enter_tapped: bool,
     enters_attacking: bool,
+    selection_constraint: SearchSelectionConstraint,
 ) -> Result<(), EffectError> {
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
@@ -460,6 +467,7 @@ fn resolve_from_prior_look(
         source_id: Some(ability.source_id),
         enter_tapped,
         enters_attacking,
+        selection_constraint,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -621,6 +629,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -718,6 +727,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -774,6 +784,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -830,6 +841,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -902,6 +914,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -986,6 +999,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let mut events = Vec::new();
 
@@ -1049,6 +1063,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -1123,6 +1138,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         let mut events = Vec::new();
@@ -1189,6 +1205,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         let mut events = Vec::new();
@@ -1252,6 +1269,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         let mut events = Vec::new();
@@ -1324,6 +1342,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1399,6 +1418,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1468,6 +1488,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1549,6 +1570,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -1628,6 +1650,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -1943,6 +1966,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(200),
@@ -2002,6 +2026,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(201),
@@ -2071,6 +2096,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),

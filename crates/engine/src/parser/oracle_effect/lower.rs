@@ -16929,6 +16929,7 @@ mod where_x_tests {
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 source: DigSource::Library,
+                                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
                             },
                         ),
                     )),

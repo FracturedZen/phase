@@ -671,6 +671,7 @@ fn resolve_choose_any_number(
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
         enters_attacking: false,
+        selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
     };
 
     events.push(GameEvent::EffectResolved {

@@ -741,6 +741,7 @@ fn v15_dig_choice_reorders_the_pile_for_the_non_canonical_seat() {
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
     let chosen = vec![looked_at[2], looked_at[0], looked_at[1]];
 

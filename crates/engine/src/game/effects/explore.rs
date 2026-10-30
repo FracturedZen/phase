@@ -363,6 +363,7 @@ pub(crate) fn resolve_explore_effect(
             source_id: Some(ability.source_id),
             enter_tapped: false,
             enters_attacking: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         events.push(GameEvent::EffectResolved {

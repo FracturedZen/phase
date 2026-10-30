@@ -144,6 +144,7 @@ fn dig_to_graveyard_enabler(name: &str, in_trigger: bool) -> CardFace {
         enter_tapped: false,
         enters_attacking: false,
         source: DigSource::Library,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
     let mut face = creature(name);
     if in_trigger {
@@ -656,6 +657,7 @@ fn dig_without_graveyard_rest_is_not_an_enabler() {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         },
     )];
     assert_eq!(detect(&[entry(face, 4)]).enabler_count, 0);

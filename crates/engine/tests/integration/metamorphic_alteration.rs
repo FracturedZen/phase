@@ -687,6 +687,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
         source_id: None,
         enter_tapped: false,
         enters_attacking: false,
+        selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
     };
 
     runner

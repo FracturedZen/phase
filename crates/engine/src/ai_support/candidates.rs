@@ -1376,15 +1376,36 @@ pub fn candidate_actions_broad_with_probe(
             keep_count,
             up_to,
             selectable_cards,
+            selection_constraint,
             ..
         } => {
             // Use pre-filtered selectable_cards for combination generation
             let max_keep = (*keep_count).min(selectable_cards.len());
-            if *up_to {
+            let candidates = if *up_to {
                 // Generate combinations for all valid sizes 0..=max_keep
                 bounded_select_card_candidates(*player, selectable_cards, 0..=max_keep)
             } else {
                 bounded_select_card_candidates(*player, selectable_cards, [max_keep])
+            };
+            // CR 701.20a + CR 608.2c: drop keep-sets that violate a set-level
+            // constraint (Kaalia, Zenith Seeker's one Angel / one Demon / one
+            // Dragon), mirroring the engine's DigChoice submission guard.
+            if selection_constraint.is_unconstrained() {
+                candidates
+            } else {
+                candidates
+                    .into_iter()
+                    .filter(|c| match &c.action {
+                        GameAction::SelectCards { cards } => {
+                            crate::game::effects::search_library::selection_satisfies_constraint(
+                                state,
+                                cards,
+                                selection_constraint,
+                            )
+                        }
+                        _ => true,
+                    })
+                    .collect()
             }
         }
         // CR 401.2 + CR 401.4 + CR 608.2c: the submission is a full

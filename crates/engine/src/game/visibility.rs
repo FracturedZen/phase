@@ -2360,6 +2360,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         source_id,
         enter_tapped,
         enters_attacking,
+        ref selection_constraint,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -2380,6 +2381,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 source_id,
                 enter_tapped,
                 enters_attacking,
+                selection_constraint: selection_constraint.clone(),
             };
         }
     }

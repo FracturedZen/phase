@@ -427,6 +427,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source,
