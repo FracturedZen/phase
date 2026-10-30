@@ -20206,6 +20206,10 @@ pub enum AbilityCost {
         /// None means reveal any card (self-reveal).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<TargetFilter>,
+        /// The revealed cards must share this quality (e.g., "two cards
+        /// that share a color" → `SharedQuality::Color`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_quality: Option<SharedQuality>,
     },
     /// Behold a matching object as a casting cost.
     Behold {
@@ -54011,6 +54015,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
+                shared_quality: None,
             }
         );
         let missing: AbilityCost = serde_json::from_str(r#"{"type":"Reveal"}"#).unwrap();
@@ -54019,6 +54024,7 @@ mod tests {
         let symbolic = AbilityCost::Reveal {
             count: variable_x(),
             filter: Some(red_card_filter()),
+            shared_quality: None,
         };
         let json = serde_json::to_string(&symbolic).unwrap();
         assert_eq!(
@@ -54034,6 +54040,7 @@ mod tests {
         let reveal = AbilityCost::Reveal {
             count: variable_x(),
             filter: Some(red_card_filter()),
+            shared_quality: None,
         };
         let mut visited = Vec::new();
         reveal.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
@@ -54063,6 +54070,7 @@ mod tests {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 3 },
                 filter: Some(red_card_filter()),
+                shared_quality: None,
             }
         );
 
@@ -54334,6 +54342,7 @@ mod tests {
                     AbilityCost::Reveal {
                         count: QuantityExpr::Fixed { value: 1 },
                         filter: None,
+                        shared_quality: None,
                     },
                     vec![CostCategory::Reveals],
                 ),
