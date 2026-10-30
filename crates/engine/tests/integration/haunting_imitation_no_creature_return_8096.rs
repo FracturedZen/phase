@@ -122,7 +122,11 @@ fn one_creature_revealed_copies_it_and_does_not_return() {
     let mut s = setup([false, true]);
     cast(&mut s);
     let made = tokens(&s.runner);
-    assert_eq!(made.len(), 1, "exactly one token for the one revealed creature");
+    assert_eq!(
+        made.len(),
+        1,
+        "exactly one token for the one revealed creature"
+    );
     let token = &s.runner.state().objects[&made[0]];
     assert_eq!(token.name, "Theirs Beast");
     assert_eq!(token.controller, P0);
@@ -146,6 +150,9 @@ fn every_revealed_creature_is_copied_once() {
         .map(|id| s.runner.state().objects[id].name.clone())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["Mine Beast".to_string(), "Theirs Beast".to_string()]);
+    assert_eq!(
+        names,
+        vec!["Mine Beast".to_string(), "Theirs Beast".to_string()]
+    );
     assert_eq!(s.runner.state().objects[&s.sorcery].zone, Zone::Graveyard);
 }

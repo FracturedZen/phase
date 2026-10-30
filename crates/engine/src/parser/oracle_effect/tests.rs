@@ -95315,7 +95315,10 @@ fn haunting_imitation_copies_revealed_set_and_gates_return() {
         }
         other => panic!("expected CopyTokenOf, got {other:?}"),
     }
-    assert!(copy.repeat_for.is_none(), "the copy is not a ParentTarget loop");
+    assert!(
+        copy.repeat_for.is_none(),
+        "the copy is not a ParentTarget loop"
+    );
     let bounce = copy.sub_ability.as_deref().expect("return step");
     assert!(matches!(*bounce.effect, Effect::Bounce { .. }));
     assert_eq!(
