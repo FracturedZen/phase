@@ -2169,6 +2169,7 @@ mod etb_trigger_order_mana_window;
 mod event_window_trigger_gate;
 mod magnificent_end_tapped_target_cost;
 mod put_target_count_entry_counters;
+mod rashmi_eternities_crafter_8140;
 mod risky_move_gain_control_trigger;
 mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;

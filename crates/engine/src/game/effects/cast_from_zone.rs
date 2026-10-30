@@ -2161,7 +2161,7 @@ fn freeze_resolution_filter_prop(
 // dynamic Ref (for example Variable("X") or a board aggregate) must be resolved
 // to a concrete value at application time and stored as Fixed — never re-read
 // when the permission is exercised.
-fn freeze_cast_permission_constraint(
+pub(super) fn freeze_cast_permission_constraint(
     state: &GameState,
     ability: &ResolvedAbility,
     constraint: Option<CastPermissionConstraint>,

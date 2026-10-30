@@ -16360,8 +16360,16 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                         // CR 305.9: a land is never cast.
                         return false;
                     }
+                    let frozen_constraint = cast_from_zone::freeze_cast_permission_constraint(
+                        state,
+                        ability,
+                        constraint.clone(),
+                    );
                     if !crate::game::casting::cast_permission_constraint_allows_cast(
-                        state, object, constraint, None,
+                        state,
+                        object,
+                        &frozen_constraint,
+                        None,
                     ) {
                         return false;
                     }

@@ -1282,6 +1282,34 @@ fn beseech_suffix_constraint_unchanged_after_refactor() {
     );
 }
 
+/// CR 608.2h + CR 202.3 (issue #8140): Relative mana-value constraint referencing
+/// the triggering spell on the stack (Rashmi, Eternities Crafter: "... if it's a spell with lesser mana value").
+#[test]
+fn parse_cast_permission_constraint_relative_mv() {
+    assert_eq!(
+        parse_cast_permission_constraint("if it's a spell with lesser mana value"),
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+            },
+        }),
+    );
+    assert_eq!(
+        parse_cast_permission_constraint("with equal or lesser mana value"),
+        Some(CastPermissionConstraint::ManaValue {
+            comparator: Comparator::LE,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::EventSource,
+                },
+            },
+        }),
+    );
+}
+
 /// CR 120.2a + CR 608.2h (issue #5923): Kotis, the Fangkeeper's combat-damage
 /// trigger — "exile the top X cards of their library, where X is the amount
 /// of damage dealt. You may cast any number of spells with mana value X or

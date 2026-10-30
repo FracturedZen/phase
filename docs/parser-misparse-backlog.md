@@ -4882,7 +4882,7 @@ are outside the detector's class.
 
 </details>
 
-### 27. Cross-target group / shared-quality constraint dropped  (12 cards)
+### 27. Cross-target group / shared-quality constraint dropped  (11 cards)
 
 **Signature.** A multi-target group constraint ('from a single graveyard', 'with different names', same controller, parity) is not carried; the FilterProp/SharedQuality linkage is missing.
 
@@ -4895,7 +4895,6 @@ are outside the detector's class.
 - Echoing Echo
 - Eerie Ultimatum
 - Rain of Riches
-- Rashmi, Eternities Crafter
 - Soundwave, Superior Captain
 - Thanos, the Mad Titan
 - V.A.T.S.

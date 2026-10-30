@@ -34720,7 +34720,8 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         let resolves_now = mode_resolves_now
             && alt_ability_cost.is_none()
             && duration.is_none()
-            && constraint.is_none()
+            && (constraint.is_none()
+                || !matches!(matched_anaphor, CastAnaphor::SingularExiledCard))
             && (without_paying || ctx.parent_target_is_chosen);
         let one_cast_window = resolves_now && without_paying;
         // CR 608.2g: only the one-cast window carries "one of those N cards"'s
@@ -35569,6 +35570,44 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     parse_beseech_mv_constraint(lower)
         .or_else(|| parse_with_mana_value_constraint(lower))
         .or_else(|| parse_dig_peek_suffix_mv_constraint(lower))
+        .or_else(|| parse_relative_mv_constraint(lower))
+}
+
+/// CR 608.2h + CR 202.3: Relative mana-value constraint referencing the triggering spell
+/// or referent (e.g. Rashmi, Eternities Crafter: "... if it's a spell with lesser mana value").
+fn parse_relative_mv_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    type E<'a> = OracleError<'a>;
+    let (after_anchor, _) = many_till(anychar, alt((tag::<_, _, E>("with a "), tag("with "))))
+        .parse(lower)
+        .ok()?;
+    let (after_comparator, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, E>("equal or lesser mana value")),
+        value(Comparator::GE, tag("equal or greater mana value")),
+        value(Comparator::LT, tag("lesser mana value")),
+        value(Comparator::GT, tag("greater mana value")),
+    ))
+    .parse(after_anchor)
+    .ok()?;
+    let after_comparator = after_comparator.trim_start();
+    let scope = if after_comparator.starts_with("than that spell")
+        || after_comparator.starts_with("than the triggering spell")
+    {
+        ObjectScope::EventSource
+    } else if after_comparator.starts_with("than it")
+        || after_comparator.starts_with("than that card")
+    {
+        ObjectScope::CostPaidObject
+    } else {
+        // CR 608.2h: In triggered abilities without an explicit referent ("with lesser mana value"),
+        // the point of comparison is the spell on the stack that caused the ability to trigger.
+        ObjectScope::EventSource
+    };
+    Some(CastPermissionConstraint::ManaValue {
+        comparator,
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue { scope },
+        },
+    })
 }
 
 /// Dig-peek-family constraint: `... from among them ... with mana value N or less`.
