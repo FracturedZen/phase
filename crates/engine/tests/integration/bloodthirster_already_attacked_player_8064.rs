@@ -91,7 +91,10 @@ fn to_declare_attackers(runner: &mut GameRunner) {
         }
         runner.act(GameAction::PassPriority).expect("pass");
     }
-    panic!("never reached DeclareAttackers: {:?}", runner.state().waiting_for);
+    panic!(
+        "never reached DeclareAttackers: {:?}",
+        runner.state().waiting_for
+    );
 }
 
 #[test]
