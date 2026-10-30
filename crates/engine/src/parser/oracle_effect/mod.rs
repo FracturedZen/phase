@@ -32020,6 +32020,28 @@ fn bind_player_recipient_to_possessive_actor(effect: &mut Effect, actor: &Target
     }
 }
 
+/// CR 115.1 + CR 102.2 / CR 102.3: the `GiveControl` recipient for a declared
+/// player-target subject. "target player" binds any announced player
+/// (`ControllerRef::TargetPlayer`); "target opponent" binds an announced
+/// opponent (`ControllerRef::TargetOpponent`). Both surface the companion
+/// player slot, so the recipient is chosen as a target (CR 601.2c / CR 603.3d)
+/// rather than derived at resolution. Any other declared subject (an object
+/// target, a compound filter) returns `None` and keeps its parsed filter.
+fn declared_player_target_recipient(subject_target: &TargetFilter) -> Option<TargetFilter> {
+    let controller = match subject_target {
+        TargetFilter::Player => ControllerRef::TargetPlayer,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: Some(ControllerRef::Opponent),
+            properties,
+        }) if type_filters.is_empty() && properties.is_empty() => ControllerRef::TargetOpponent,
+        _ => return None,
+    };
+    Some(TargetFilter::Typed(
+        TypedFilter::default().controller(controller),
+    ))
+}
+
 fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, original_clause: &str) {
     // Issue #6965: no bound subject and no target means there is nothing to
     // rebind — return rather than fabricate a filter.
@@ -32216,9 +32238,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
                 TargetFilter::Controller | TargetFilter::SelfRef
             ) =>
         {
+            // CR 115.1 + CR 601.2c + CR 603.3d: a DECLARED player subject
+            // ("target opponent gains control of …" — Harmless Offering, Iroh,
+            // Tea Master; "target player gains control of …" — Donate) is a
+            // target announced with the rest of the ability's targets, so the
+            // recipient binds to that announced player through the companion
+            // player slot (`ControllerRef::TargetPlayer` / `TargetOpponent`).
+            // An untargeted subject ("an opponent of your choice" — Khârn)
+            // carries no declared target and keeps its filter for the CR
+            // 608.2d resolution-time recipient path.
+            let recipient = subject
+                .target
+                .as_ref()
+                .and_then(declared_player_target_recipient)
+                .unwrap_or(subject_filter);
             *effect = Effect::GiveControl {
                 target: target.clone(),
-                recipient: subject_filter,
+                recipient,
             };
         }
         // Object-targeting effects: inject subject filter only when the sentinel

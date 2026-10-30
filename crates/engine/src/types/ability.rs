@@ -27267,7 +27267,8 @@ pub(crate) fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 }
 
 /// Shared walker behind the target-player / target-opponent companion-slot
-/// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
+/// detectors. Returns true if any filter seam (`Attach` operands, a `GiveControl`
+/// recipient, a non-targeted
 /// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
 /// mass-placement `target`) satisfies `pred`.
 pub(crate) fn effect_bound_filter_matches(
@@ -27302,6 +27303,15 @@ pub(crate) fn effect_bound_filter_matches(
     } = effect
     {
         if pred(filter) {
+            return true;
+        }
+    }
+    // CR 115.1 + CR 613.1b: a `GiveControl` recipient bound to a declared
+    // player target ("target opponent gains control of target permanent you
+    // control") is the second filter on the node; `target_filter()` names only
+    // the object being handed over.
+    if let Effect::GiveControl { recipient, .. } = effect {
+        if pred(recipient) {
             return true;
         }
     }

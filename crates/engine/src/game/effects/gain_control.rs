@@ -419,6 +419,16 @@ fn unique_recipient_from_filter(
             .ok_or_else(|| EffectError::MissingParam("GiveControl scoped recipient".to_string()));
     }
 
+    // CR 115.1 + CR 608.2b: a recipient bound to a DECLARED player target
+    // ("target opponent gains control of …") names only the announced player.
+    // When that player is absent from `ability.targets` (an illegal target
+    // removed at resolution), no other player may stand in for it.
+    if crate::types::ability::filter_references_target_player(filter) {
+        return Err(EffectError::MissingParam(
+            "GiveControl declared recipient".to_string(),
+        ));
+    }
+
     // CR 608.2c + CR 608.2d: a resolution-time chosen player ("that opponent"
     // after "choose … an opponent") is read from this resolution's chosen
     // players. The generic scan below cannot resolve it: the stateless player
