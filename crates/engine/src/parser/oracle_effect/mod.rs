@@ -26177,6 +26177,41 @@ fn has_anaphoric_reference(lower: &str) -> bool {
     false
 }
 
+/// CR 608.2c: the clause contains a bare object pronoun ("it", "him", "her",
+/// "them"), as opposed to a type demonstrative ("that creature").
+fn has_bare_object_pronoun_reference(lower: &str) -> bool {
+    const PRONOUNS: [&str; 8] = [
+        "it",
+        "itself",
+        "him",
+        "himself",
+        "her",
+        "herself",
+        "them",
+        "themselves",
+    ];
+    debug_assert!(
+        PRONOUNS
+            .iter()
+            .all(|pronoun| is_bare_object_pronoun(pronoun)),
+        "PRONOUNS must stay in sync with is_bare_object_pronoun"
+    );
+    let mut remaining = lower;
+    while !remaining.is_empty() {
+        if PRONOUNS
+            .iter()
+            .any(|word| super::oracle_target::parse_word_bounded(remaining, word).is_ok())
+        {
+            return true;
+        }
+        remaining = match remaining.find(' ') {
+            Some(index) => remaining[index + 1..].trim_start(),
+            None => "",
+        };
+    }
+    false
+}
+
 /// CR 608.2c: "that player" / "the player" after an earlier explicit player
 /// target binds to that chosen player, not to the triggering-event player and
 /// not to the controller of an object target.
@@ -26524,6 +26559,25 @@ fn parsed_clause_targets_self_ref(clause: &ParsedEffectClause) -> bool {
             .sub_ability
             .as_deref()
             .is_some_and(ability_targets_self_ref)
+}
+
+fn ability_introduces_typed_object(ability: &AbilityDefinition) -> bool {
+    has_typed_target_widened(ability.effect.as_ref())
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_introduces_typed_object)
+}
+
+/// CR 608.2c: the clause also chooses an object other than the source, so a
+/// later anaphor can name that chosen object (Trygon Prime: a counter on ~
+/// and on another target creature, then "That creature").
+fn parsed_clause_introduces_typed_object(clause: &ParsedEffectClause) -> bool {
+    has_typed_target_widened(&clause.effect)
+        || clause
+            .sub_ability
+            .as_deref()
+            .is_some_and(ability_introduces_typed_object)
 }
 
 /// `reference` is consulted only when a player anaphor is actually rewritten.
@@ -48079,10 +48133,45 @@ fn parse_effect_chain_ir_body(
                 ..
             }
         );
+        // CR 608.2c + CR 201.5: a later bare pronoun ("It gains flying") after
+        // an instruction that named only this object ("put a +1/+1 counter on
+        // ~") refers to that object. A spell-cast condition also names the
+        // spell; the named instruction is the nearer antecedent, so the grant
+        // resolves on the source (Estinien Varlineau, #8161). A type
+        // demonstrative ("That creature") keeps the declared-target binding,
+        // and so does a bare pronoun whose previous instruction also chose
+        // another object (Trygon Prime). A spell pronoun with no self-naming
+        // instruction ("copy it", "put it on the bottom") stays on the spell.
+        let self_named_grant_anaphor = has_bare_object_pronoun_reference(&recipient_anaphor_lower)
+            && matches!(
+                &clause.effect,
+                Effect::GenericEffect {
+                    target,
+                    static_abilities,
+                    ..
+                } if target.as_ref().is_some_and(|filter| {
+                    matches!(
+                        filter,
+                        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+                    )
+                }) || static_abilities.iter().any(|static_def| {
+                    static_def.affected.as_ref().is_some_and(|filter| {
+                        matches!(
+                            filter,
+                            TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+                        )
+                    })
+                })
+            )
+            && builder.clauses().last().is_some_and(|prev| {
+                parsed_clause_targets_self_ref(&prev.parsed)
+                    && !parsed_clause_introduces_typed_object(&prev.parsed)
+            });
         if (typed_trigger_subject
             || exile_then_return_transformed
             || attach_anaphor_after_self_ref_transform
-            || transform_anaphor_after_self_ref_clause)
+            || transform_anaphor_after_self_ref_clause
+            || self_named_grant_anaphor)
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()

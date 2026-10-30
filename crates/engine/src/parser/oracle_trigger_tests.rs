@@ -12004,6 +12004,82 @@ fn spell_cast_trigger_created_token_it_keeps_last_created_binding() {
     assert_eq!(target, Some(TargetFilter::LastCreated));
 }
 
+/// CR 608.2c + CR 201.5: the counter instruction names this object, so the
+/// following "It gains" refers to that object. The spell named by the cast
+/// condition is the earlier antecedent.
+fn assert_self_counter_then_self_keyword(trigger: &TriggerDefinition, keyword: &Keyword) {
+    assert_eq!(trigger.mode, TriggerMode::SpellCast);
+    let execute = trigger.execute.as_deref().expect("trigger effect");
+    assert_no_unimplemented(execute);
+    let effects = trigger_chain_effects(trigger);
+    let counter_at = effects.iter().position(|effect| {
+        matches!(
+            effect,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Plus1Plus1,
+                ..
+            }
+        )
+    });
+    let Some(counter_at) = counter_at else {
+        panic!("expected a +1/+1 counter on the named source, got {effects:?}");
+    };
+    let Some(grant) = effects.get(counter_at + 1).copied() else {
+        panic!("expected the keyword grant immediately after the counter, got {effects:?}");
+    };
+    let Effect::GenericEffect {
+        target,
+        static_abilities,
+        duration,
+        ..
+    } = grant
+    else {
+        panic!("expected the keyword grant immediately after the counter, got {grant:?}");
+    };
+    // The spell-cast pronoun often lives only on `affected`. `target: None`
+    // still resolves on the source once `affected` is `SelfRef`.
+    assert!(
+        matches!(target, &None | &Some(TargetFilter::SelfRef)),
+        "grant target must name the source when set, got {target:?}"
+    );
+    assert_eq!(duration, &Some(Duration::UntilEndOfTurn));
+    assert!(
+        static_abilities.iter().any(|static_def| {
+            static_def.affected == Some(TargetFilter::SelfRef)
+                && static_def.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::AddKeyword { keyword: granted }
+                            if granted == keyword
+                    )
+                })
+        }),
+        "grant must add {keyword:?} to the source, got {static_abilities:?}"
+    );
+}
+
+/// Estinien Varlineau (#8161). The printed name normalizes to this object.
+#[test]
+fn spell_cast_self_named_counter_it_gains_binds_source() {
+    let trigger = parse_trigger_line(
+        "Whenever you cast a noncreature spell, put a +1/+1 counter on Estinien Varlineau. It gains flying until end of turn.",
+        "Estinien Varlineau",
+    );
+    assert_self_counter_then_self_keyword(&trigger, &Keyword::Flying);
+}
+
+/// The same binding for any spell-cast trigger that names the source with `~`
+/// before the pronoun, independent of the printed card name.
+#[test]
+fn spell_cast_tilde_counter_it_gains_binds_source() {
+    let trigger = parse_trigger_line(
+        "Whenever you cast a spell, put a +1/+1 counter on ~. It gains trample until end of turn.",
+        "Test Self Named Grant",
+    );
+    assert_self_counter_then_self_keyword(&trigger, &Keyword::Trample);
+}
+
 /// CR 601.2i + CR 603.2: A self-cast trigger phrased as
 /// "When you cast <CARDNAME>" must produce the same `TriggerMode::SpellCast`
 /// shape (with `valid_card = SelfRef`) as the canonical "When you cast this
