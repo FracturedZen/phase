@@ -38,9 +38,9 @@ fn drive(runner: &mut GameRunner) -> usize {
                 accepted += 1;
                 runner.act(GameAction::DecideOptionalEffect { accept: true })
             }
-            WaitingFor::ManifestDreadChoice { cards, .. } => {
-                runner.act(GameAction::SelectCards { cards: vec![cards[0]] })
-            }
+            WaitingFor::ManifestDreadChoice { cards, .. } => runner.act(GameAction::SelectCards {
+                cards: vec![cards[0]],
+            }),
             other => panic!("unexpected prompt: {other:?}"),
         };
         result.expect("scripted answer is legal");
@@ -89,7 +89,8 @@ fn add_onslaught(scenario: &mut GameScenario) -> ObjectId {
     for i in 0..8 {
         scenario.add_card_to_library_top(P0, &format!("Library {i}"));
     }
-    let mut b = scenario.add_spell_to_hand_from_oracle(P0, "Valgavoth's Onslaught", false, ONSLAUGHT);
+    let mut b =
+        scenario.add_spell_to_hand_from_oracle(P0, "Valgavoth's Onslaught", false, ONSLAUGHT);
     b.with_mana_cost(ManaCost::Cost {
         shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Green],
         generic: 0,
