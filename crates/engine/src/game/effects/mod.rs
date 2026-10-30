@@ -12210,7 +12210,7 @@ fn extract_shares_quality_props(
 /// solely by `ControllerRef::Opponent`; `target players` uses
 /// `TargetFilter::Player`. All three select players at announcement and need
 /// the same per-target resolution fan-out.
-fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
+pub(crate) fn is_multi_target_player_filter(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player | TargetFilter::Opponent => true,
         TargetFilter::Typed(typed) => {

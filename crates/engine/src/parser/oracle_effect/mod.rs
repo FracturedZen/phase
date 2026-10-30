@@ -42936,6 +42936,50 @@ pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
     fold_speed_floor_sentences(def);
     rewrite_choose_tracked_set_exclusion(def);
     fold_additional_combat_attacker_restriction(def);
+    bind_multi_target_player_continuation_sacrifice(def);
+}
+
+/// CR 115.1d + CR 608.2c + CR 701.21a: "Any number of target players each lose
+/// 2 life and sacrifice a creature of their choice" (Priest of Forgotten Gods).
+/// The conjoined "sacrifice …" predicate shares the "each target player"
+/// subject, but the conjunct is lowered as a subjectless imperative whose
+/// `Typed` filter carries no controller — which `resolve_sacrifice_scope`
+/// reads as the ability's controller, so the caster sacrificed instead of each
+/// targeted player.
+///
+/// The runtime per-target fan-out (`resolves_for_each_target_player` +
+/// `split_multi_target_player_chain`) replays exactly the `ContinuationStep`
+/// links under each chosen player, with that player as the inherited target.
+/// Mirror that boundary here: a controller-less `Sacrifice` reached through
+/// `ContinuationStep` links from a multi-target player node is bound to
+/// `ParentTargetController`, the anaphor that reads the inherited
+/// `TargetRef::Player` without announcing a second (companion) target. A
+/// sentence boundary (`SequentialSibling`, e.g. "You add {B}{B}") ends the
+/// shared subject and stays the controller's.
+fn bind_multi_target_player_continuation_sacrifice(def: &mut AbilityDefinition) {
+    let mut current = Some(def);
+    while let Some(node) = current {
+        let fans_out = node.multi_target.is_some()
+            && node
+                .effect
+                .target_filter()
+                .is_some_and(crate::game::effects::is_multi_target_player_filter);
+        if fans_out {
+            let mut next = node.sub_ability.as_deref_mut();
+            while let Some(sub) = next {
+                if sub.sub_link != SubAbilityLink::ContinuationStep {
+                    break;
+                }
+                if let Effect::Sacrifice { target, .. } = sub.effect.as_mut() {
+                    if matches!(target, TargetFilter::Typed(tf) if tf.controller.is_none()) {
+                        force_controller(target, ControllerRef::ParentTargetController);
+                    }
+                }
+                next = sub.sub_ability.as_deref_mut();
+            }
+        }
+        current = node.sub_ability.as_deref_mut();
+    }
 }
 
 fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text: &str) {

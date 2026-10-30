@@ -1392,6 +1392,7 @@ mod predators_hour_quoted_duration;
 mod prepared_effect_condition_exact_source;
 mod prepared_linked_copy_sba;
 mod prepared_state_serde;
+mod priest_of_forgotten_gods_target_players_sacrifice_3669;
 mod primo_unbounded_fractal_counters;
 mod printed_ability_order;
 mod printed_alternative_cost_from_exile;
