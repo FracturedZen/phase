@@ -99,7 +99,10 @@ fn choose_opponent_at_random_spell_that_player_is_chosen() {
         &[],
     );
     let spell = &parsed.abilities[0];
-    let damage = spell.sub_ability.as_ref().expect("damage follows the choice");
+    let damage = spell
+        .sub_ability
+        .as_ref()
+        .expect("damage follows the choice");
     match damage.effect.as_ref() {
         Effect::DealDamage { target, .. } => assert_eq!(target, &chosen_player_zero()),
         other => panic!("expected DealDamage, got {other:?}"),
@@ -181,8 +184,16 @@ fn chosen_opponent_declines_and_takes_damage() {
     runner.advance_until_stack_empty();
 
     assert_eq!(life(&runner, payer), 16, "chosen opponent takes 4 damage");
-    assert_eq!(life(&runner, P0), 20, "the controller is never the recipient");
-    assert_eq!(life(&runner, other), 20, "the unchosen opponent is untouched");
+    assert_eq!(
+        life(&runner, P0),
+        20,
+        "the controller is never the recipient"
+    );
+    assert_eq!(
+        life(&runner, other),
+        20,
+        "the unchosen opponent is untouched"
+    );
 }
 
 /// CR 118.12a: paying the unless cost (sacrificing a nontoken creature the
