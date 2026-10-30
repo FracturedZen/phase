@@ -1674,13 +1674,28 @@ mod tests {
     #[test]
     fn parse_cli_rejects_garbled_or_missing_flag_values() {
         for (args, message) in [
-            (&["--seed", "abc"][..], "error: --seed \"abc\" must be a non-negative integer"),
+            (
+                &["--seed", "abc"][..],
+                "error: --seed \"abc\" must be a non-negative integer",
+            ),
             (&["--seed"][..], "error: --seed requires a seed"),
-            (&["--seed", "--difficulty", "Hard"][..], "error: --seed requires a seed"),
-            (&["--difficulty"][..], "error: --difficulty requires a difficulty label"),
-            (&["--action-cap"][..], "error: --action-cap requires an action count"),
+            (
+                &["--seed", "--difficulty", "Hard"][..],
+                "error: --seed requires a seed",
+            ),
+            (
+                &["--difficulty"][..],
+                "error: --difficulty requires a difficulty label",
+            ),
+            (
+                &["--action-cap"][..],
+                "error: --action-cap requires an action count",
+            ),
             (&["--feed"][..], "error: --feed requires a feed path"),
-            (&["--action-cap", "0"][..], "error: --action-cap \"0\" must be a positive integer"),
+            (
+                &["--action-cap", "0"][..],
+                "error: --action-cap \"0\" must be a positive integer",
+            ),
         ] {
             assert_eq!(cli(args).err().as_deref(), Some(message), "args: {args:?}");
         }
@@ -1690,15 +1705,30 @@ mod tests {
     #[test]
     fn parse_cli_difficulty_errors_name_the_typed_flag() {
         let table = cli(&["--difficulty", "Bogus"]).err().expect("rejected");
-        assert!(table.starts_with("error: unrecognized --difficulty \"Bogus\""), "{table}");
+        assert!(
+            table.starts_with("error: unrecognized --difficulty \"Bogus\""),
+            "{table}"
+        );
         let seat = cli(&["--difficulty-p2", "Bogus"]).err().expect("rejected");
-        assert!(seat.starts_with("error: unrecognized --difficulty-p2 \"Bogus\""), "{seat}");
+        assert!(
+            seat.starts_with("error: unrecognized --difficulty-p2 \"Bogus\""),
+            "{seat}"
+        );
     }
 
     #[test]
     fn parse_cli_accepts_well_formed_flag_values() {
-        let parsed = cli(&["--seed", "7", "--difficulty", "Hard", "--action-cap", "9", "--feed", "f.json"])
-            .expect("well-formed flags parse");
+        let parsed = cli(&[
+            "--seed",
+            "7",
+            "--difficulty",
+            "Hard",
+            "--action-cap",
+            "9",
+            "--feed",
+            "f.json",
+        ])
+        .expect("well-formed flags parse");
         assert_eq!(parsed.seed, 7);
         assert_eq!(parsed.action_cap, 9);
         assert_eq!(parsed.feed, "f.json");
