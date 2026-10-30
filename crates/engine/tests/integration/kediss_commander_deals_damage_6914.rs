@@ -7,8 +7,8 @@
 //! Source identity is observable through lifelink (CR 702.15b): a lifelinking
 //! commander must gain its controller life for the redirected damage too.
 
-use engine::types::ability::{DamageSource, Effect, PlayerFilter};
 use engine::game::combat::AttackTarget;
+use engine::types::ability::{DamageSource, Effect, PlayerFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
