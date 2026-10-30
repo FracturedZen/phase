@@ -609,6 +609,7 @@ mod invasion_of_alara_8750;
 mod investigate_that_many_times;
 mod invoke_calamity_free_cast;
 mod ir_spell_node_readers;
+mod ironscale_hydra_combat_prevention;
 mod ironsoul_enforcer_commander_attacks_alone;
 mod issue_1005_suffer_the_past;
 mod issue_1007_fractal_harness_attach;
