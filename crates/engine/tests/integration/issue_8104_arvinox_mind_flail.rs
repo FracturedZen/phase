@@ -11,9 +11,9 @@
 //!
 //! https://github.com/phase-rs/phase/issues/8104
 
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::game::layers::evaluate_layers;
 use engine::types::ability::{
     CastingPermission, ContinuousModification, Effect, LibraryPosition, ManaSpendPermission,
     StaticCondition, TargetFilter, TypeFilter,
@@ -83,11 +83,7 @@ fn arvinox_parses_static_exile_bottom_and_typed_cast_grant() {
             face_down,
             ..
         } => {
-            assert_eq!(
-                *position,
-                LibraryPosition::Bottom,
-                "exiles the BOTTOM card"
-            );
+            assert_eq!(*position, LibraryPosition::Bottom, "exiles the BOTTOM card");
             assert!(*face_down);
         }
         other => panic!("expected ExileTop, got {other:?}"),
@@ -209,7 +205,10 @@ fn arvinox_exiles_bottom_card_of_each_opponent_face_down_with_cast_grant() {
                 _ => None,
             })
             .expect("the exiled card carries Arvinox's cast permission");
-        assert_eq!(grant.0, P0, "granted to Arvinox's controller, not the opponent");
+        assert_eq!(
+            grant.0, P0,
+            "granted to Arvinox's controller, not the opponent"
+        );
         assert!(grant.1.is_some(), "permanent spells only");
         assert_eq!(grant.2, Some(ManaSpendPermission::AnyColor));
     }
