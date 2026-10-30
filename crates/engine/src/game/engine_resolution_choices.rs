@@ -2574,6 +2574,9 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            // CR 603.2 + CR 603.3b: the first event this choice produces; see the
+            // paused-continuation collection below.
+            let events_before_choice = events.len();
             let manifest_id = selected_cards[0];
             let graveyard_cards: Vec<_> = cards
                 .iter()
@@ -2679,6 +2682,25 @@ pub(super) fn handle_resolution_choice(
                 crate::game::zone_pipeline::BatchMoveResult::Done => {
                     // `move_objects_simultaneously_then` already ran the
                     // completion (reveal-marker cleanup + `finish_with_continuation`).
+                    //
+                    // CR 603.2 + CR 603.3b: the continuation can pause again
+                    // before any player would receive priority — "Manifest dread
+                    // X times, then put X +1/+1 counters on each of those
+                    // creatures" (Valgavoth's Onslaught) runs this iteration's
+                    // counter placement and then opens the next iteration's
+                    // `ManifestDreadChoice`. The post-action pipeline scans only
+                    // a Priority-settled action, so without this the events this
+                    // choice produced (the manifested creature's entry, its
+                    // counters) would never be checked for triggers. Abilities
+                    // trigger when their event occurs and wait for the next
+                    // priority window, so park them in `deferred_triggers` now.
+                    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        defer_observer_triggers_for_paused_choice(
+                            state,
+                            events,
+                            events_before_choice,
+                        );
+                    }
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
                 crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {

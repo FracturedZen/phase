@@ -1925,6 +1925,7 @@ mod najeela_extra_combat_grant_2898;
 mod no_top_level_test_binaries;
 mod oblivions_hunger_conditional_draw;
 mod offer_side_auto_payment;
+mod omarthis_per_creature_counter_trigger_8131;
 mod omenpath_journey_random_exiled_with;
 mod omnath_unspent_green_mana_2887;
 mod one_ring_burden_upkeep_lethal;
