@@ -1193,10 +1193,17 @@ fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilte
 /// `HasSupertype` property as ordinary target phrases.
 pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
     let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
-    let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
+    // CR 702.5a + CR 205.2a: a negated card type ("nonland permanent") and a
+    // negated subtype ("non-Wall creature") are the same adjective slot. The
+    // positive head stays the leg; the negation is conjoined onto it.
+    let (input, excluded) = opt(alt((
+        parse_enchant_negated_subtype_prefix,
+        parse_enchant_negated_core_type_prefix,
+    )))
+    .parse(input)?;
     let (input, type_filter) = parse_enchant_type_leg(input)?;
     let mut typed = TypedFilter::new(type_filter);
-    if let Some(excluded) = excluded_subtype {
+    if let Some(excluded) = excluded {
         typed = typed.with_type(excluded);
     }
     let properties = supertype
@@ -1214,6 +1221,32 @@ fn parse_enchant_negated_subtype_prefix(input: &str) -> OracleResult<'_, TypeFil
         terminated(preceded(parse_non_prefix, parse_type_filter_word), space1),
         |type_filter| match type_filter {
             subtype @ TypeFilter::Subtype(_) => Some(TypeFilter::Non(Box::new(subtype))),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
+/// CR 702.5a + CR 205.2a: A negated card-type adjective restricts its owning
+/// Enchant leg ("Enchant nonland permanent", "Enchant nonartifact
+/// enchantment"). The positive head is parsed next and kept; the negation is
+/// conjoined, the same shape `parse_type_phrase_folding` gives "nonland
+/// permanent". Without this, the line is not an enchant ability, so CR 303.4f
+/// never offers a host and CR 704.5m puts the unattached Aura into its owner's
+/// graveyard.
+fn parse_enchant_negated_core_type_prefix(input: &str) -> OracleResult<'_, TypeFilter> {
+    map_opt(
+        terminated(preceded(parse_non_prefix, parse_type_filter_word), space1),
+        |type_filter| match type_filter {
+            core @ (TypeFilter::Creature
+            | TypeFilter::Land
+            | TypeFilter::Artifact
+            | TypeFilter::Enchantment
+            | TypeFilter::Instant
+            | TypeFilter::Sorcery
+            | TypeFilter::Planeswalker
+            | TypeFilter::Battle
+            | TypeFilter::Kindred) => Some(TypeFilter::Non(Box::new(core))),
             _ => None,
         },
     )

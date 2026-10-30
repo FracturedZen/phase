@@ -1898,6 +1898,7 @@ mod mass_unsuspect_701_60a;
 mod memory_vessel_std_s25;
 mod menace_requires_two_blockers;
 mod minimus_containment_treasure_grant;
+mod minimus_containment_zur_enchant;
 mod modal_enters_becomes_choice;
 mod modal_mode_labels;
 mod modal_no_repeat_resets_on_zone_change;

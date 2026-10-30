@@ -210,7 +210,6 @@ mod tests {
             "non-Aurora enchantment",
             "non- enchantment",
             "non-aura",
-            "nonartifact enchantment",
             "non-aura enchantment if you control a creature",
             "artifact or non-aura",
             "artifact non-aura enchantment",
@@ -223,6 +222,39 @@ mod tests {
                 "must decline: {phrase}"
             );
         }
+    }
+
+    /// CR 702.5a + CR 205.2a: a negated card type stays on its positive head.
+    /// "nonland permanent" and "nonartifact enchantment" are one adjective class.
+    #[test]
+    fn enchant_negated_core_type_keeps_the_positive_head() {
+        let (rest, filter) =
+            parse_enchant_target_full("nonland permanent").expect("nonland permanent must parse");
+        assert!(rest.is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed enchant leg");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ]
+        );
+
+        let (rest, filter) = parse_enchant_target_full("nonartifact enchantment")
+            .expect("nonartifact enchantment must parse");
+        assert!(rest.is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed enchant leg");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![
+                TypeFilter::Enchantment,
+                TypeFilter::Non(Box::new(TypeFilter::Artifact)),
+            ]
+        );
     }
 
     /// CR 702.5a + CR 702.9: Trapped in the Tower — "Enchant creature without flying".

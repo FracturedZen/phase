@@ -3253,6 +3253,38 @@ mod tests {
         }
     }
 
+    /// CR 702.5a + CR 205.2a + CR 303.4f: Minimus Containment's printed enchant
+    /// line is a negated card type, not a subtype. Full-card ingestion must
+    /// keep `Keyword::Enchant` so a later battlefield entry can offer hosts.
+    #[test]
+    fn enchant_negated_core_type_full_oracle_shape() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Enchant nonland permanent\nEnchanted permanent is a Treasure artifact with \"{T}, Sacrifice this artifact: Add one mana of any color,\" and it loses all other abilities. (If it was a creature, it's no longer a creature.)",
+            "Minimus Containment",
+            &["enchant".into()],
+            &["Enchantment".into()],
+            &["Aura".into()],
+        );
+        let filter = parsed
+            .extracted_keywords
+            .iter()
+            .find_map(|keyword| match keyword {
+                Keyword::Enchant(filter) => Some(filter),
+                _ => None,
+            })
+            .expect("the printed Enchant line must be retained");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed enchant restriction, got {filter:?}");
+        };
+        assert_eq!(
+            typed.type_filters,
+            vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Land)),
+            ]
+        );
+    }
+
     #[test]
     fn parse_keyword_line_core_emerge_from_artifact_preserves_quality() {
         let (keyword, remainder) = parse_keyword_line_core("emerge from artifact {5}{b}{b}")
