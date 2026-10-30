@@ -20787,6 +20787,45 @@ fn placement_noun_phrase_is_targeted(input: &str) -> bool {
     }
 }
 
+/// CR 701.20b + CR 608.2c + CR 401.4: "put all revealed cards not cast this way
+/// on the bottom of your library in a random order." The revealed cards are
+/// still in the library. `Some(true)` randomizes that bottom placement;
+/// `Some(false)` is the CR 401.4 owner arrangement ("in any order", or no
+/// order phrase).
+fn parse_revealed_cards_not_cast_library_bottom(input: &str) -> Option<bool> {
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("then "))
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("puts "), tag("put ")))
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("all revealed cards that weren't cast this way"),
+        tag("all revealed cards that weren\u{2019}t cast this way"),
+        tag("all revealed cards not cast this way"),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" on the bottom of ")
+        .parse(input)
+        .ok()?;
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("your library"),
+        tag("their library"),
+        tag("its owner's library"),
+    ))
+    .parse(input)
+    .ok()?;
+    let (input, random_order) = opt(alt((
+        value(true, tag::<_, _, OracleError<'_>>(" in a random order")),
+        value(false, tag(" in any order")),
+    )))
+    .parse(input)
+    .ok()?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(input).ok()?;
+    input.is_empty().then_some(random_order.unwrap_or(false))
+}
+
 fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
     let (input, _) = tag::<_, _, OracleError<'_>>("put the exiled cards")
         .parse(input)
@@ -20886,6 +20925,27 @@ fn refine_put_at_library_position(
     //   - "put two cards from your hand on top of your library in any order"
     //     (Cavalier of Gales / Brainstorm class — count = N, filter = Card+InZone:Hand)
     let mut placement_target_set = None;
+    // CR 701.20b + CR 608.2c: the bottom step names every revealed card that
+    // was not cast. It is a library pile, still in the library, not one card
+    // and not an exiled-card cleanup.
+    if let Some(random_order) = parse_revealed_cards_not_cast_library_bottom(&text.to_lowercase()) {
+        if matches!(clause.effect, Effect::PutAtLibraryPosition { .. }) {
+            clause.effect = Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                library_shuffle: MassLibraryShuffleMode::default(),
+                random_order,
+            };
+            return placement_target_set;
+        }
+    }
     if let Effect::PutAtLibraryPosition {
         ref mut target,
         ref mut count,
@@ -43322,6 +43382,7 @@ fn parse_exile_object_and_top_face_down_pile_ir(
 }
 
 pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
+    sequence::patch_reveal_until_singular_free_cast(def);
     sequence::patch_reveal_until_for_library_category_exile(def);
     sequence::promote_labeled_card_predicate_choices_for_chosen_kind(def);
     sequence::rewrite_reorder_dig_backref_reveal_to_top(def);

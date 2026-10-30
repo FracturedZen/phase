@@ -857,6 +857,85 @@ fn append_definition_to_sub_chain(ability: &mut AbilityDefinition, mut next: Abi
     }
 }
 
+/// CR 701.20b + CR 608.2c + CR 608.2g + CR 118.9 + CR 601.2a: A reveal-until
+/// whose next instruction is "you may cast that card without paying its mana
+/// cost", followed by putting the revealed cards that were not cast on the
+/// bottom of the library, leaves every revealed card in the library. Revealing
+/// does not move a card. The cast, as the ability resolves, moves that one
+/// card from the library onto the stack. The bottom step is the same
+/// instruction whether the cast is taken or declined.
+pub(super) fn patch_reveal_until_singular_free_cast(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_mut() {
+        patch_reveal_until_singular_free_cast(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        patch_reveal_until_singular_free_cast(else_ability);
+    }
+    let qualifies = def.sub_ability.as_deref().is_some_and(|cast| {
+        is_singular_resolution_free_cast(cast)
+            && cast
+                .sub_ability
+                .as_deref()
+                .is_some_and(is_revealed_not_cast_library_bottom)
+    });
+    if !qualifies {
+        return;
+    }
+    if let Effect::RevealUntil {
+        matched_disposition,
+        kept_destination,
+        rest_destination,
+        ..
+    } = def.effect.as_mut()
+    {
+        if matches!(*matched_disposition, RevealUntilDisposition::KeepEach)
+            && *kept_destination == Zone::Hand
+        {
+            *matched_disposition = RevealUntilDisposition::RevealOnly;
+            *kept_destination = Zone::Library;
+            *rest_destination = Zone::Library;
+        }
+    } else {
+        return;
+    }
+    let Some(cast) = def.sub_ability.as_mut() else {
+        return;
+    };
+    if cast.else_ability.is_none() {
+        cast.else_ability = cast.sub_ability.clone();
+    }
+}
+
+fn is_singular_resolution_free_cast(def: &AbilityDefinition) -> bool {
+    def.optional
+        && matches!(
+            def.effect.as_ref(),
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: crate::types::ability::CardPlayMode::Cast,
+                driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+                duration: None,
+                alt_ability_cost: None,
+                constraint: None,
+                ..
+            }
+        )
+}
+
+fn is_revealed_not_cast_library_bottom(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Library),
+            destination: Zone::Library,
+            target: TargetFilter::LastRevealed,
+            library_position: Some(LibraryPosition::Bottom),
+            ..
+        }
+    )
+}
+
 /// CR 701.20b + CR 608.2c: When a `RevealUntil` chains into library-scoped
 /// `ForEachCategoryExile` (Sanar's Vivid), the reveal step must not route hits
 /// to hand — the per-color exile reads from among cards still in the library.

@@ -11079,6 +11079,21 @@ fn inject_last_revealed_targets(
         // Clone Shell). Composed filters remain intact so their concrete
         // restrictions are still evaluated.
         if matches!(filter, TargetFilter::ParentTarget) {
+            // CR 608.2c + CR 701.20a: after a reveal-until, "that card" is the
+            // one card the until-loop stopped on. The other revealed cards are
+            // a different set ("all revealed cards", "the rest"). A reveal that
+            // stopped on no such card has no singular referent.
+            if let Effect::RevealUntil {
+                filter: until_filter,
+                ..
+            } = &parent_ability.effect
+            {
+                let hits =
+                    crate::game::filter::last_revealed_ids_matching(state, until_filter, &ctx);
+                if hits.len() <= 1 {
+                    return hits.into_iter().map(TargetRef::Object).collect();
+                }
+            }
             return crate::game::filter::last_revealed_ids_matching(
                 state,
                 &TargetFilter::LastRevealed,
