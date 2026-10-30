@@ -10389,6 +10389,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                             Effect::DamageEachPlayer {
                                 amount: qty,
                                 player_filter,
+                                damage_source: None,
                             },
                             "",
                         ));
@@ -10625,6 +10626,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 Effect::DamageEachPlayer {
                     amount,
                     player_filter,
+                    damage_source: None,
                 },
                 "",
             ));
@@ -10634,6 +10636,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 Effect::DamageEachPlayer {
                     amount,
                     player_filter,
+                    damage_source: None,
                 },
                 "",
             ));
@@ -10655,6 +10658,7 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                 Effect::DamageEachPlayer {
                     amount,
                     player_filter,
+                    damage_source: None,
                 },
                 rem_full,
             ));

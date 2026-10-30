@@ -2444,11 +2444,12 @@ pub fn resolve_each_player(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount_expr, player_filter) = match &ability.effect {
+    let (amount_expr, player_filter, damage_source) = match &ability.effect {
         Effect::DamageEachPlayer {
             amount,
             player_filter,
-        } => (amount, player_filter.clone()),
+            damage_source,
+        } => (amount, player_filter.clone(), *damage_source),
         _ => {
             return Err(EffectError::MissingParam(
                 "DamageEachPlayer amount".to_string(),
@@ -2456,8 +2457,16 @@ pub fn resolve_each_player(
         }
     };
 
-    let ctx = DamageContext::from_source(state, ability.source_id)
-        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+    // CR 120.1 + CR 603.7c: "it deals that much damage to each other opponent"
+    // (Kediss, Emberclaw Familiar) — the triggering commander, not the trigger's
+    // source, deals the damage. Shares `DealDamage`'s single-source binding.
+    // `EachTarget` is only produced for the single-recipient `DealDamage`
+    // shape, so it keeps the ability-source attribution here.
+    let damage_source = damage_source.filter(|ds| !matches!(ds, DamageSource::EachTarget));
+    let Some(ctx) = single_damage_source(state, ability, damage_source) else {
+        no_damage_source_resolved(ability, events);
+        return Ok(());
+    };
 
     // Collect matching player IDs first to avoid borrow issues.
     let player_ids: Vec<PlayerId> = state
@@ -3257,6 +3266,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 1 },
                 player_filter: filter,
+                damage_source: None,
             },
             vec![],
             ObjectId(900),
@@ -3367,6 +3377,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 1 },
                 player_filter: PlayerFilter::OpponentAttackingEnchantedPlayer,
+                damage_source: None,
             },
             vec![],
             curse,
@@ -3841,6 +3852,7 @@ mod tests {
                     }),
                 },
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             },
             vec![TargetRef::Object(hit)],
             source,
@@ -4008,6 +4020,7 @@ mod tests {
                     }),
                 },
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             },
             vec![TargetRef::Object(hit_a), TargetRef::Object(hit_b)],
             source,
@@ -7120,6 +7133,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 2 },
                 player_filter: PlayerFilter::All,
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -7337,6 +7351,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 1 },
                 player_filter: PlayerFilter::All,
+                damage_source: None,
             },
             vec![],
             source,
@@ -7575,6 +7590,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 5 },
                 player_filter: PlayerFilter::OpponentOtherThanTriggering,
+                damage_source: None,
             },
             vec![],
             source_id,
@@ -7626,6 +7642,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 3 },
                 player_filter: PlayerFilter::OpponentOtherThanTriggering,
+                damage_source: None,
             },
             vec![],
             source_id,

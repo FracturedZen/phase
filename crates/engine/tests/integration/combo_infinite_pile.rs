@@ -4062,6 +4062,7 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
         Effect::DamageEachPlayer {
             amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
             player_filter: engine::types::ability::PlayerFilter::Opponent,
+            damage_source: None,
         },
     )));
     let host = create_life_gainer(&mut state, P0, "Grafted Terror of the Peaks");

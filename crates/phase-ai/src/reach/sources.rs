@@ -765,9 +765,12 @@ fn chain_loss<'a>(
                 reaches = true;
                 loss.controller_gain = Gain::Unread;
             }
+            // The source override changes who deals the damage, not how much
+            // reaches each player, so reach is source-agnostic here.
             Effect::DamageEachPlayer {
                 amount,
                 player_filter,
+                damage_source: _,
             }
             | Effect::DamageAll {
                 amount,

@@ -6780,6 +6780,7 @@ mod tests {
             &Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             }
         ));
         // Self-scoped each-player damage (would hit the tapper) → pass.
@@ -6787,6 +6788,7 @@ mod tests {
             &Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Controller,
+                damage_source: None,
             }
         ));
         // "Deals damage to target opponent" (opponent player scope) → benefit.
@@ -6864,6 +6866,7 @@ mod tests {
             &taps_for_mana_trigger_with(Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             })
         ));
         // Beneficial effect nested in a sub_ability link is still found.
@@ -6893,6 +6896,7 @@ mod tests {
             Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             }
         )));
         // Pure-mana TapsForMana (Wild Growth aura) → false (it IS a mana ability).
@@ -6928,6 +6932,7 @@ mod tests {
                 Effect::DamageEachPlayer {
                     amount: fixed(1),
                     player_filter: PlayerFilter::Opponent,
+                    damage_source: None,
                 },
             ));
         assert!(!is_non_mana_tap_trigger(&wrong_mode));
@@ -6952,6 +6957,7 @@ mod tests {
             .push(taps_for_mana_trigger_with(Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             }));
         // An opponent-controlled copy of the same shape must NOT appear for P0.
         let opp_dork = create_object(
@@ -6969,6 +6975,7 @@ mod tests {
             .push(taps_for_mana_trigger_with(Effect::DamageEachPlayer {
                 amount: fixed(1),
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             }));
 
         let sources = beneficial_non_mana_tap_trigger_sources(&state, PlayerId(0));

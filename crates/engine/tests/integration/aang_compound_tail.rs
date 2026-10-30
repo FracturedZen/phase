@@ -988,6 +988,7 @@ fn source_pronoun_damage_executes_after_list_counters_for_each_grammar_axis() {
                         Effect::DamageEachPlayer {
                             amount: QuantityExpr::Fixed { value: 2 },
                             player_filter: PlayerFilter::Opponent,
+                            damage_source: None,
                         }
                     ),
                     "{oracle}: {chain:?}"

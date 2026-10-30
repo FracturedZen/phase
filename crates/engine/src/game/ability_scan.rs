@@ -879,6 +879,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::DamageEachPlayer {
             amount,
             player_filter,
+            damage_source: _,
         } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_quantity_expr(amount, mode));

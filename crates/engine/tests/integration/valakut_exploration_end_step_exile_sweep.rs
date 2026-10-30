@@ -68,6 +68,7 @@ fn assert_queued_total_damage_continuation(
                     },
                 },
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             }
         ),
         "the queued damage continuation must read the completed sweep total, got {:?}",

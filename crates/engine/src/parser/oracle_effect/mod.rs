@@ -19845,9 +19845,11 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             Effect::DamageEachPlayer {
                 amount,
                 player_filter,
+                damage_source: None,
             } => Effect::DamageEachPlayer {
                 amount: replace_fixed_quantity(amount, quantity.clone()),
                 player_filter,
+                damage_source: None,
             },
             Effect::DamageAll {
                 amount,
@@ -24734,6 +24736,7 @@ fn parse_bare_damage_continuation<'a>(
                 Effect::DamageEachPlayer {
                     amount,
                     player_filter,
+                    damage_source: None,
                 },
                 "",
             ));
@@ -31267,6 +31270,13 @@ fn bind_damage_clause_source(
             ..
         }
         | Effect::DamageAll {
+            amount,
+            damage_source,
+            ..
+        }
+        // CR 120.1 + CR 603.7c: per-player damage with a named subject ("it
+        // deals that much damage to each other opponent" — Kediss).
+        | Effect::DamageEachPlayer {
             amount,
             damage_source,
             ..

@@ -2018,6 +2018,7 @@ fn molten_psyche_full_oracle_text_has_scoped_shuffle_and_recipient_damage() {
                     player: PlayerScope::ScopedPlayer,
                 },
             },
+            damage_source: None,
         }
     ));
 }
@@ -6024,6 +6025,7 @@ fn effect_damage_to_each_opponent_uses_player_scope() {
         Effect::DamageEachPlayer {
             amount: QuantityExpr::Fixed { value: 1 },
             player_filter: PlayerFilter::Opponent,
+            damage_source: None,
         }
     ));
 }
@@ -6119,6 +6121,7 @@ fn dagger_caster_each_opponent_chain_emits_damage_each_player() {
             Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 1 },
                 player_filter: PlayerFilter::Opponent,
+                damage_source: None,
             } => {}
             other => panic!(
                 "primary must be DamageEachPlayer{{Fixed 1, Opponent}} (not empty-Typed DamageAll), got {other:?}"
@@ -6252,6 +6255,7 @@ fn effect_damage_to_each_player_uses_player_scope() {
         Effect::DamageEachPlayer {
             amount: QuantityExpr::Fixed { value: 1 },
             player_filter: PlayerFilter::All,
+            damage_source: None,
         }
     ));
 }
@@ -6301,6 +6305,7 @@ fn effect_damage_to_each_other_opponent_uses_player_scope() {
                     qty: QuantityRef::EventContextAmount,
                 },
                 player_filter: PlayerFilter::OpponentOtherThanTriggering,
+                damage_source: None,
             }
         ),
         "expected DamageEachPlayer{{OpponentOtherThanTriggering}}, got {e:?}"
@@ -35938,6 +35943,7 @@ fn wheel_of_misfortune_lowers_every_clause() {
             Effect::DamageEachPlayer {
                 amount,
                 player_filter,
+                damage_source: None,
             } => Some((amount.clone(), player_filter.clone())),
             _ => None,
         })

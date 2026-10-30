@@ -6123,6 +6123,7 @@ mod tests {
                 Effect::DamageEachPlayer {
                     amount: QuantityExpr::Fixed { value: 1 },
                     player_filter: PlayerFilter::Opponent,
+                    damage_source: None,
                 },
             ))
             .valid_card(TargetFilter::SelfRef)

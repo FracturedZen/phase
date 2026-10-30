@@ -3137,6 +3137,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::DamageEachPlayer {
             amount,
             player_filter,
+            damage_source: _,
         } => {
             d.push(("amount".into(), fmt_quantity(amount)));
             d.push(("players".into(), fmt_player_filter(player_filter)));

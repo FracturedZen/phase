@@ -11126,6 +11126,7 @@ pub(crate) fn instruction_object_reach(effect: &Effect) -> InstructionObjectReac
         | Effect::DamageEachPlayer {
             amount: _,
             player_filter: _,
+            damage_source: _,
         }
         | Effect::GainEnergy { amount: _ }
         | Effect::GivePlayerCounter {
@@ -23136,6 +23137,13 @@ pub enum Effect {
     DamageEachPlayer {
         amount: QuantityExpr,
         player_filter: PlayerFilter,
+        /// CR 120.1 + CR 603.7c: Damage source override, mirroring
+        /// `DealDamage::damage_source`. `Some(TriggeringSource)` makes the
+        /// triggering event's object deal the damage — Kediss, Emberclaw
+        /// Familiar's "it deals that much damage to each other opponent" is
+        /// dealt by the commander, not Kediss. `None` keeps the ability source.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damage_source: Option<DamageSource>,
     },
     DestroyAll {
         #[serde(default = "default_target_filter_none")]

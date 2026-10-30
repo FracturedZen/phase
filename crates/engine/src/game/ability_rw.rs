@@ -3526,6 +3526,7 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::DamageEachPlayer {
             amount,
             player_filter,
+            damage_source: _,
         } => legacy_quantity_expr(amount) || legacy_player_filter(player_filter),
         Effect::Discard {
             count,
@@ -4951,6 +4952,7 @@ fn rw_effect(
         Effect::DamageEachPlayer {
             amount,
             player_filter: _,
+            damage_source: _,
         } => {
             let mut p = life_writes();
             p.merge(rw_quantity_expr(amount));
@@ -9358,6 +9360,7 @@ mod tests {
             legacy(&ra(Effect::DamageEachPlayer {
                 amount: qfix(1),
                 player_filter: PlayerFilter::TriggeringPlayer,
+                damage_source: None,
             })),
             "DamageEachPlayer player_filter TriggeringPlayer"
         );

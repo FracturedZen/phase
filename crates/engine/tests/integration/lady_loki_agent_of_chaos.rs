@@ -321,6 +321,7 @@ fn lady_loki_parses_nested_payoff_chain() {
     let Effect::DamageEachPlayer {
         amount,
         player_filter,
+        damage_source: None,
     } = damage.effect.as_ref()
     else {
         panic!(

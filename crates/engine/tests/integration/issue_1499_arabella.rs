@@ -35,6 +35,7 @@ fn arabella_attack_trigger() -> TriggerDefinition {
                 Effect::DamageEachPlayer {
                     amount: x.clone(),
                     player_filter: PlayerFilter::Opponent,
+                    damage_source: None,
                 },
             )
             .sub_ability(AbilityDefinition::new(

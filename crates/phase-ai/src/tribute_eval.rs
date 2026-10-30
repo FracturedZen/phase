@@ -200,6 +200,7 @@ mod tests {
                     Effect::DamageEachPlayer {
                         amount: QuantityExpr::Fixed { value: 10 },
                         player_filter: engine::types::ability::PlayerFilter::Opponent,
+                        damage_source: None,
                     },
                 ))
                 .condition(TriggerCondition::TributeNotPaid),
@@ -225,6 +226,7 @@ mod tests {
                     Effect::DamageEachPlayer {
                         amount: QuantityExpr::Fixed { value: 1 },
                         player_filter: engine::types::ability::PlayerFilter::Opponent,
+                        damage_source: None,
                     },
                 ))
                 .condition(TriggerCondition::TributeNotPaid),

@@ -35747,6 +35747,7 @@ fn valakut_exploration_end_step_trigger_hoists_gate_and_keeps_damage_shape() {
                         },
                 },
             player_filter: PlayerFilter::Opponent,
+            damage_source: None,
         } => {}
         other => panic!(
             "expected DamageEachPlayer(PreviousEffectAmount::Total, Opponent), got {other:?}"
@@ -36097,6 +36098,7 @@ fn shadowheart_cleric_of_war_event_fed_damage_stays_ungated() {
                     qty: QuantityRef::EventContextAmount,
                 },
             player_filter: PlayerFilter::Opponent,
+            damage_source: None,
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }
@@ -36235,6 +36237,7 @@ fn synthetic_fixed_amount_damage_rider_after_mass_move_stays_ungated() {
         Effect::DamageEachPlayer {
             amount: QuantityExpr::Fixed { value: 2 },
             player_filter: PlayerFilter::Opponent,
+            damage_source: None,
         } => {}
         other => panic!("expected DamageEachPlayer(Fixed(2), Opponent), got {other:?}"),
     }
@@ -36267,6 +36270,7 @@ fn synthetic_sentence_separated_mass_move_damage_keeps_event_context_amount() {
                     qty: QuantityRef::EventContextAmount,
                 },
             player_filter: PlayerFilter::Opponent,
+            damage_source: None,
         } => {}
         other => panic!("expected DamageEachPlayer(EventContextAmount, Opponent), got {other:?}"),
     }

@@ -29082,6 +29082,7 @@ mod tests {
                     Effect::DamageEachPlayer {
                         amount: QuantityExpr::Fixed { value: 1 },
                         player_filter: scope.clone(),
+                        damage_source: None,
                     },
                     Effect::RevealChosenNumbers {
                         players: scope.clone(),

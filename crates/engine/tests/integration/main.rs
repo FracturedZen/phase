@@ -1131,6 +1131,7 @@ mod kashi_tribe_damage_tap_freeze;
 mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
+mod kediss_commander_deals_damage_6914;
 mod kibo_uktabi_prince_defending_player_sacrifice;
 mod kicked_instead_target;
 mod kicker_enters_with_keyword_rider;

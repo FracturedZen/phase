@@ -6140,6 +6140,7 @@ mod tests {
             PactTerminalOutcome::Draw => Effect::DamageEachPlayer {
                 amount: QuantityExpr::Fixed { value: 20 },
                 player_filter: PlayerFilter::All,
+                damage_source: None,
             },
         };
         let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
