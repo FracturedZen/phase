@@ -5025,6 +5025,15 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, _) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            // CR 115.10a + CR 608.2d: a choice whose text omits the word
+            // "target" ("you may choose a token you control") is not a target.
+            // It is made while the ability resolves, so it sees objects that
+            // earlier instructions of the same ability created (Brudiclad,
+            // Telchor Engineer's fresh Myr token) and claims no stack-time
+            // target slot. Only the explicit "target" spelling stays Stack.
+            if !nom_primitives::scan_contains(rest_lower, "target") {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }

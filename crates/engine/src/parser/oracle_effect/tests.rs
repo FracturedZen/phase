@@ -77802,7 +77802,9 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         }
     );
-    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
+    // CR 115.10a + CR 608.2d: no "target" word, so the legacy single-object
+    // choice is made on resolution (#8154), not announced as a target.
+    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Resolution);
     // A bare Effect cannot represent both instructions. The chain succeeds in
     // U-C4; this lower-level entry point must fail closed rather than lose one.
     let Effect::Unimplemented { name, description } =
@@ -95269,4 +95271,33 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+/// Issue #8154 — Brudiclad, Telchor Engineer. CR 115.10a + CR 608.2d: "you may
+/// choose a token you control" never says "target", so the choice is made while
+/// the ability resolves (after the Myr token exists) and claims no stack-time
+/// target slot. The explicit "choose target ..." spelling stays Stack-timed.
+#[test]
+fn untargeted_choose_after_token_creation_is_resolution_timed() {
+    let def = parse_effect_chain(
+        "Create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.",
+        AbilityKind::Spell,
+    );
+    let choose = def.sub_ability.as_ref().expect("choose clause follows the token");
+    assert!(
+        matches!(choose.effect.as_ref(), Effect::TargetOnly { .. }),
+        "expected the choose clause, got {:?}",
+        choose.effect
+    );
+    assert!(choose.optional);
+    assert_eq!(choose.target_choice_timing, TargetChoiceTiming::Resolution);
+    let copy = choose.sub_ability.as_ref().expect("copy clause follows the choice");
+    assert!(matches!(copy.effect.as_ref(), Effect::BecomeCopy { .. }));
+
+    let targeted = parse_effect_chain(
+        "Create a 2/1 blue Phyrexian Myr artifact creature token. Then choose target token you control. Tap it.",
+        AbilityKind::Spell,
+    );
+    let choose = targeted.sub_ability.as_ref().expect("choose clause follows the token");
+    assert_eq!(choose.target_choice_timing, TargetChoiceTiming::Stack);
 }
