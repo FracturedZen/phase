@@ -14,8 +14,8 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::actions::GameAction;
 use engine::types::ability::TargetFilter;
+use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -95,7 +95,12 @@ fn unblocked_trigger_binds_that_player_to_defending_player() {
     let trigger = parsed
         .triggers
         .iter()
-        .find(|t| matches!(t.mode, engine::types::triggers::TriggerMode::AttackerUnblocked))
+        .find(|t| {
+            matches!(
+                t.mode,
+                engine::types::triggers::TriggerMode::AttackerUnblocked
+            )
+        })
         .expect("unblocked trigger");
     let execute = trigger.execute.as_ref().expect("trigger effect");
     match &*execute.effect {
