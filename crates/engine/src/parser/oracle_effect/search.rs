@@ -673,6 +673,8 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
     use nom::sequence::preceded;
 
     let has_declared_player = ctx.declared_player_scope.is_some();
+    let triggering_player_scope =
+        ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer);
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -700,6 +702,22 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
                 value(
                     TargetFilter::ParentTarget,
                     verify(tag("that player's "), |_: &str| has_declared_player),
+                ),
+                // CR 603.2 + CR 701.23a: in a trigger whose condition introduces
+                // the event player as the "that player" referent ("Whenever ~
+                // deals combat damage to a player, search that player's library"
+                // — Thada Adel, Rootwater Thief, Sphinx Ambassador), the searched
+                // library belongs to the triggering player while the trigger's
+                // controller is the searcher. The `Typed` controller wrapper (not
+                // bare `TargetFilter::TriggeringPlayer`) keeps
+                // `searcher_is_library_owner` false and surfaces no target slot.
+                value(
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::TriggeringPlayer),
+                    ),
+                    verify(tag("that player's "), |_: &str| {
+                        triggering_player_scope
+                    }),
                 ),
             )),
         )
@@ -3311,6 +3329,26 @@ mod tests {
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 15 });
         assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
+    }
+
+    #[test]
+    fn search_that_players_library_under_triggering_player_scope_names_event_player() {
+        // CR 603.2 + CR 701.23a: Thada Adel / Rootwater Thief — the damaged
+        // player's library is searched; the trigger's controller searches.
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for an artifact card and exile it",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.target_player,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::TriggeringPlayer)
+            ))
+        );
     }
 
     #[test]

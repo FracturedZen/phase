@@ -29974,6 +29974,8 @@ impl Effect {
             // `ParentTargetController` variant) so `searcher_is_library_owner`
             // returns false and the caster remains the searcher (CR 701.23a
             // asymmetric); surface no slot for it, mirroring `RevealUntil`.
+            // CR 603.2: the event-player form ("search that player's library"
+            // under a combat-damage trigger) is the same context-ref shape.
             Effect::SearchLibrary { target_player, .. } => match target_player {
                 Some(TargetFilter::Typed(tf))
                     if tf.type_filters.is_empty()
@@ -29984,6 +29986,7 @@ impl Effect {
                                 ControllerRef::ParentTargetOwner
                                     | ControllerRef::ParentTargetController
                                     | ControllerRef::EventTargetController
+                                    | ControllerRef::TriggeringPlayer
                             )
                         ) =>
                 {
@@ -30391,6 +30394,7 @@ impl Effect {
                                 ControllerRef::ParentTargetOwner
                                     | ControllerRef::ParentTargetController
                                     | ControllerRef::EventTargetController
+                                    | ControllerRef::TriggeringPlayer
                             )
                         ) =>
                 {

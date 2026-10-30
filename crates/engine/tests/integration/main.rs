@@ -1588,6 +1588,7 @@ mod terra_magical_adept_milled_enchantment;
 mod terror_of_the_peaks_issue_2911;
 mod text_substitution_cr612;
 mod teysa_wojek_investigate_per_opponent;
+mod thada_adel_search_that_players_library_8066;
 mod that_players_graveyard_cast_9334;
 mod the_black_arrow_dragon_gated_destroy;
 mod the_chain_veil_loyalty_grants;
