@@ -180,7 +180,8 @@ expression: "&lowered"
           },
           "player_filter": {
             "type": "Opponent"
-          }
+          },
+          "damage_source": "TriggeringSource"
         },
         "cost": null,
         "sub_ability": null,
