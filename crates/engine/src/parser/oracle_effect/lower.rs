@@ -10385,6 +10385,18 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     // "each creature" → DamageAll (uniform damage to objects)
                     // "each foe" — archaic synonym for opponent (friend/foe cards)
                     if let Some(player_filter) = parse_damage_each_player_scope(target_phrase) {
+                        // CR 120.3 + CR 608.2c: "each opponent equal to the
+                        // number of cards in that player's hand" (Stormbreath
+                        // Dragon) — the anaphor names each recipient in turn,
+                        // not an announced target. Left as `TargetZoneCardCount`
+                        // it surfaces a player-target slot the printed text never
+                        // declares, so lower it to the per-recipient scoped read
+                        // `resolve_each_player` binds.
+                        let mut qty = qty;
+                        super::each_quantity_ref_mut(
+                            &mut qty,
+                            &mut super::rewrite_anaphoric_player_count_to_scoped,
+                        );
                         return Some((
                             Effect::DamageEachPlayer {
                                 amount: qty,

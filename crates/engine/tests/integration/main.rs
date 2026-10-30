@@ -1546,6 +1546,7 @@ mod std_s07_damage_doublers;
 mod steadfast_armasaur_lki_toughness;
 mod steelform_sliver_toughness_anthem;
 mod stensian_sanguinist_prepare;
+mod stormbreath_dragon_monstrous_each_opponent_hand_8119;
 mod strategic_betrayal_6505;
 mod strefan_maurer_progenitor;
 mod strider_ranger_of_the_north;

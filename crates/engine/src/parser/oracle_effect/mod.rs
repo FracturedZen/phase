@@ -39641,6 +39641,59 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
     }
 }
 
+/// CR 608.2c + CR 115.1: Rebind one anaphoric player-possessive count
+/// ("their hand", "that player's graveyard", "their life total") to the
+/// resolution-scoped player. Shared by the event-anchored damage-trigger
+/// rewrite (Sword of War and Peace) and the per-recipient `DamageEachPlayer`
+/// amount (Stormbreath Dragon — "each opponent equal to the number of cards
+/// in that player's hand"), where "that player" is each recipient in turn and
+/// no player choice is ever announced. Only anaphoric counts
+/// (`CountBinding::Anaphoric`) are rewritten — an explicit "target
+/// player's/opponent's ..." count declares its own announcement and stays for
+/// the slot machinery. Exile has no scoped equivalent and is left as-is.
+pub(crate) fn rewrite_anaphoric_player_count_to_scoped(qty: &mut QuantityRef) {
+    use crate::types::ability::{CountBinding, CountScope, PlayerScope, ZoneRef};
+    match qty {
+        QuantityRef::LifeTotal { player }
+        | QuantityRef::HandSize { player }
+        | QuantityRef::GraveyardSize { player }
+        | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::LifeLostThisTurn { player }
+        | QuantityRef::LifeGainedThisTurn { player }
+        | QuantityRef::PartySize { player }
+            if *player == PlayerScope::Target =>
+        {
+            *player = PlayerScope::ScopedPlayer;
+        }
+        // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
+        // An explicit "target player's/opponent's …" count declares its
+        // own announcement and must survive for the slot machinery —
+        // scope alone cannot tell them apart (both use `TargetPlayer`).
+        QuantityRef::TargetZoneCardCount { zone, binding, .. }
+            if *binding == CountBinding::Anaphoric =>
+        {
+            match zone {
+                ZoneRef::Hand => {
+                    *qty = QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    }
+                }
+                ZoneRef::Library | ZoneRef::Graveyard => {
+                    *qty = QuantityRef::ZoneCardCount {
+                        zone: zone.clone(),
+                        card_types: Vec::new(),
+                        scope: CountScope::ScopedPlayer,
+                        filter: None,
+                    };
+                }
+                // No scoped-player equivalent for exile counts; leave as-is.
+                ZoneRef::Exile => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 /// CR 603.2 + CR 608.2c + CR 115.1: Lower an event-anchored anaphoric zone
 /// count to a scoped-player read. In a damage-done trigger whose recipient is
 /// the event player ("... deals damage to that player equal to the number of
@@ -39657,54 +39710,10 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
 /// `rewrite_event_player_quantity_refs_to_scoped` (exile has no scoped
 /// equivalent and is left as-is).
 pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefinition) {
-    use crate::types::ability::{CountBinding, CountScope, PlayerScope, QuantityRef, ZoneRef};
-
-    fn rewrite_ref(qty: &mut QuantityRef) {
-        match qty {
-            QuantityRef::LifeTotal { player }
-            | QuantityRef::HandSize { player }
-            | QuantityRef::GraveyardSize { player }
-            | QuantityRef::StartingLifeTotal { player }
-            | QuantityRef::LifeLostThisTurn { player }
-            | QuantityRef::LifeGainedThisTurn { player }
-            | QuantityRef::PartySize { player }
-                if *player == PlayerScope::Target =>
-            {
-                *player = PlayerScope::ScopedPlayer;
-            }
-            // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
-            // An explicit "target player's/opponent's …" count declares its
-            // own announcement and must survive for the slot machinery —
-            // scope alone cannot tell them apart (both use `TargetPlayer`).
-            QuantityRef::TargetZoneCardCount { zone, binding, .. }
-                if *binding == CountBinding::Anaphoric =>
-            {
-                match zone {
-                    ZoneRef::Hand => {
-                        *qty = QuantityRef::HandSize {
-                            player: PlayerScope::ScopedPlayer,
-                        }
-                    }
-                    ZoneRef::Library | ZoneRef::Graveyard => {
-                        *qty = QuantityRef::ZoneCardCount {
-                            zone: zone.clone(),
-                            card_types: Vec::new(),
-                            scope: CountScope::ScopedPlayer,
-                            filter: None,
-                        };
-                    }
-                    // No scoped-player equivalent for exile counts; leave as-is.
-                    ZoneRef::Exile => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn rewrite_effect(effect: &mut Effect) {
         if matches!(effect.target_filter(), Some(TargetFilter::TriggeringPlayer)) {
             each_quantity_expr_mut(effect, &mut |expr| {
-                each_quantity_ref_mut(expr, &mut rewrite_ref)
+                each_quantity_ref_mut(expr, &mut rewrite_anaphoric_player_count_to_scoped)
             });
         }
     }

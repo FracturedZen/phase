@@ -34641,6 +34641,40 @@ fn sword_of_war_and_peace_their_hand_rewrites_to_scoped_player() {
     }
 }
 
+/// CR 120.3 + CR 608.2c (Stormbreath Dragon, issue #8119): in "deals damage
+/// to each opponent equal to the number of cards in that player's hand",
+/// "that player" is each recipient in turn. The amount must lower to the
+/// per-recipient scoped hand read — not `TargetZoneCardCount`, which surfaces
+/// a player-target slot the printed trigger never declares. Verbatim Oracle
+/// text; revert-failing.
+#[test]
+fn stormbreath_dragon_each_opponent_that_players_hand_is_scoped_8119() {
+    let def = parse_trigger_line(
+        "When this creature becomes monstrous, it deals damage to each opponent equal to the number of cards in that player's hand.",
+        "Stormbreath Dragon",
+    );
+    assert_eq!(def.mode, TriggerMode::BecomeMonstrous);
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::DamageEachPlayer {
+            amount,
+            player_filter,
+        } => {
+            assert_eq!(player_filter, &PlayerFilter::Opponent);
+            assert_eq!(
+                amount,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                "per-recipient 'that player's hand' must be a scoped read, got {amount:?}",
+            );
+        }
+        other => panic!("Stormbreath effect must be DamageEachPlayer, got {other:?}"),
+    }
+}
+
 /// MED2 (issue #9280 review): the event-anchored rewrite must NOT erase an
 /// explicit target binding. Synthetic Sword-shape trigger with "target
 /// player's hand": the count declares its own CR 601.2c instance, so it
