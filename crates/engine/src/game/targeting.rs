@@ -3330,6 +3330,10 @@ pub(crate) fn extract_player_from_event(
         // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
         // counter-placement trigger is the player who put the counters.
         GameEvent::CounterAdded { actor, .. } => Some(*actor),
+        // CR 725.1 + CR 608.2c: the player who became the monarch is the
+        // triggering player for a later "that player" / "they" in the same
+        // ability ("target creature that player controls").
+        GameEvent::MonarchChanged { player_id } => Some(*player_id),
         _ => None,
     }
 }

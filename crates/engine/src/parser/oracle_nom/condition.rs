@@ -1855,12 +1855,15 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 /// CR 109.5: subject axis of the monarch-identity predicate.
 ///
 /// "you're"/"you are" is the ability's controller (CR 109.5). "that
-/// player"/"that opponent" is the anaphoric event-scoped player; this
+/// player"/"that opponent" and "they're"/"they are" are the anaphoric
+/// event-scoped player (CR 608.2c: the player the earlier text named). This
 /// combinator cannot see the owning trigger, so it emits the generic
 /// [`PlayerScope::ScopedPlayer`] anchor, which an attack trigger rebinds to
 /// [`PlayerScope::DefendingPlayer`] when its clause supplies a more specific
 /// antecedent (CR 508.5 — see
-/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`).
+/// `oracle_trigger::rebind_attack_anaphor_to_defending_player`). A
+/// become-the-monarch resolution snapshots the same anchor onto the player
+/// who received the designation (CR 725.1).
 ///
 /// Mirrors `parse_that_player_has_conditions` in this module, which already
 /// maps the same two anaphors to [`PlayerScope::ScopedPlayer`].
@@ -1872,7 +1875,12 @@ fn parse_monarch_identity_subject(input: &str) -> OracleResult<'_, PlayerScope> 
         ),
         value(
             PlayerScope::ScopedPlayer,
-            alt((tag("that player is "), tag("that opponent is "))),
+            alt((
+                tag("that player is "),
+                tag("that opponent is "),
+                recognize((tag("they"), parse_apostrophe_re, tag(" "))),
+                tag("they are "),
+            )),
         ),
     ))
     .parse(input)

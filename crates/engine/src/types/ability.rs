@@ -12229,10 +12229,11 @@ pub enum PlayerScope {
     /// dynamic siblings above collapse to once the resolving ability is gone.
     ///
     /// DURATION-TIMING-ONLY, like [`AnyTurn`](Self::AnyTurn): never produced by
-    /// the parser and never read from a value/quantity/player-selection
-    /// position. It is constructed solely by resolvers that install a durational
-    /// continuous effect whose expiry keys on a player OTHER than the effect's
-    /// controller.
+    /// the parser and never read from a value/quantity position. It is
+    /// constructed solely by resolvers that install a durational continuous
+    /// effect whose expiry keys on a player OTHER than the effect's controller.
+    /// `layers::designation_player` also reads it for a snapshotted monarch
+    /// subject (CR 611.2b + CR 725.1).
     ///
     /// Gideon Jura's "+2: During target opponent's next turn, …" is the
     /// canonical member: the parser emits

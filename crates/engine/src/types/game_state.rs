@@ -32816,6 +32816,8 @@ impl GameState {
         creating_ability: Option<&ResolvedAbility>,
     ) -> Option<u64> {
         debug_assert!(creating_ability.is_none_or(|ability| ability.source_id == source_id));
+        let duration =
+            crate::game::layers::snapshot_become_monarch_anaphor_duration(self, duration);
         self.transient_duration_begins(source_id, controller, &duration, &affected, bindings)
             .then(|| {
                 self.install_started_transient_continuous_effect(
@@ -32844,6 +32846,8 @@ impl GameState {
         members: Vec<(PlayerId, TargetFilter, Vec<ContinuousModification>)>,
     ) -> bool {
         let bindings = TransientContinuousEffectBindings::default();
+        let duration =
+            crate::game::layers::snapshot_become_monarch_anaphor_duration(self, duration);
         let all_begin = members.iter().all(|(controller, affected, _)| {
             self.transient_duration_begins(source_id, *controller, &duration, affected, bindings)
         });

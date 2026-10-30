@@ -1532,6 +1532,8 @@ impl ConditionContext {
         match scope {
             PlayerScope::Controller => true,
             PlayerScope::RecipientController => self.recipient.is_some(),
+            // CR 611.2b + CR 725.1: the snapshot carries its own player id.
+            PlayerScope::SpecificPlayer { .. } => true,
             // No static designation resolver currently binds this subject.
             PlayerScope::DefendingPlayer => false,
             // Engine limitation, not CR-mandated: no binding authority for
@@ -1542,8 +1544,7 @@ impl ConditionContext {
             | PlayerScope::AllPlayers { .. }
             | PlayerScope::ParentObjectTarget { .. }
             | PlayerScope::SourceChosenPlayer
-            | PlayerScope::AnyTurn
-            | PlayerScope::SpecificPlayer { .. } => false,
+            | PlayerScope::AnyTurn => false,
         }
     }
 }
@@ -1641,6 +1642,11 @@ fn designation_player(
             .recipient
             .and_then(|id| state.objects.get(&id))
             .map(|object| object.controller),
+        // CR 611.2b + CR 725.1: the player id is inside the scope. A
+        // become-the-monarch resolution snapshots "they're the monarch" onto
+        // this arm so the duration keeps naming that player after the ability
+        // leaves the stack.
+        PlayerScope::SpecificPlayer { id } => Some(*id),
         PlayerScope::DefendingPlayer
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
@@ -1648,8 +1654,7 @@ fn designation_player(
         | PlayerScope::AllPlayers { .. }
         | PlayerScope::ParentObjectTarget { .. }
         | PlayerScope::SourceChosenPlayer
-        | PlayerScope::AnyTurn
-        | PlayerScope::SpecificPlayer { .. } => None,
+        | PlayerScope::AnyTurn => None,
     }
 }
 
@@ -9540,6 +9545,63 @@ fn state_duration_subject(
 /// application makes its duration true (a control change of the source it is
 /// bound to, a P/T change its condition reads) sustain a duration that never
 /// started. Uses the same subject binding and predicates as liveness.
+/// CR 608.2c + CR 725.1 + CR 611.2b: a become-the-monarch trigger's
+/// "for as long as they're / that player is the monarch" duration names the
+/// player who just received the designation. The parser can only emit the
+/// anaphoric [`PlayerScope::ScopedPlayer`] anchor. Snapshot it onto that
+/// player before the duration is asked whether it starts, so the installed
+/// effect keeps the same player after the trigger leaves the stack.
+pub(crate) fn snapshot_become_monarch_anaphor_duration(
+    state: &GameState,
+    duration: Duration,
+) -> Duration {
+    let Duration::ForAsLongAs { condition } = duration else {
+        return duration;
+    };
+    let Some(player_id) = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(|event| match event {
+            crate::types::events::GameEvent::MonarchChanged { player_id } => Some(*player_id),
+            _ => None,
+        })
+    else {
+        return Duration::ForAsLongAs { condition };
+    };
+    Duration::ForAsLongAs {
+        condition: bind_anaphoric_monarch_subject(condition, player_id),
+    }
+}
+
+fn bind_anaphoric_monarch_subject(
+    condition: StaticCondition,
+    player_id: crate::types::player::PlayerId,
+) -> StaticCondition {
+    match condition {
+        StaticCondition::And { conditions } => StaticCondition::And {
+            conditions: conditions
+                .into_iter()
+                .map(|condition| bind_anaphoric_monarch_subject(condition, player_id))
+                .collect(),
+        },
+        StaticCondition::Or { conditions } => StaticCondition::Or {
+            conditions: conditions
+                .into_iter()
+                .map(|condition| bind_anaphoric_monarch_subject(condition, player_id))
+                .collect(),
+        },
+        StaticCondition::Not { condition } => StaticCondition::Not {
+            condition: Box::new(bind_anaphoric_monarch_subject(*condition, player_id)),
+        },
+        StaticCondition::IsMonarch {
+            player: PlayerScope::ScopedPlayer,
+        } => StaticCondition::IsMonarch {
+            player: PlayerScope::SpecificPlayer { id: player_id },
+        },
+        other => other,
+    }
+}
+
 pub(crate) fn resolved_duration_begins(
     state: &GameState,
     duration: &Duration,

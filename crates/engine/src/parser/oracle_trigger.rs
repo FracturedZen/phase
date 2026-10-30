@@ -1438,6 +1438,23 @@ fn condition_introduces_becomes_target_source_player(cond_lower: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c + CR 725.1: a "becomes the monarch" / "become the monarch"
+/// trigger names the player who receives the designation. Reading the whole
+/// ability, a later "that player" / "they" is that player, not the ability's
+/// controller. The player is delivered by `extract_player_from_event`'s
+/// `MonarchChanged` arm, so the anaphor maps to
+/// `ControllerRef::TriggeringPlayer`.
+fn condition_introduces_become_monarch_player(cond_lower: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(cond_lower, |input| {
+        alt((
+            tag::<_, _, OracleError<'_>>("becomes the monarch"),
+            tag("become the monarch"),
+        ))
+        .parse(input)
+    })
+    .is_some()
+}
+
 fn condition_introduces_target_player(cond_lower: &str) -> bool {
     /// CR 120.3: "deals [combat] damage to a player" — damage dealt to a player
     /// causes that player to lose life (CR 120.3a) and introduces the damaged
@@ -1641,6 +1658,13 @@ pub(crate) fn relative_player_scope_for_condition(cond_lower: &str) -> Option<Co
         // `extract_player_from_event`'s BecomesTarget arm (game/targeting.rs).
         // (Black Bolt Lethal Voice, Scalelord Reckoner.) Unlike `TargetPlayer`,
         // `TriggeringPlayer` surfaces no phantom companion Player target slot.
+        Some(ControllerRef::TriggeringPlayer)
+    } else if condition_introduces_become_monarch_player(cond_lower) {
+        // CR 608.2c + CR 725.1: "Whenever an opponent becomes the monarch, …
+        // that player controls" — "that player" is the player who became the
+        // monarch, delivered by `extract_player_from_event`'s MonarchChanged
+        // arm. Checked after the "becomes the target" detector so that phrase
+        // keeps its own scope.
         Some(ControllerRef::TriggeringPlayer)
     } else if condition_introduces_target_player(cond_lower) {
         Some(ControllerRef::TargetPlayer)
