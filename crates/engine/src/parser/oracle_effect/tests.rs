@@ -95283,7 +95283,10 @@ fn untargeted_choose_after_token_creation_is_resolution_timed() {
         "Create a 2/1 blue Phyrexian Myr artifact creature token. Then you may choose a token you control. If you do, each other token you control becomes a copy of that token.",
         AbilityKind::Spell,
     );
-    let choose = def.sub_ability.as_ref().expect("choose clause follows the token");
+    let choose = def
+        .sub_ability
+        .as_ref()
+        .expect("choose clause follows the token");
     assert!(
         matches!(choose.effect.as_ref(), Effect::TargetOnly { .. }),
         "expected the choose clause, got {:?}",
@@ -95291,13 +95294,19 @@ fn untargeted_choose_after_token_creation_is_resolution_timed() {
     );
     assert!(choose.optional);
     assert_eq!(choose.target_choice_timing, TargetChoiceTiming::Resolution);
-    let copy = choose.sub_ability.as_ref().expect("copy clause follows the choice");
+    let copy = choose
+        .sub_ability
+        .as_ref()
+        .expect("copy clause follows the choice");
     assert!(matches!(copy.effect.as_ref(), Effect::BecomeCopy { .. }));
 
     let targeted = parse_effect_chain(
         "Create a 2/1 blue Phyrexian Myr artifact creature token. Then choose target token you control. Tap it.",
         AbilityKind::Spell,
     );
-    let choose = targeted.sub_ability.as_ref().expect("choose clause follows the token");
+    let choose = targeted
+        .sub_ability
+        .as_ref()
+        .expect("choose clause follows the token");
     assert_eq!(choose.target_choice_timing, TargetChoiceTiming::Stack);
 }

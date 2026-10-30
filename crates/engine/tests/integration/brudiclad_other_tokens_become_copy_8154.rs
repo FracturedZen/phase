@@ -123,12 +123,17 @@ fn every_other_token_becomes_a_copy_of_the_chosen_token() {
     let myr = myr(&s.runner, &[s.goblin, s.soldier]);
     assert!(!targeted, "the token is chosen on resolution, not targeted");
     assert_eq!(state.objects[&s.goblin].name, "Goblin");
-    assert_eq!(state.objects[&s.soldier].name, "Goblin", "Soldier becomes a copy");
-    assert_eq!(state.objects[&myr].name, "Goblin", "the new Myr becomes a copy");
+    assert_eq!(
+        state.objects[&s.soldier].name, "Goblin",
+        "Soldier becomes a copy"
+    );
+    assert_eq!(
+        state.objects[&myr].name, "Goblin",
+        "the new Myr becomes a copy"
+    );
     assert_eq!(state.objects[&myr].power, Some(1));
     assert_eq!(
-        state.objects[&s.brudiclad].name,
-        "Brudiclad, Telchor Engineer",
+        state.objects[&s.brudiclad].name, "Brudiclad, Telchor Engineer",
         "Brudiclad is not a token and never becomes a copy"
     );
 }
@@ -144,7 +149,10 @@ fn the_new_myr_can_be_the_chosen_token() {
     assert_eq!(state.objects[&s.goblin].name, "Phyrexian Myr");
     assert_eq!(state.objects[&s.soldier].name, "Phyrexian Myr");
     assert_eq!(state.objects[&s.goblin].power, Some(2));
-    assert_eq!(state.objects[&s.brudiclad].name, "Brudiclad, Telchor Engineer");
+    assert_eq!(
+        state.objects[&s.brudiclad].name,
+        "Brudiclad, Telchor Engineer"
+    );
 }
 
 #[test]
