@@ -4103,7 +4103,22 @@ fn parse_subject_application_for(
     .parse(lower.as_str())
     .is_ok()
     {
-        return subject_filter_application(TargetFilter::ParentTarget, false);
+        // CR 506.2 + CR 508.5 + CR 608.2c: in an attack trigger whose head names
+        // the attacked player ("Whenever ~ attacks a player and isn't blocked,
+        // that player's life total becomes 1" — Master of Cruelties), the
+        // antecedent of "that player" is the defending player, which
+        // `relative_player_scope_for_condition` stamps as `DefendingPlayer`.
+        // Such triggers declare no target, so the generic `ParentTarget`
+        // fallback resolved to the ability's controller (issue #8082).
+        let filter = if matches!(
+            ctx.relative_player_scope,
+            Some(ControllerRef::DefendingPlayer)
+        ) {
+            TargetFilter::DefendingPlayer
+        } else {
+            TargetFilter::ParentTarget
+        };
+        return subject_filter_application(filter, false);
     }
 
     // CR 611.2c: a single effect may name SEVERAL subjects sharing one

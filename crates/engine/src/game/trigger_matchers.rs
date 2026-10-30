@@ -3374,7 +3374,7 @@ pub(super) fn match_attacker_blocked(
 /// AttackerUnblocked: fires when source attacked but was not assigned any blockers.
 pub(super) fn match_attacker_unblocked(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
+    trigger: &TriggerDefinition,
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
@@ -3389,7 +3389,16 @@ pub(super) fn match_attacker_unblocked(
                     .iter()
                     .find(|attacker| attacker.object_id == source_id)
             })
-            .is_some_and(|attacker| !attacker.blocked)
+            .is_some_and(|attacker| {
+                // CR 509.3c + CR 506.3: "attacks a player and isn't blocked"
+                // (Master of Cruelties) narrows the attacked object — an
+                // unblocked creature attacking a planeswalker or battle does not
+                // satisfy it. Mirrors `matching_you_attack_unblocked_pairs`.
+                !attacker.blocked
+                    && trigger.attack_target_filter.as_ref().is_none_or(|filter| {
+                        attack_target_type_matches(attacker.attack_target, filter)
+                    })
+            })
     } else {
         false
     }

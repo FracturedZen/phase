@@ -1224,6 +1224,7 @@ mod martyr_reveal_x_cost;
 mod mass_library_order_restore;
 mod mass_phase_out_1792_repro;
 mod master_of_ceremonies;
+mod master_of_cruelties_attacked_player_life_8082;
 mod masters_councillors;
 mod mauhur_swarming_of_moria;
 mod max_speed_owner_arm_from_graveyard;
