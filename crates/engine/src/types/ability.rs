@@ -44621,6 +44621,23 @@ impl ResolvedAbility {
         ))
     }
 
+    /// CR 113.7a + CR 400.7 + CR 603.7d + CR 603.7e: the source object an effect this ability creates refers to: the object a self-reference binds to while the ability can find it (CR 400.7e/f/j); else the source named by the ability's own trigger provenance (`trigger_source`, the event-time source of a triggered ability and, for a delayed triggered ability, the spell that created it (CR 603.7d) or the source of the ability that created it (CR 603.7e)), which stack placement never restamps; else the incarnation the source had when the ability was put on the stack. A source that has since left its zone is answered by its last known information (CR 608.2h).
+    pub fn effect_source_ref(
+        &self,
+        state: &crate::types::game_state::GameState,
+    ) -> Option<crate::types::identifiers::ObjectIncarnationRef> {
+        self.self_ref_binding(state)
+            .and_then(|id| state.objects.get(&id))
+            .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+            .or_else(|| {
+                self.trigger_source
+                    .as_ref()
+                    .filter(|source| source.identity.reference.object_id == self.source_id)
+                    .map(|source| source.identity.reference)
+            })
+            .or_else(|| self.source_ref(state))
+    }
+
     /// CR 400.7: True if the ability's source is still the same object instance it
     /// was when the ability was created. Full triggered-source provenance takes
     /// precedence; activated and delayed self-transform abilities fall back to
