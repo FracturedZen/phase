@@ -23477,6 +23477,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
         AttackTargetFilter::OwnerOrPlaneswalker,
         AttackTargetFilter::PlayerOrPermanents,
         AttackTargetFilter::Monarch,
+        AttackTargetFilter::PlayerAttackedByAttackerThisTurn,
     ];
     for scope in attack_target_scopes {
         let expected_rebind = match scope {
@@ -23487,7 +23488,8 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
-            | AttackTargetFilter::PlayerOrPermanents => false,
+            | AttackTargetFilter::PlayerOrPermanents
+            | AttackTargetFilter::PlayerAttackedByAttackerThisTurn => false,
         };
         assert_eq!(
             attack_intervening_if_anaphor_is_defending_player(&base(Some(scope.clone()))),

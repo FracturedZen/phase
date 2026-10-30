@@ -15655,13 +15655,14 @@ mod tests {
             AttackTargetFilter::OwnerOrPlaneswalker,
             AttackTargetFilter::PlayerOrPermanents,
             AttackTargetFilter::Monarch,
+            AttackTargetFilter::PlayerAttackedByAttackerThisTurn,
         ]
         .iter()
         .map(fmt_attack_target_filter)
         .collect();
         assert_eq!(
             labels.len(),
-            8,
+            9,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
     }
