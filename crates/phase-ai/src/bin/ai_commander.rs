@@ -177,10 +177,9 @@ enum RunContext {
 /// `--players`, and `--games-file` validation) that used to live directly in
 /// `main`, so `main` itself does nothing but read the env var, call this, and
 /// report success/failure. Error paths return an `Err` instead, exactly
-/// mirroring the direct-exit message each replaces, with two exceptions that
-/// still exit with status 1 directly: a rejected difficulty label
-/// (`--difficulty`, `--difficulty-pK`), via `parse_difficulty`, and a rejected
-/// `--action-cap` value, via `parse_action_cap`.
+/// mirroring the direct-exit message each replaces. A value-taking flag with
+/// no value after it, or with a value that doesn't parse, is an `Err` too:
+/// none of them falls back to its default (phase#10378).
 fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> {
     let mut cards_path: Option<String> = None;
 
@@ -204,30 +203,23 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
             "--seed" => {
-                if let Some(v) = args_iter.next() {
-                    if let Ok(n) = v.parse::<u64>() {
-                        seed = n;
-                    }
-                }
+                let v = flag_value(&mut args_iter, "--seed", "a seed")?;
+                seed = parse_seed(v)?;
             }
             "--difficulty" => {
-                if let Some(v) = args_iter.next() {
-                    difficulty = parse_difficulty(v);
-                }
+                let v = flag_value(&mut args_iter, "--difficulty", "a difficulty label")?;
+                difficulty = parse_difficulty("--difficulty", v)?;
             }
             "--action-cap" => {
-                if let Some(v) = args_iter.next() {
-                    action_cap = parse_action_cap(v);
-                }
+                let v = flag_value(&mut args_iter, "--action-cap", "an action count")?;
+                action_cap = parse_action_cap_checked(v)?;
             }
             "--players" => match args_iter.next() {
                 Some(v) => players = parse_player_count(v)?,
                 None => return Err("error: --players requires a seat count".to_string()),
             },
             "--feed" => {
-                if let Some(v) = args_iter.next() {
-                    feed = v.clone();
-                }
+                feed = flag_value(&mut args_iter, "--feed", "a feed path")?.clone();
             }
             "--games-file" => match args_iter.next() {
                 Some(v) => games_file = Some(v.clone()),
@@ -291,14 +283,14 @@ fn parse_cli(args: &[String], measurement_env: bool) -> Result<CliArgs, String> 
     let mut seat_difficulty: Vec<Option<AiDifficulty>> = vec![None; usize::from(players)];
     for (suffix, value) in seat_overrides {
         let (idx, label) = parse_seat_override(suffix, value, players)?;
-        seat_difficulty[idx] = Some(parse_difficulty(label));
+        seat_difficulty[idx] = Some(parse_difficulty(&format!("--difficulty-p{idx}"), label)?);
     }
 
     watch_cards.extend(exact_watch_cards);
     let cards_path = cards_path.unwrap_or_else(|| "client/public".to_string());
 
     // `--games-file` batch entries are validated up front — same hard-fail-at-
-    // startup discipline as `parse_difficulty`/`parse_action_cap`/
+    // startup discipline as `parse_difficulty`/`parse_action_cap_checked`/
     // `parse_seat_override` above: a garbled batch file should fail before the
     // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
     let batch_games: Option<Vec<(u64, AiDifficulty)>> = match games_file.as_deref() {
@@ -1026,27 +1018,41 @@ fn read_dump_env(key: &str) -> Option<String> {
 /// mislabeled skill tier with no indication anything went wrong (phase#6080
 /// diagnosis; pod-lab gauntlet plan §3.8/§4.5, whose local tier-echo guard
 /// exists precisely because this class of silent downgrade was possible).
-fn parse_difficulty(s: &str) -> AiDifficulty {
+/// `flag` is the flag as typed (`--difficulty` or `--difficulty-pK`), so the
+/// error names the flag the user actually passed.
+fn parse_difficulty(flag: &str, s: &str) -> Result<AiDifficulty, String> {
     if !ACCEPTED_DIFFICULTY_LABELS
         .iter()
         .any(|label| label.eq_ignore_ascii_case(s.trim()))
     {
-        eprintln!(
-            "error: unrecognized --difficulty {s:?}; accepted values: {}",
+        return Err(format!(
+            "error: unrecognized {flag} {s:?}; accepted values: {}",
             ACCEPTED_DIFFICULTY_LABELS.join(", ")
-        );
-        std::process::exit(1);
+        ));
     }
-    AiDifficulty::from_label(s)
+    Ok(AiDifficulty::from_label(s))
 }
 
-/// Parses an `--action-cap` value, aborting startup on a garbled cap. Thin
-/// exiting wrapper over [`parse_action_cap_checked`] — see it for the rule.
-fn parse_action_cap(s: &str) -> usize {
-    parse_action_cap_checked(s).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    })
+/// The value after a value-taking flag. A missing value, or the next flag in
+/// its place (`--seed --difficulty Hard`), is an `Err`: silently ignoring the
+/// flag would run the whole batch with its default (phase#10378).
+fn flag_value<'a>(
+    args: &mut impl Iterator<Item = &'a String>,
+    flag: &str,
+    what: &str,
+) -> Result<&'a String, String> {
+    match args.next() {
+        Some(v) if !v.starts_with("--") => Ok(v),
+        _ => Err(format!("error: {flag} requires {what}")),
+    }
+}
+
+/// Parses a `--seed` value: a non-negative integer (whitespace trimmed). A
+/// garbled seed is an `Err`, never a silent fallback to the default seed 42.
+fn parse_seed(s: &str) -> Result<u64, String> {
+    s.trim()
+        .parse::<u64>()
+        .map_err(|_| format!("error: --seed {s:?} must be a non-negative integer"))
 }
 
 /// Validates an `--action-cap` value: a positive integer (whitespace trimmed).
@@ -1087,7 +1093,7 @@ fn parse_player_count(s: &str) -> Result<u8, String> {
 /// Resolves a `--difficulty-pK <label>` seat override. `suffix` is the text
 /// after `--difficulty-p`; `value` is the following CLI arg (the label), if
 /// present. Mirrors the hard-fail discipline of `parse_difficulty` /
-/// `parse_action_cap`: a non-numeric or out-of-range (`>= players`) seat index,
+/// `parse_action_cap_checked`: a non-numeric or out-of-range (`>= players`) seat index,
 /// or a missing label, is a startup error rather than a silently dropped flag —
 /// which previously also swallowed the label arg, cascading it into the
 /// catch-all. Label validity is delegated to `parse_difficulty` by the caller.
@@ -1653,6 +1659,49 @@ mod tests {
         assert!(parse_seat_override("4", Some("Hard"), 4).is_err());
         assert!(parse_seat_override("9", Some("Hard"), 4).is_err());
         assert!(parse_seat_override("5", Some("Hard"), 5).is_err());
+    }
+
+    fn cli(extra: &[&str]) -> Result<CliArgs, String> {
+        let args: Vec<String> = std::iter::once("ai-commander")
+            .chain(extra.iter().copied())
+            .map(str::to_string)
+            .collect();
+        parse_cli(&args, false)
+    }
+
+    /// phase#10378: a garbled or missing flag value is a startup error, never
+    /// a silent run with the default (seed 42, Easy, the default feed/cap).
+    #[test]
+    fn parse_cli_rejects_garbled_or_missing_flag_values() {
+        for (args, message) in [
+            (&["--seed", "abc"][..], "error: --seed \"abc\" must be a non-negative integer"),
+            (&["--seed"][..], "error: --seed requires a seed"),
+            (&["--seed", "--difficulty", "Hard"][..], "error: --seed requires a seed"),
+            (&["--difficulty"][..], "error: --difficulty requires a difficulty label"),
+            (&["--action-cap"][..], "error: --action-cap requires an action count"),
+            (&["--feed"][..], "error: --feed requires a feed path"),
+            (&["--action-cap", "0"][..], "error: --action-cap \"0\" must be a positive integer"),
+        ] {
+            assert_eq!(cli(args).err().as_deref(), Some(message), "args: {args:?}");
+        }
+    }
+
+    /// phase#10378: a rejected label names the flag that was typed.
+    #[test]
+    fn parse_cli_difficulty_errors_name_the_typed_flag() {
+        let table = cli(&["--difficulty", "Bogus"]).err().expect("rejected");
+        assert!(table.starts_with("error: unrecognized --difficulty \"Bogus\""), "{table}");
+        let seat = cli(&["--difficulty-p2", "Bogus"]).err().expect("rejected");
+        assert!(seat.starts_with("error: unrecognized --difficulty-p2 \"Bogus\""), "{seat}");
+    }
+
+    #[test]
+    fn parse_cli_accepts_well_formed_flag_values() {
+        let parsed = cli(&["--seed", "7", "--difficulty", "Hard", "--action-cap", "9", "--feed", "f.json"])
+            .expect("well-formed flags parse");
+        assert_eq!(parsed.seed, 7);
+        assert_eq!(parsed.action_cap, 9);
+        assert_eq!(parsed.feed, "f.json");
     }
 
     #[test]
