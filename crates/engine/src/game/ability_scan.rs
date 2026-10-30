@@ -5166,6 +5166,9 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             // A distinct-source-count threshold; carries no scan axis of its own
             // (the source read is already classified via `source` below).
             min_sources: _,
+            // The look-back window selects which damage journal is read; it
+            // carries no scan axis of its own.
+            scope: _,
         } => {
             let mut acc = Axes {
                 event: false,

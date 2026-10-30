@@ -25822,6 +25822,7 @@ fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
                 source: None,
 
                 min_sources: 1,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             },
         },
     };

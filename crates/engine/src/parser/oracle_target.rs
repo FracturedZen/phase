@@ -8484,6 +8484,7 @@ fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilt
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             },
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
@@ -8535,6 +8536,7 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             kind: DamageKindFilter::CombatOnly,
             source: Some(Box::new(source)),
             min_sources,
+            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
         },
     ))
 }

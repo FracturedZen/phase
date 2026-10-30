@@ -24137,6 +24137,14 @@ declare_game_state! {
     /// of deep-copying them on the AI-search hot path.
     #[serde(default)]
     pub damage_dealt_this_turn: im::Vector<DamageRecord>,
+    /// CR 120.1 + CR 608.2i: Every damage record whose recipient was a PLAYER,
+    /// retained for the whole game (never cleared at the turn boundary). Backs
+    /// "dealt [combat] damage this game by <source>" look-backs (Gollum,
+    /// Obsessed Stalker) via `PlayerFilter::OpponentDealtDamage { scope:
+    /// ThisGame }`. Same records (incl. the damage-time source snapshot) as
+    /// `damage_dealt_this_turn`, restricted to player recipients to bound size.
+    #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
+    pub damage_dealt_to_players_this_game: im::Vector<DamageRecord>,
     /// CR 702.110b + CR 400.7: Exploit records this turn for "if it exploited that creature" queries.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
     pub creatures_exploited_this_turn: im::Vector<ExploitRecord>,
@@ -32278,6 +32286,7 @@ impl GameState {
             batched_zone_change_trigger_fired: im::HashSet::new(),
             battlefield_entries_this_turn: im::Vector::new(),
             damage_dealt_this_turn: im::Vector::new(),
+            damage_dealt_to_players_this_game: im::Vector::new(),
             creatures_exploited_this_turn: im::Vector::new(),
             assassin_or_commander_dealt_combat_damage_this_turn: HashSet::new(),
             creature_types_dealt_combat_damage_this_turn: im::HashSet::new(),
@@ -35620,6 +35629,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         batched_zone_change_trigger_fired: _,
         battlefield_entries_this_turn: _,
         damage_dealt_this_turn: _,
+        damage_dealt_to_players_this_game: _,
         creatures_exploited_this_turn: _,
         assassin_or_commander_dealt_combat_damage_this_turn: _,
         creature_types_dealt_combat_damage_this_turn: _,
@@ -36006,6 +36016,7 @@ impl PartialEq for GameState {
             && self.batched_zone_change_trigger_fired == other.batched_zone_change_trigger_fired
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.damage_dealt_this_turn == other.damage_dealt_this_turn
+            && self.damage_dealt_to_players_this_game == other.damage_dealt_to_players_this_game
             && self.creatures_exploited_this_turn == other.creatures_exploited_this_turn
             && self.assassin_or_commander_dealt_combat_damage_this_turn
                 == other.assassin_or_commander_dealt_combat_damage_this_turn

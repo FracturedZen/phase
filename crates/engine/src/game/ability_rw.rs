@@ -7651,6 +7651,7 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             source,
             kind: _,
             min_sources: _,
+            scope: _,
         } => {
             let mut p = reads_player_of(StateKind::JournalLife);
             if let Some(source) = source.as_deref() {

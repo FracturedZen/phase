@@ -9687,11 +9687,20 @@ pub(crate) fn opponent_dealt_damage_matches(
     kind: crate::types::ability::DamageKindFilter,
     source: &Option<Box<TargetFilter>>,
     min_sources: u32,
+    scope: crate::types::ability::DamageHistoryScope,
     ability_source_id: ObjectId,
 ) -> bool {
     if player == controller {
         return false;
     }
+    // CR 120.1 + CR 608.2i: select the look-back window. The game-long ledger
+    // holds only player-recipient records, which is all this predicate reads.
+    let records = match scope {
+        crate::types::ability::DamageHistoryScope::ThisTurn => &state.damage_dealt_this_turn,
+        crate::types::ability::DamageHistoryScope::ThisGame => {
+            &state.damage_dealt_to_players_this_game
+        }
+    };
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
     let record_matches = |r: &crate::types::game_state::DamageRecord| {
         damage_record_matches_kind(r, kind)
@@ -9708,17 +9717,13 @@ pub(crate) fn opponent_dealt_damage_matches(
     // == 1` case (every existing card). Only "N or more <source>" clauses
     // (min_sources > 1, Admiral Beckett Brass) need to count DISTINCT sources.
     if min_sources <= 1 {
-        return state.damage_dealt_this_turn.iter().any(record_matches);
+        return records.iter().any(record_matches);
     }
     // CR 120.9 + CR 608.2i: count DISTINCT damaging sources by `source_id` (a
     // single Pirate dealing combat damage across two combat steps is ONE source,
     // not two), then require at least `min_sources` of them.
     let mut distinct: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
-    for r in state
-        .damage_dealt_this_turn
-        .iter()
-        .filter(|r| record_matches(r))
-    {
+    for r in records.iter().filter(|r| record_matches(r)) {
         distinct.insert(r.source_id);
         if distinct.len() as u32 >= min_sources {
             return true;
@@ -9939,13 +9944,14 @@ pub(crate) fn player_count_matching_ids(
                         kind,
                         source,
                         min_sources,
+                    scope,
                     } => opponent_dealt_damage_matches(
                         state,
                         p.id,
                         controller,
                         *kind,
                         source,
-                        *min_sources,
+                        *min_sources, *scope,
                         source_id,
                     ),
                     // CR 508.6: opponent the subject attacked within scope.
@@ -17779,6 +17785,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             },
         };
@@ -17829,6 +17836,7 @@ mod tests {
                             kind,
                             source: None,
                             min_sources: 1,
+                            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                         },
                     },
                 },
@@ -17869,6 +17877,7 @@ mod tests {
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             }
         );
 
@@ -17881,6 +17890,7 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: None,
                 min_sources: 1,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             }
         );
         let reser = serde_json::to_string(&any).unwrap();
@@ -17901,6 +17911,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             },
         };
@@ -17949,6 +17960,7 @@ mod tests {
                     source: Some(Box::new(dragon_filter)),
 
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             },
         };
@@ -17992,6 +18004,7 @@ mod tests {
                             source: Some(Box::new(source)),
 
                             min_sources: 1,
+                            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                         },
                     },
                 },

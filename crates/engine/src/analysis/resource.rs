@@ -8177,6 +8177,7 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 120: who has dealt damage + the per-turn damage event log.
     s.objects_that_dealt_damage.clear();
     s.damage_dealt_this_turn.clear();
+    s.damage_dealt_to_players_this_game.clear();
     // CR 601: per-turn / per-game cast journals.
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();

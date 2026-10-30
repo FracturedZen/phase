@@ -497,13 +497,14 @@ pub fn matches_player_scope(
                         kind,
                         source,
                         min_sources,
+                    scope,
                     } => crate::game::quantity::opponent_dealt_damage_matches(
                         state,
                         p.id,
                         controller,
                         *kind,
                         source,
-                        *min_sources,
+                        *min_sources, *scope,
                         source_id,
                     ),
                     // CR 508.6: opponent the subject attacked within scope.

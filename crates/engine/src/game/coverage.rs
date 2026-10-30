@@ -2286,6 +2286,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             kind,
             source,
             min_sources,
+            scope,
         } => {
             let kind_text = match kind {
                 DamageKindFilter::CombatOnly => "combat damage",
@@ -2301,7 +2302,11 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             if *min_sources > 1 {
                 rendered.push_str(&format!(" by {min_sources} distinct sources"));
             }
-            rendered.push_str(" this turn");
+            // CR 120.1 + CR 608.2i: the look-back window is behavior-bearing.
+            rendered.push_str(match scope {
+                crate::types::ability::DamageHistoryScope::ThisTurn => " this turn",
+                crate::types::ability::DamageHistoryScope::ThisGame => " this game",
+            });
             return rendered;
         }
         PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
@@ -15938,6 +15943,7 @@ mod tests {
                 kind,
                 source: source.map(Box::new),
                 min_sources,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             }
         }
 

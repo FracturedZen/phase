@@ -550,6 +550,7 @@ pub(crate) fn parse_quantity_ref_with_context(
                     // Count context ("for each opponent dealt …") has no
                     // "N or more distinct sources" restriction — default 1.
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             });
         }
@@ -3707,6 +3708,7 @@ fn parse_for_each_clause_with_they_controller(
                 source: source.map(Box::new),
                 // Count context has no "N or more distinct sources" restriction — default 1.
                 min_sources: 1,
+                scope: crate::types::ability::DamageHistoryScope::ThisTurn,
             },
         });
     }
@@ -4966,6 +4968,7 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
@@ -4991,6 +4994,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
@@ -5012,6 +5016,7 @@ mod tests {
                         kind: DamageKindFilter::NoncombatOnly,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
@@ -5940,6 +5945,7 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }
             }
@@ -5961,6 +5967,7 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }
             }
@@ -5994,6 +6001,7 @@ mod tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: None,
                             min_sources: 1,
+                            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                         },
                     }
                 },
@@ -6030,6 +6038,7 @@ mod tests {
                     })),
 
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             }
         );
@@ -6051,6 +6060,7 @@ mod tests {
                     source: Some(Box::new(TargetFilter::SelfRef)),
 
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 },
             }
         );
@@ -6073,6 +6083,7 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     },
                 }),
                 "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"

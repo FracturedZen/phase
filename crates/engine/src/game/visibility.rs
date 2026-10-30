@@ -4542,6 +4542,11 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
             redact_damage_record_source(record);
         }
     }
+    for record in state.damage_dealt_to_players_this_game.iter_mut() {
+        if hidden_ids.contains(&record.source_id) {
+            redact_damage_record_source(record);
+        }
+    }
     for record in state.attacker_declarations_this_turn.iter_mut() {
         if hidden_ids.contains(&record.object_id) {
             redact_lki_snapshot(&mut record.lki);

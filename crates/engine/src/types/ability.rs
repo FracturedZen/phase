@@ -16178,6 +16178,26 @@ pub enum CombatHistoryScope {
     ThisCombat,
 }
 
+/// CR 120.1 + CR 608.2i: The time window a damage-history look-back
+/// ("was dealt damage this turn" / "dealt combat damage this game") is
+/// measured over.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageHistoryScope {
+    /// The current turn — `GameState::damage_dealt_this_turn`, cleared at the
+    /// turn boundary.
+    #[default]
+    ThisTurn,
+    /// The whole game — `GameState::damage_dealt_to_players_this_game`, never
+    /// cleared. Only damage dealt to players is retained there.
+    ThisGame,
+}
+
+impl DamageHistoryScope {
+    pub fn is_this_turn(&self) -> bool {
+        matches!(self, DamageHistoryScope::ThisTurn)
+    }
+}
+
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -16231,6 +16251,14 @@ pub enum PlayerFilter {
         /// `1` (any matching source) for back-compat; Beckett sets `3`.
         #[serde(default = "default_one", skip_serializing_if = "is_one")]
         min_sources: u32,
+        /// CR 120.1 + CR 608.2i: the look-back window the damage is measured
+        /// over. `ThisTurn` (the default, every pre-existing card) reads
+        /// `state.damage_dealt_this_turn`; `ThisGame` reads the never-cleared
+        /// `state.damage_dealt_to_players_this_game` ledger (Gollum, Obsessed
+        /// Stalker: "each opponent dealt combat damage this game by a creature
+        /// named Gollum, Obsessed Stalker").
+        #[serde(default, skip_serializing_if = "DamageHistoryScope::is_this_turn")]
+        scope: DamageHistoryScope,
     },
     /// CR 508.6: Each opponent that `subject` attacked (declared one or more
     /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle

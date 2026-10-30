@@ -6305,6 +6305,19 @@ pub(super) fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, St
         return (None, text.to_string());
     }
 
+    // CR 120.1 + CR 120.2a/120.2b + CR 120.9 + CR 608.2i: A damage look-back
+    // relative clause — "[who was ]dealt [combat ]damage this turn/this game
+    // [by <source>]" — restricts the opponent set to those dealt matching damage
+    // within the window (Gollum, Obsessed Stalker: "each opponent dealt combat
+    // damage this game by a creature named Gollum, Obsessed Stalker loses life
+    // …"). Like the "who controls" clause below, the relative clause MUST be
+    // consumed and reflected in the scope; dropping it over-applies the effect
+    // to every opponent (issue #8054).
+    if let Some((dealt_scope, after_clause)) = strip_dealt_damage_history_clause(&scope, rest) {
+        let deconjugated = subject::deconjugate_verb(&after_clause);
+        return (Some(dealt_scope), deconjugated);
+    }
+
     // CR 109.4 + CR 109.5: A "who controls [comparator] [count] [type-phrase]"
     // relative clause restricts the player set to those whose controlled-permanent
     // count satisfies the comparison (Thornbow Archer: "each opponent who doesn't
@@ -6973,6 +6986,81 @@ fn strip_controls_permanent_clause(
             filter,
             comparator,
             count: Box::new(count),
+        },
+        verb_phrase.to_string(),
+    ))
+}
+
+/// CR 120.1 + CR 120.2a/120.2b + CR 120.9 + CR 608.2i: Strip a damage
+/// look-back relative clause after an "each opponent" subject:
+/// `[who was |who has been ]dealt <kind> damage <window>[ by <source>] <verb …>`.
+///
+/// - `<kind>`: "combat damage" (CR 120.2a), "noncombat damage" (CR 120.2b), or
+///   bare "damage" (either).
+/// - `<window>`: "this turn" → `DamageHistoryScope::ThisTurn`; "this game" →
+///   `DamageHistoryScope::ThisGame` (the never-cleared player-damage ledger).
+/// - `<source>` (CR 120.9): parsed by the shared `parse_target` building block,
+///   so any source phrase composes ("a creature named <name>", "~", "a
+///   Dragon"); it is matched against each damage record's damage-time source
+///   snapshot (CR 608.2i), so a "named X" source is checked by the name the
+///   creature had when it dealt the damage (CR 201.2).
+///
+/// Only an opponent base composes: `PlayerFilter::OpponentDealtDamage` excludes
+/// the ability's controller. Returns the scope and the verb-phrase remainder.
+fn strip_dealt_damage_history_clause(
+    base: &PlayerFilter,
+    rest: &str,
+) -> Option<(PlayerFilter, String)> {
+    use crate::types::ability::{DamageHistoryScope, DamageKindFilter};
+    if !matches!(base, PlayerFilter::Opponent) {
+        return None;
+    }
+    let lower = rest.to_lowercase();
+    let ((kind, scope), after_window) = nom_on_lower(rest, &lower, |i| {
+        let (i, _) = alt((
+            tag("who was dealt "),
+            tag("who has been dealt "),
+            tag("dealt "),
+        ))
+        .parse(i)?;
+        let (i, kind) = alt((
+            value(DamageKindFilter::CombatOnly, tag("combat damage")),
+            value(DamageKindFilter::NoncombatOnly, tag("noncombat damage")),
+            value(DamageKindFilter::Any, tag("damage")),
+        ))
+        .parse(i)?;
+        let (i, scope) = alt((
+            value(DamageHistoryScope::ThisGame, tag(" this game")),
+            value(DamageHistoryScope::ThisTurn, tag(" this turn")),
+        ))
+        .parse(i)?;
+        Ok((i, (kind, scope)))
+    })?;
+    let after_lower = after_window.to_lowercase();
+    let (source, remainder) =
+        match nom_on_lower(after_window, &after_lower, |i| value((), tag(" by ")).parse(i)) {
+            Some(((), source_text)) => {
+                let (filter, remainder) = parse_target(source_text);
+                // The source phrase must actually be consumed; an unparsed
+                // phrase must not silently widen to "any source".
+                if remainder.len() == source_text.len() {
+                    return None;
+                }
+                (Some(Box::new(filter)), remainder)
+            }
+            None => (None, after_window),
+        };
+    // Require a word boundary and a following predicate.
+    let verb_phrase = remainder.trim_start();
+    if verb_phrase.is_empty() || verb_phrase.len() == remainder.len() {
+        return None;
+    }
+    Some((
+        PlayerFilter::OpponentDealtDamage {
+            kind,
+            source,
+            min_sources: 1,
+            scope,
         },
         verb_phrase.to_string(),
     ))
@@ -16405,6 +16493,7 @@ mod where_x_tests {
                             // "three or more Pirates" → the count threshold is
                             // enforced (not dropped), so min_sources must be 3.
                             min_sources: 3,
+                            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                         } if matches!(
                             &**src,
                             TargetFilter::Typed(t)

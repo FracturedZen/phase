@@ -1065,6 +1065,7 @@ mod issue_7884_king_of_the_oathbreakers;
 mod issue_788_unexpectedly_absent;
 mod issue_7945_free_grant_face_down;
 mod issue_8024_terminal_rest_captures;
+mod issue_8054_gollum_combat_damage_this_game;
 mod issue_8077_heart_shaped_herb_return_target;
 mod issue_8089_copy_effect_incarnation;
 mod issue_8089_real_cards;

@@ -19736,6 +19736,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 }),
             }],
         ] {
@@ -20243,6 +20244,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                                 }),
                             },
                         ]),
@@ -20524,6 +20526,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                     }),
                 },
             ])),
@@ -24257,6 +24260,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    scope: crate::types::ability::DamageHistoryScope::ThisTurn,
                 }),
             },
         ]))

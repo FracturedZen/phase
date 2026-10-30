@@ -190,12 +190,14 @@ fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
             source,
             kind,
             min_sources,
+            scope,
         } => PlayerFilter::OpponentDealtDamage {
             source: source
                 .as_deref()
                 .map(|s| Box::new(relax_x_mana_value_constraint(s))),
             kind: *kind,
             min_sources: *min_sources,
+            scope: *scope,
         },
         PlayerFilter::ControlsCount {
             filter,
@@ -2418,6 +2420,7 @@ mod tests {
             source: Some(Box::new(cmc_x())),
             kind: DamageKindFilter::Any,
             min_sources: 1,
+            scope: crate::types::ability::DamageHistoryScope::ThisTurn,
         });
         let tracked_set = wrap(PlayerFilter::TrackedSetPossessor {
             filter: cmc_x(),

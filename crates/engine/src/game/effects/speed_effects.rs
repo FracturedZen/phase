@@ -63,6 +63,7 @@ pub(crate) fn players_for_filter(
             kind,
             source,
             min_sources,
+            scope,
         } => state
             .players
             .iter()
@@ -75,6 +76,7 @@ pub(crate) fn players_for_filter(
                     *kind,
                     source,
                     *min_sources,
+                    *scope,
                     source_id,
                 )
             })
