@@ -304,13 +304,10 @@ pub(crate) fn hand_pick_eligible_is_empty(
     let Effect::CastFromZone { target, .. } = &ability.effect else {
         return None;
     };
-    if ability
-        .targets
-        .iter()
-        .any(|t| matches!(t, TargetRef::Object(_)))
-    {
-        return None;
-    }
+    // CR 115.1 + CR 601.2c: A cast from hand is chosen at resolution and is
+    // never targeted. Any targets on `ability` belong to earlier chained
+    // instructions (e.g. "Counter target spell" on Reinterpret) rather than
+    // being pre-bound targets for this hand pick.
     let source_zone = target.extract_in_zone().filter(|z| *z == Zone::Hand)?;
     Some(compute_hand_pick_eligible(state, ability, target, source_zone).is_empty())
 }
@@ -448,12 +445,7 @@ pub(crate) fn graveyard_pick_eligible_is_empty(
     let Effect::CastFromZone { target, .. } = &ability.effect else {
         return None;
     };
-    if !is_free_immediate_graveyard_pick(ability)
-        || ability
-            .targets
-            .iter()
-            .any(|t| matches!(t, TargetRef::Object(_)))
-    {
+    if !is_free_immediate_graveyard_pick(ability) {
         return None;
     }
     let (stash, stored_filter) = private_zone_pick_stash(state, ability, target, Zone::Graveyard);
@@ -735,37 +727,49 @@ pub fn resolve(
     // Collect target object IDs. CR 115.1: a tracked-set filter is a linked
     // reference whose members the chain published, so it binds INTRINSICALLY
     // (`tracked_set_cast_candidates`) and must not read whatever the chain seam
-    // injected into `ability.targets`. Every other filter shape is a genuine
-    // target list and keeps the announcement-time targets.
-    let mut target_ids: Vec<_> = match target_filter {
-        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
-            tracked_set_cast_candidates(state, ability, target_filter)
+    // injected into `ability.targets`. Likewise, a resolution-time private-zone
+    // choice (Hand, looked-at Library) or untargeted graveyard pick names no
+    // targets on announcement (CR 115.1, CR 601.2c) — the spell is chosen while
+    // the ability resolves via EffectZoneChoice (CR 608.2d). Any targets on
+    // `ability` belong to an earlier instruction (e.g. "Counter target spell" on
+    // Reinterpret) and must not be treated as announcement-time targets for
+    // this cast. Every other filter shape is a genuine target list and keeps
+    // the announcement-time targets.
+    let is_resolution_zone_pick = matches!(target_filter.extract_in_zone(), Some(Zone::Hand))
+        || is_free_immediate_graveyard_pick(ability);
+    let mut target_ids: Vec<_> = if is_resolution_zone_pick {
+        Vec::new()
+    } else {
+        match target_filter {
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => {
+                tracked_set_cast_candidates(state, ability, target_filter)
+            }
+            // CR 400.7 + CR 603.7c: a delayed cast-from-zone whose pinned referent
+            // became a new object casts nothing. This `_` arm is THE single read
+            // through which a pinned referent flows into this resolver.
+            //
+            // The plan pre-flagged this file as a possible STOP because of its three
+            // `scoped_ability.targets = …` assignments (`:112`, `:444`, `:517`) and
+            // `fallback.targets = ability.targets.clone()` (`:257`). Re-read at the
+            // source, none of those is a read of the pinned referent: all three
+            // `scoped_ability` sites WRITE a freshly-derived id list onto a throwaway
+            // clone purely to scope a `FilterContext`, and their inputs
+            // (`deduped`, `candidate_ids`, `target_ids`) are already downstream of
+            // this arm. `:257` is chain-context propagation onto a declined-optional
+            // fallback ability, not a target resolution. So the flat substitution
+            // does apply here, at exactly one site.
+            _ => ability
+                .live_object_targets(state)
+                .iter()
+                .filter_map(|t| {
+                    if let TargetRef::Object(id) = t {
+                        Some(*id)
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         }
-        // CR 400.7 + CR 603.7c: a delayed cast-from-zone whose pinned referent
-        // became a new object casts nothing. This `_` arm is THE single read
-        // through which a pinned referent flows into this resolver.
-        //
-        // The plan pre-flagged this file as a possible STOP because of its three
-        // `scoped_ability.targets = …` assignments (`:112`, `:444`, `:517`) and
-        // `fallback.targets = ability.targets.clone()` (`:257`). Re-read at the
-        // source, none of those is a read of the pinned referent: all three
-        // `scoped_ability` sites WRITE a freshly-derived id list onto a throwaway
-        // clone purely to scope a `FilterContext`, and their inputs
-        // (`deduped`, `candidate_ids`, `target_ids`) are already downstream of
-        // this arm. `:257` is chain-context propagation onto a declined-optional
-        // fallback ability, not a target resolution. So the flat substitution
-        // does apply here, at exactly one site.
-        _ => ability
-            .live_object_targets(state)
-            .iter()
-            .filter_map(|t| {
-                if let TargetRef::Object(id) = t {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect(),
     };
 
     // CR 400.7 + CR 603.7c + CR 603.7b: the trigger fired and resolved; it cast

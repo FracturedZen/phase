@@ -11035,6 +11035,19 @@ pub(crate) fn effect_owns_resolution_zone_choice(
         {
             (target, target.extract_in_zone())
         }
+        // CR 115.1 + CR 601.2c + CR 608.2d: An untargeted free cast from a
+        // private zone (Hand, looked-at Library) or resolution-timed graveyard
+        // pick (Reinterpret, Baral's Expertise, Counterpoint) makes its choice
+        // during resolution, never at stack-push time. Its sub-ability owns its
+        // object choice and must not inherit the parent instruction's object
+        // target (such as the countered spell from "Counter target spell").
+        Effect::CastFromZone { target, .. }
+            if matches!(target.extract_in_zone(), Some(Zone::Hand | Zone::Library))
+                || (timing == TargetChoiceTiming::Resolution
+                    && target.extract_in_zone() == Some(Zone::Graveyard)) =>
+        {
+            (target, target.extract_in_zone())
+        }
         _ => return false,
     };
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
