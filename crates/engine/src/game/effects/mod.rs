@@ -27786,6 +27786,13 @@ fn resolve_unless_payer(
         | TargetFilter::SpecificPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }
+        // CR 118.12a + CR 608.2c: "choose an opponent … unless they sacrifice …"
+        // (Indoraptor, the Perfect Hybrid) — the payer is the Nth player chosen
+        // earlier in this resolution, read from `ability.chosen_players` by the
+        // shared resolver's chosen-player arm.
+        TargetFilter::Typed(_) if payer.chosen_player_index().is_some() => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         // CR 508.5 + CR 118.12a: "[Effect] unless defending player [pays cost]"
         // (Ogre Marauder). CR 508.5 fixes the payer as the player the ability's
         // attacking source is attacking — determined per attacker, and in

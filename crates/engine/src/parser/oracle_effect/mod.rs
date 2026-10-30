@@ -9431,8 +9431,31 @@ fn attach_unless_slots(
     }
     if clause.unless_pay.is_none() {
         clause.unless_pay = unless_pay;
+        bind_chosen_player_unless_payer(&mut clause.unless_pay, &clause.effect);
     }
     clause
+}
+
+/// CR 118.12a + CR 608.2c + CR 109.4: an anaphoric "unless they …" payer
+/// (provisionally `TargetFilter::Player`) names the player the effect acts on.
+/// When that recipient is the player an earlier `Choose(Player)` clause selected
+/// ("Choose an opponent at random. ~ deals damage … to that player unless they
+/// sacrifice …" — Indoraptor, the Perfect Hybrid, issue #8075), the chosen
+/// player pays. Without this the `Player` payer reads `ability.targets`, finds
+/// no declared player, and the payment is skipped.
+fn bind_chosen_player_unless_payer(unless_pay: &mut Option<UnlessPayModifier>, effect: &Effect) {
+    let Some(modifier) = unless_pay.as_mut() else {
+        return;
+    };
+    if modifier.payer != TargetFilter::Player {
+        return;
+    }
+    if let Some(chosen) = effect
+        .target_filter()
+        .filter(|filter| filter.chosen_player_index().is_some())
+    {
+        modifier.payer = chosen.clone();
+    }
 }
 
 #[tracing::instrument(level = "debug")]
@@ -48168,6 +48191,7 @@ fn parse_effect_chain_ir_body(
         if unless_pay.is_none() {
             unless_pay = clause.unless_pay.clone();
         }
+        bind_chosen_player_unless_payer(&mut unless_pay, &clause.effect);
 
         // CR 608.2c: Verb carry-forward for bare "target X" clauses in multi-target
         // conjunctions. When a clause parses as Unimplemented and starts with "target",

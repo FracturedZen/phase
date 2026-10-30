@@ -10719,6 +10719,21 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         ));
     }
 
+    // CR 608.2c + CR 109.4: "Choose an opponent [at random]. ~ deals damage …
+    // to that player" — the demonstrative names the chosen player, so bind it
+    // before the generic event-context "that player" resolution below.
+    if let Some(target) = resolve_chosen_player_demonstrative_recipient(after_to, ctx) {
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            "",
+        ));
+    }
+
     // CR 115.10a + CR 120.1 + CR 120.3: Check Ghyrson-style mixed event
     // recipients before generic event-context references. This is DealDamage
     // local because `EventTarget` may be a player only for the raw damage
@@ -10890,6 +10905,33 @@ fn try_parse_each_source_power_damage<'a>(
         },
         rem,
     ))
+}
+
+/// CR 608.2c + CR 109.4: Resolve a demonstrative "that player" / "that
+/// opponent" damage recipient to the player an earlier `Choose(Player)` clause
+/// selected ("Choose an opponent at random. ~ deals damage equal to its power
+/// to that player …" — Indoraptor, the Perfect Hybrid, issue #8075).
+///
+/// Returns `None` unless the whole recipient is the demonstrative AND a chosen-
+/// player scope is live, so every other "that player" recipient keeps the
+/// generic event-context binding (`TriggeringPlayer`).
+fn resolve_chosen_player_demonstrative_recipient(
+    after_to: &str,
+    ctx: &ParseContext,
+) -> Option<TargetFilter> {
+    let trimmed = after_to.trim().trim_end_matches(['.', ',', ';']).trim();
+    let lower = trimmed.to_lowercase();
+    nom_parse_lower(&lower, |input| {
+        all_consuming(value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("that player"),
+                tag("that opponent"),
+            )),
+        ))
+        .parse(input)
+    })?;
+    super::subject::chosen_player_anaphor_filter(ctx.relative_player_scope.as_ref())
 }
 
 /// CR 603.2b + CR 608.2c: Resolve a bare player-anaphor damage recipient
