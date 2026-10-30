@@ -2162,6 +2162,7 @@ mod search_result_conditional_destination;
 mod search_result_missing_referent;
 
 mod activate_only_restriction_list;
+mod bilbo_paid_graveyard_cast_8139;
 mod celes_kotis_graveyard_origin_batch;
 mod commanders_plate_protection;
 mod display_identity_serde;
@@ -2174,4 +2175,3 @@ mod squall_attack_batch_chosen_number;
 mod strago_cast_this_way_rider;
 mod tifa_additional_combat;
 mod token_attack_destination;
-mod bilbo_paid_graveyard_cast_8139;

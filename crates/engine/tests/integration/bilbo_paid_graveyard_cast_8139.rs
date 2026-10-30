@@ -80,7 +80,9 @@ fn pay(runner: &mut GameRunner) {
     for _ in 0..12 {
         match runner.state().waiting_for {
             WaitingFor::ManaPayment { .. } => {
-                runner.act(GameAction::PassPriority).expect("pay from lands");
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pay from lands");
             }
             WaitingFor::TargetSelection { .. } => {
                 runner.choose_first_legal_target().expect("choose a target");
@@ -121,7 +123,9 @@ fn board() -> Board {
             generic: 2,
         })
         .id();
-    let creature = scenario.add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2).id();
+    let creature = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
     let runner = scenario.build();
     Board {
         runner,
