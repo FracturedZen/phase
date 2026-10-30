@@ -1352,6 +1352,7 @@ mod parser_oracle_vote;
 mod parser_velocity_sprint_1_runtime;
 mod part_in_friendship_conditional_reveal;
 mod pass_priority_structural_legality;
+mod past_in_flames_graveyard_flashback_8079;
 mod peer_into_the_abyss;
 mod peerless_recycling_gift_recipient;
 mod pelt_collector_intervening_if;

@@ -941,13 +941,40 @@ fn bind_transient_effect(
             let filter = crate::game::targeting::resolve_tracked_set_sentinel(state, filter);
             // Broadcast filter: find matching objects at resolution time and bind each.
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+            //
+            // CR 611.2c + CR 400.1: the affected set is fixed on resolution and
+            // ranges over the zones the filter names. A filter with no written
+            // zone denotes permanents (CR 110.1), so it scans the battlefield;
+            // an off-battlefield filter ("each instant and sorcery card in your
+            // graveyard gains flashback until end of turn" — Past in Flames,
+            // issue #8079) scans its own zones, so cards there when the effect
+            // began are affected and cards put there later are not. Owner-keyed
+            // zones evaluate "your" as ownership (CR 400.3 + CR 109.5).
             let ctx = filter::FilterContext::from_ability(ability);
-            let matching: Vec<ObjectId> = state
-                .battlefield
-                .iter()
-                .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
-                .copied()
-                .collect();
+            let zones = filter.population_zones();
+            let matching: Vec<ObjectId> = if zones.is_empty() {
+                state
+                    .battlefield
+                    .iter()
+                    .filter(|obj_id| filter::matches_target_filter(state, **obj_id, &filter, &ctx))
+                    .copied()
+                    .collect()
+            } else {
+                let state_ref: &GameState = state;
+                let mut found = Vec::new();
+                for zone in zones {
+                    for obj_id in crate::game::targeting::zone_card_ids(state_ref, zone) {
+                        if state_ref.objects.contains_key(&obj_id)
+                            && filter::matches_target_filter_for_zone(
+                                state_ref, obj_id, zone, &filter, &ctx,
+                            )
+                        {
+                            found.push(obj_id);
+                        }
+                    }
+                }
+                found
+            };
             for obj_id in matching {
                 install_transient(
                     state,
