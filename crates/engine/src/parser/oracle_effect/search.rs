@@ -715,9 +715,7 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
                     TargetFilter::Typed(
                         TypedFilter::default().controller(ControllerRef::TriggeringPlayer),
                     ),
-                    verify(tag("that player's "), |_: &str| {
-                        triggering_player_scope
-                    }),
+                    verify(tag("that player's "), |_: &str| triggering_player_scope),
                 ),
             )),
         )

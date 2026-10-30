@@ -25,7 +25,9 @@ use super::rules::run_combat;
 const THADA_ORACLE: &str = "Islandwalk\nWhenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.";
 const ROOTWATER_ORACLE: &str = "Whenever this creature deals combat damage to a player, you may pay {2}. If you do, search that player's library for a card and exile it, then the player shuffles.";
 
-fn search_target_player(ability: &engine::types::ability::AbilityDefinition) -> Option<TargetFilter> {
+fn search_target_player(
+    ability: &engine::types::ability::AbilityDefinition,
+) -> Option<TargetFilter> {
     let mut cursor = Some(ability);
     while let Some(node) = cursor {
         if let Effect::SearchLibrary { target_player, .. } = node.effect.as_ref() {
@@ -97,7 +99,10 @@ fn thada_adel_exiles_an_artifact_from_the_damaged_players_library() {
         for _ in 0..50 {
             match runner.state().waiting_for.clone() {
                 WaitingFor::SearchChoice { player, cards, .. } => {
-                    assert_eq!(player, P0, "Thada's controller is the searcher (CR 701.23a)");
+                    assert_eq!(
+                        player, P0,
+                        "Thada's controller is the searcher (CR 701.23a)"
+                    );
                     assert!(
                         cards.contains(&their_artifact),
                         "the damaged player's artifact must be a legal choice; got {cards:?}"
