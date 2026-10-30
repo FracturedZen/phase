@@ -119,6 +119,7 @@ mod block_pairing_relations;
 mod block_trigger_cardinality;
 mod blocked_history_primitive;
 mod blocked_status_filter;
+mod bloodthirster_already_attacked_player_8064;
 mod bolas_citadel_regression;
 mod bolas_dragon_god_grants;
 mod bombur_gentle_dreamer_conditional_untap;

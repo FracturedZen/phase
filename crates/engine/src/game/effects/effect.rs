@@ -1537,7 +1537,8 @@ fn defended_scope_uses_source_controller_anchor(
         | AttackTargetFilter::PlayerOrPermanents => true,
         AttackTargetFilter::Owner
         | AttackTargetFilter::OwnerOrPlaneswalker
-        | AttackTargetFilter::Monarch => false,
+        | AttackTargetFilter::Monarch
+        | AttackTargetFilter::PlayerAttackedByAttackerThisTurn => false,
     }
 }
 

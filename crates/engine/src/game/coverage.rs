@@ -5214,6 +5214,9 @@ fn fmt_attack_target_filter(filter: &crate::types::triggers::AttackTargetFilter)
         // CR 725.1: the monarch is a player designation, and no player is the
         // monarch until an effect creates one.
         ATF::Monarch => "the monarch",
+        // CR 508.1b: attacker-relative — only players this creature was declared
+        // attacking directly earlier this turn.
+        ATF::PlayerAttackedByAttackerThisTurn => "a player it has already attacked this turn",
     }
 }
 

@@ -7066,6 +7066,17 @@ pub(super) fn commit_attack_declaration(
         .iter()
         .map(|attacker| (attacker.object_id, attacker.defending_player))
         .collect();
+    // CR 508.1b: only a declaration against a PLAYER is an attack on that
+    // player; a planeswalker/battle declaration is not (CR 508.5 collapses it
+    // to a defending player for other purposes, recorded above).
+    let creature_attacked_players: Vec<(ObjectId, PlayerId)> = combat
+        .attackers
+        .iter()
+        .filter_map(|attacker| match attacker.attack_target {
+            AttackTarget::Player(player) => Some((attacker.object_id, player)),
+            AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => None,
+        })
+        .collect();
     combat.attacking_incarnations_this_combat = attacking_incarnations_this_combat;
     combat.attacked_defenders_this_combat.clear();
     combat.creature_attacked_defenders_this_combat.clear();
@@ -7102,6 +7113,13 @@ pub(super) fn commit_attack_declaration(
             .entry(attacker_id)
             .or_default()
             .insert(defending_player);
+    }
+    for (attacker_id, player) in creature_attacked_players {
+        state
+            .creature_attacked_players_this_turn
+            .entry(attacker_id)
+            .or_default()
+            .insert(player);
     }
 
     // Use the first attacker's defending player for the event

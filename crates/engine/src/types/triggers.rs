@@ -206,6 +206,15 @@ pub enum AttackTargetFilter {
     /// `state.monarch` (The Spear of Bashenga). If there is no monarch
     /// (CR 725.1 — no monarch until an effect creates one), it never matches.
     Monarch,
+    /// CR 508.1b + CR 508.1c: "can't attack a player it has already attacked
+    /// this turn" (Bloodthirster) — a Player-type attack whose defending player
+    /// the restricted attacker was already declared attacking directly this turn
+    /// (`GameState::creature_attacked_players_this_turn`). Attacker-relative, so
+    /// like `Monarch` it cannot be evaluated by the pure type matcher; it is
+    /// resolved against the attacker in `static_abilities`. A planeswalker or
+    /// battle attack is never an attack on a player (CR 508.1b), so neither
+    /// records into nor is restricted by this scope.
+    PlayerAttackedByAttackerThisTurn,
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the

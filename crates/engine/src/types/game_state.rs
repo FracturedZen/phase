@@ -23920,6 +23920,18 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
     pub creature_attacked_defenders_this_turn: HashMap<ObjectId, HashSet<PlayerId>>,
+    /// CR 508.1b: For each creature declared as an attacker this turn, the
+    /// players it was declared attacking DIRECTLY (an `AttackTarget::Player`
+    /// declaration). Unlike `creature_attacked_defenders_this_turn`, a
+    /// planeswalker or battle attack does not record its controller/protector —
+    /// attacking a planeswalker is not attacking a player. Read by
+    /// `AttackTargetFilter::PlayerAttackedByAttackerThisTurn` ("can't attack a
+    /// player it has already attacked this turn" — Bloodthirster). Boxed for
+    /// the `GameState` stack budget (`game_state_size.rs`): it is populated only
+    /// once attackers are declared.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_map_of_hash_set")]
+    pub creature_attacked_players_this_turn: Box<HashMap<ObjectId, HashSet<PlayerId>>>,
     /// CR 509.1g + CR 400.7 + CR 500.8: The turn-scoped counterpart to
     /// `CombatState::creature_blocked_attackers_this_combat`, accumulated across
     /// every combat phase of the turn — effects can add phases to a turn
@@ -32009,6 +32021,7 @@ impl GameState {
             attacked_defenders_this_turn: HashMap::new(),
             attacked_defenders_last_turn: Box::default(),
             creature_attacked_defenders_this_turn: HashMap::new(),
+            creature_attacked_players_this_turn: Box::default(),
             creature_blocked_attackers_this_turn: HashSet::new(),
             steps_started_this_turn: StepTally::default(),
             creatures_attacked_this_turn: HashSet::new(),
@@ -35239,6 +35252,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         attacked_defenders_this_turn: _,
         attacked_defenders_last_turn: _,
         creature_attacked_defenders_this_turn: _,
+        creature_attacked_players_this_turn: _,
         creature_blocked_attackers_this_turn: _,
         steps_started_this_turn: _,
         creatures_attacked_this_turn: _,
@@ -35616,6 +35630,8 @@ impl PartialEq for GameState {
             && self.attacked_defenders_last_turn == other.attacked_defenders_last_turn
             && self.creature_attacked_defenders_this_turn
                 == other.creature_attacked_defenders_this_turn
+            && self.creature_attacked_players_this_turn
+                == other.creature_attacked_players_this_turn
             && self.creature_blocked_attackers_this_turn
                 == other.creature_blocked_attackers_this_turn
             && self.steps_started_this_turn == other.steps_started_this_turn

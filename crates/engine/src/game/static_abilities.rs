@@ -970,13 +970,29 @@ fn static_ability_match_applies(
     // the creature remains able to attack other players.
     if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock) {
         if let Some(defended) = def.attack_defended.as_ref() {
-            if !super::restrictions::attack_target_matches_defended_scope(
-                state,
-                context.attack_target.as_ref(),
-                defended,
-                def.source_controller.unwrap_or(obj.controller),
-                obj.owner,
-            ) {
+            let target_matches = match defended {
+                // CR 508.1b + CR 508.1c: attacker-relative scope — the restricted
+                // creature (the pairing's attacker, else the static's own
+                // object for a self-referential "~ can't attack ...") was
+                // already declared attacking this player this turn.
+                crate::types::triggers::AttackTargetFilter::PlayerAttackedByAttackerThisTurn => {
+                    match context.attack_target {
+                        Some(AttackTarget::Player(player)) => state
+                            .creature_attacked_players_this_turn
+                            .get(&context.target_id.unwrap_or(obj.id))
+                            .is_some_and(|players| players.contains(&player)),
+                        _ => false,
+                    }
+                }
+                _ => super::restrictions::attack_target_matches_defended_scope(
+                    state,
+                    context.attack_target.as_ref(),
+                    defended,
+                    def.source_controller.unwrap_or(obj.controller),
+                    obj.owner,
+                ),
+            };
+            if !target_matches {
                 return false;
             }
         }
@@ -2705,6 +2721,71 @@ mod tests {
             obj,
             &intrinsic,
         ));
+    }
+
+    /// CR 508.1b + CR 508.1c (#8064 Bloodthirster): "can't attack a player it
+    /// has already attacked this turn" restricts only a Player-type attack on a
+    /// player this creature was already declared attacking DIRECTLY this turn.
+    /// A first attack is legal, another player stays legal, and an earlier
+    /// planeswalker attack (recorded in the defender ledger, not the player
+    /// ledger) does not make that planeswalker's controller unattackable.
+    #[test]
+    fn already_attacked_player_scope_is_attacker_relative_and_player_only() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+        let carrier = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bloodthirster".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get(&carrier).unwrap().clone();
+        let def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::SelfRef)
+            .attack_defended(Some(
+                crate::types::triggers::AttackTargetFilter::PlayerAttackedByAttackerThisTurn,
+            ));
+        let ctx = |p: u8| StaticCheckContext {
+            target_id: Some(carrier),
+            attack_target: Some(AttackTarget::Player(PlayerId(p))),
+            ..Default::default()
+        };
+        let applies = |state: &GameState, p: u8| {
+            static_ability_match_applies(state, &StaticMode::CantAttack, &ctx(p), &obj, &def)
+        };
+
+        // No attack yet this turn: nothing is restricted.
+        assert!(!applies(&state, 1));
+        assert!(!applies(&state, 2));
+        // Eligibility query without a target never applies the scoped restriction.
+        assert!(!static_ability_match_applies(
+            &state,
+            &StaticMode::CantAttack,
+            &StaticCheckContext {
+                target_id: Some(carrier),
+                ..Default::default()
+            },
+            &obj,
+            &def,
+        ));
+
+        // A planeswalker attack collapses to P1 as defending player but is not an
+        // attack on P1.
+        state
+            .creature_attacked_defenders_this_turn
+            .entry(carrier)
+            .or_default()
+            .insert(PlayerId(1));
+        assert!(!applies(&state, 1));
+
+        // A direct attack on P1 restricts P1 only.
+        state
+            .creature_attacked_players_this_turn
+            .entry(carrier)
+            .or_default()
+            .insert(PlayerId(1));
+        assert!(applies(&state, 1));
+        assert!(!applies(&state, 2));
     }
 
     /// Unit 2, site #1: `check_static_ability` gates its O(N) whole-battlefield

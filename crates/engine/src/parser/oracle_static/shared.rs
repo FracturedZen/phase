@@ -6850,9 +6850,28 @@ pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
     ))
     .parse(rest)?;
     let (rest, a_player) = opt(preceded(space1, tag("a player"))).parse(rest)?;
+    // CR 508.1b + CR 508.1c: "a player it has already attacked this turn"
+    // (Bloodthirster) — an attacker-relative history scope, not the static
+    // controller's "you".
+    let (rest, already_attacked) = if a_player.is_some() {
+        opt(preceded(
+            space1,
+            alt((
+                tag("it has already attacked this turn"),
+                tag("it's already attacked this turn"),
+                tag("they have already attacked this turn"),
+                tag("they've already attacked this turn"),
+            )),
+        ))
+        .parse(rest)?
+    } else {
+        (rest, None)
+    };
     let (rest, defended) = parse_cant_attack_defended_scope_nom(rest)?;
     let defended = if let Some(owner_restriction) = owner_restriction {
         Some(owner_restriction)
+    } else if already_attacked.is_some() {
+        Some(AttackTargetFilter::PlayerAttackedByAttackerThisTurn)
     } else if a_player.is_some() {
         Some(AttackTargetFilter::Player)
     } else {

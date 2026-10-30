@@ -41377,3 +41377,24 @@ fn static_gaeas_liege_full_oracle_dispatch() {
         parsed.parse_warnings
     );
 }
+
+/// CR 508.1b + CR 508.1c (#8064): Bloodthirster's "can't attack a player it has
+/// already attacked this turn" is an attacker-relative scoped restriction, not a
+/// blanket "can't attack".
+#[test]
+fn static_cant_attack_player_already_attacked_this_turn_is_scoped() {
+    for line in [
+        "This creature can't attack a player it has already attacked this turn.",
+        "~ can't attack a player it has already attacked this turn.",
+    ] {
+        let defs = parse_static_line_multi(line);
+        assert_eq!(defs.len(), 1, "{line}: {defs:#?}");
+        assert_eq!(defs[0].mode, StaticMode::CantAttack);
+        assert_eq!(defs[0].affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            defs[0].attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedByAttackerThisTurn),
+            "{line}: must not lower to a blanket CantAttack"
+        );
+    }
+}

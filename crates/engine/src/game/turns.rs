@@ -1783,6 +1783,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.attacking_creatures_this_turn.clear();
     state.attacked_defenders_this_turn.clear();
     state.creature_attacked_defenders_this_turn.clear();
+    state.creature_attacked_players_this_turn.clear();
     state.steps_started_this_turn.clear();
     // CR 614.10 + CR 614.10a + CR 500.11: A turn-scoped combat skip that was
     // bound (`active`) to this player's PREVIOUS (now-ended) turn is satisfied —

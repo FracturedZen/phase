@@ -2605,9 +2605,13 @@ pub(crate) fn parse_static_line_inner(
 
     // --- "~ can't attack" ---
     if nom_primitives::scan_contains(tp.lower, "can't attack") {
+        // CR 508.1b + CR 508.1c: an attacker-relative defended scope carried by
+        // a fully consumed self-referential line ("~ can't attack a player it
+        // has already attacked this turn" — Bloodthirster).
+        let mut self_defended = None;
         // CR 508.1d: Subject-led lines ("Each creature ... can't attack you") must not
         // collapse to SelfRef — `parse_subject_combat_rule_static` handles them above.
-        if let Some((subject_lower, _, rest)) =
+        if let Some((subject_lower, defended, rest)) =
             nom_primitives::scan_preceded(tp.lower, parse_cant_attack_rule_static_predicate_nom)
         {
             let rest = match opt(tag::<_, _, OracleError<'_>>(".")).parse(rest) {
@@ -2617,6 +2621,12 @@ pub(crate) fn parse_static_line_inner(
             // Only defer when the line is a fully consumed scoped cant-attack
             // (Eriette). Trailing "unless"/"if" clauses must still use SelfRef.
             if rest.trim().is_empty() {
+                if matches!(
+                    defended,
+                    Some(crate::types::triggers::AttackTargetFilter::PlayerAttackedByAttackerThisTurn)
+                ) {
+                    self_defended = defended;
+                }
                 let subject = tp.original[..subject_lower.len()].trim();
                 let subject_lower = subject.to_lowercase();
                 if !subject.is_empty()
@@ -2636,6 +2646,7 @@ pub(crate) fn parse_static_line_inner(
         };
         let mut def = StaticDefinition::new(mode)
             .affected(TargetFilter::SelfRef)
+            .attack_defended(self_defended)
             .description(text.to_string());
         // CR 508.1 + CR 611.3a: a trailing "unless [cost]", "as long as
         // [board-state]", or "if [board-state]" clause scopes the restriction;
