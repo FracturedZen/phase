@@ -11179,6 +11179,12 @@ fn zone_change_record_matches_property(
         FilterProp::WasPlayed => {
             record.played_from_zone.is_some() || record.cast_from_zone.is_some()
         }
+        // CR 603.10a + CR 708.2a: Face-down status as of the zone change.
+        // A permanent leaving the battlefield satisfies its condition based on
+        // its last-known face-down status captured in the zone-change snapshot.
+        FilterProp::FaceDown => record
+            .trigger_source_context()
+            .is_some_and(|ctx| ctx.face_down),
 
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": `record.object_id` is event attribution, not a
@@ -11526,7 +11532,6 @@ fn zone_change_record_matches_property(
         | FilterProp::AttachedTo {
             to: AttachmentReferent::Host { .. },
         }
-        | FilterProp::FaceDown
         | FilterProp::Transformed
         | FilterProp::Foretold
         | FilterProp::HasAdventure
@@ -23386,6 +23391,56 @@ mod tests {
             &FilterProp::AttackingAlone,
             &state,
             &attacked_with_company,
+            &source_ctx,
+        ));
+    }
+
+    /// CR 603.10a + CR 708.2a: Face-down status on the zone-change record.
+    #[test]
+    fn zone_change_record_face_down_property_matches_snapshot() {
+        let state = GameState::default();
+        let source_ctx = source_context_from_filter(
+            &state,
+            ObjectId(1),
+            Some(PlayerId(0)),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let mut fd_obj = GameObject::new(
+            ObjectId(44),
+            CardId(44),
+            PlayerId(0),
+            "Face Down".to_string(),
+            Zone::Battlefield,
+        );
+        fd_obj.face_down = true;
+        let fd_record =
+            fd_obj.snapshot_for_zone_change(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(zone_change_record_matches_property(
+            &FilterProp::FaceDown,
+            &state,
+            &fd_record,
+            &source_ctx,
+        ));
+
+        let mut fu_obj = GameObject::new(
+            ObjectId(45),
+            CardId(45),
+            PlayerId(0),
+            "Face Up".to_string(),
+            Zone::Battlefield,
+        );
+        fu_obj.face_down = false;
+        let fu_record =
+            fu_obj.snapshot_for_zone_change(ObjectId(45), Some(Zone::Battlefield), Zone::Graveyard);
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::FaceDown,
+            &state,
+            &fu_record,
             &source_ctx,
         ));
     }

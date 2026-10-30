@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4526
-- **Total card appearances across root causes:** 4559 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4525
+- **Total card appearances across root causes:** 4558 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -18,7 +18,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 1 | Relative-clause / filter restriction on target dropped | 727 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
 | 2 | Dropped intervening-if / gating condition (condition: null) | 571 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 402 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 381 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 4 | Conjoined / chained second effect clause dropped | 380 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 329 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 226 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
@@ -1782,7 +1782,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (381 cards)
+### 4. Conjoined / chained second effect clause dropped  (380 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -2164,7 +2164,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Xantcha, Sleeper Agent
 - Xathrid Gorgon
 - Xu-Ifit, Osteoharmonist
-- Yarus, Roar of the Old Gods
 - Yasova Dragonclaw
 - Zariel, Archduke of Avernus
 - Zealot's Conviction
