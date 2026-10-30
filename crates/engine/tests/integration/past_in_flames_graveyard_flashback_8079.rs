@@ -62,7 +62,10 @@ fn past_in_flames_grants_flashback_to_own_graveyard_instants_and_sorceries() {
     runner.cast(pif).resolve();
 
     let bound = bound_recipients(runner.state());
-    assert!(bound.contains(&divination), "Divination should gain flashback");
+    assert!(
+        bound.contains(&divination),
+        "Divination should gain flashback"
+    );
     assert!(bound.contains(&opt), "Opt should gain flashback");
     assert!(
         !bound.contains(&creature),
