@@ -63,7 +63,11 @@ fn kaalia_attack_trigger_parses_one_card_per_description() {
     else {
         panic!("expected Dig, got {:?}", execute.effect);
     };
-    assert_eq!(*keep_count, Some(3), "up to one card for each of three descriptions");
+    assert_eq!(
+        *keep_count,
+        Some(3),
+        "up to one card for each of three descriptions"
+    );
     assert!(*up_to, "each description is optional ('you may', 'and/or')");
     assert!(*reveal);
     assert_eq!(*destination, Some(Zone::Hand));
@@ -165,7 +169,10 @@ fn kaalia_dig_offers_and_keeps_an_angel_a_demon_and_a_dragon() {
         assert!(selectable_cards.contains(&id), "{id:?} must be selectable");
     }
     for id in &s.others {
-        assert!(!selectable_cards.contains(id), "non-matching card selectable");
+        assert!(
+            !selectable_cards.contains(id),
+            "non-matching card selectable"
+        );
     }
 
     s.runner

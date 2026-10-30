@@ -4754,8 +4754,7 @@ pub(super) fn handle_resolution_choice(
                 &selection_constraint,
             ) {
                 return Err(EngineError::InvalidAction(
-                    "dig selection does not satisfy the effect's selection constraint"
-                        .to_string(),
+                    "dig selection does not satisfy the effect's selection constraint".to_string(),
                 ));
             }
 

@@ -35,8 +35,8 @@ use crate::types::ability::{
     EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody, FaceDownProfile, FilterProp,
     ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
     PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
-    SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink, TargetChoiceTiming,
-    SearchSelectionConstraint, TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticDefinition, SubAbilityLink,
+    TargetChoiceTiming, TargetFilter, ThisWayCause, TokenAttackDestination, TypeFilter,
     TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -5883,7 +5883,8 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 source: DigSource::PriorLook,
-                                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+                                selection_constraint:
+                                    crate::types::ability::SearchSelectionConstraint::None,
                             },
                         );
 
@@ -7293,12 +7294,10 @@ fn parse_dig_each_description_list(
     let mut descriptions: Vec<&str> = Vec::new();
     let mut saw_and_or = false;
     loop {
-        let (after_desc, desc) = terminated(
-            take_until::<_, _, OracleError<'_>>(" card"),
-            tag(" card"),
-        )
-        .parse(remaining)
-        .ok()?;
+        let (after_desc, desc) =
+            terminated(take_until::<_, _, OracleError<'_>>(" card"), tag(" card"))
+                .parse(remaining)
+                .ok()?;
         if desc.is_empty() || desc.contains(',') || saw_and_or && !after_desc.is_empty() {
             return None;
         }
