@@ -9944,14 +9944,15 @@ pub(crate) fn player_count_matching_ids(
                         kind,
                         source,
                         min_sources,
-                    scope,
+                        scope,
                     } => opponent_dealt_damage_matches(
                         state,
                         p.id,
                         controller,
                         *kind,
                         source,
-                        *min_sources, *scope,
+                        *min_sources,
+                        *scope,
                         source_id,
                     ),
                     // CR 508.6: opponent the subject attacked within scope.

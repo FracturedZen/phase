@@ -136,6 +136,10 @@ fn gollum_combat_damage_look_back_spans_the_game() {
     let (mut r, _gollum) = combat_setup();
     r.state_mut().damage_dealt_this_turn.clear();
     gain_life_and_run_end_step(&mut r, 4);
-    assert_eq!(r.life(P1), 14, "earlier Gollum damage still counts this game");
+    assert_eq!(
+        r.life(P1),
+        14,
+        "earlier Gollum damage still counts this game"
+    );
     assert_eq!(r.life(P2), 18, "P2 never took Gollum damage");
 }

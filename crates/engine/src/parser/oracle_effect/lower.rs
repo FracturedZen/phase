@@ -7037,19 +7037,20 @@ fn strip_dealt_damage_history_clause(
         Ok((i, (kind, scope)))
     })?;
     let after_lower = after_window.to_lowercase();
-    let (source, remainder) =
-        match nom_on_lower(after_window, &after_lower, |i| value((), tag(" by ")).parse(i)) {
-            Some(((), source_text)) => {
-                let (filter, remainder) = parse_target(source_text);
-                // The source phrase must actually be consumed; an unparsed
-                // phrase must not silently widen to "any source".
-                if remainder.len() == source_text.len() {
-                    return None;
-                }
-                (Some(Box::new(filter)), remainder)
+    let (source, remainder) = match nom_on_lower(after_window, &after_lower, |i| {
+        value((), tag(" by ")).parse(i)
+    }) {
+        Some(((), source_text)) => {
+            let (filter, remainder) = parse_target(source_text);
+            // The source phrase must actually be consumed; an unparsed
+            // phrase must not silently widen to "any source".
+            if remainder.len() == source_text.len() {
+                return None;
             }
-            None => (None, after_window),
-        };
+            (Some(Box::new(filter)), remainder)
+        }
+        None => (None, after_window),
+    };
     // Require a word boundary and a following predicate.
     let verb_phrase = remainder.trim_start();
     if verb_phrase.is_empty() || verb_phrase.len() == remainder.len() {

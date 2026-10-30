@@ -1009,7 +1009,9 @@ pub(crate) fn apply_damage_after_replacement(
         // CR 120.1 + CR 608.2i: damage to a player is also retained in the
         // game-long ledger for "dealt damage this game" look-backs.
         if matches!(record.target, TargetRef::Player(_)) {
-            state.damage_dealt_to_players_this_game.push_back(record.clone());
+            state
+                .damage_dealt_to_players_this_game
+                .push_back(record.clone());
         }
         state.damage_dealt_this_turn.push_back(record);
         // CR 120.3 + CR 120.6 + CR 702.11b + CR 613.1f: Mark the source as having
@@ -2526,14 +2528,15 @@ pub fn resolve_each_player(
                         kind,
                         source,
                         min_sources,
-                    scope,
+                        scope,
                     } => crate::game::quantity::opponent_dealt_damage_matches(
                         state,
                         p.id,
                         ability.controller,
                         *kind,
                         source,
-                        *min_sources, *scope,
+                        *min_sources,
+                        *scope,
                         ability.source_id,
                     ),
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
