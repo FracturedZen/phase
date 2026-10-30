@@ -13,8 +13,8 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::Effect;
-use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::player::PlayerId;
 
 const P2: PlayerId = PlayerId(2);
