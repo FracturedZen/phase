@@ -22753,6 +22753,47 @@ fn resolve_chain_body(
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
                     }
                     progress = resolve_ability_chain_step(state, &sub_resolved, events, depth + 1)?;
+                } else {
+                    // CR 608.2c: When the direct sub does not outlive this node's
+                    // false condition (e.g. a within-clause ContinuationStep
+                    // whose condition failed), find the next independent
+                    // instruction in printed order (SequentialSibling). This mirrors
+                    // the post-effect SequentialSibling walk at line 25508 and ensures
+                    // subsequent instructions (such as remaining opponents in a
+                    // player_scope continuation) still resolve when an earlier
+                    // leg's decline branch or condition evaluates false.
+                    let mut current = sub.sub_ability.as_ref();
+                    while let Some(ref sibling) = current {
+                        if starts_independent_instruction(sibling) {
+                            let mut sibling_resolved = sibling.as_ref().clone();
+                            if should_propagate_parent_targets(ability, &sibling_resolved) {
+                                sibling_resolved.mirror_targets_from(ability);
+                            }
+                            apply_parent_chain_context(&mut sibling_resolved, ability, None, state);
+                            if sibling_resolved
+                                .condition
+                                .as_ref()
+                                .is_some_and(|condition| {
+                                    !evaluate_condition(condition, state, &sibling_resolved)
+                                        && sibling_resolved.else_ability.is_none()
+                                })
+                            {
+                                if let Some(result_id) = sibling_resolved.declares_return_result {
+                                    publish_empty_return_result_for_active(state, result_id)?;
+                                }
+                                current = sibling.sub_ability.as_ref();
+                                continue;
+                            }
+                            progress = resolve_ability_chain_step(
+                                state,
+                                &sibling_resolved,
+                                events,
+                                depth + 1,
+                            )?;
+                            break;
+                        }
+                        current = sibling.sub_ability.as_ref();
+                    }
                 }
             }
             return Ok(progress);

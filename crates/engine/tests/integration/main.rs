@@ -1074,6 +1074,7 @@ mod issue_8089_copy_effect_incarnation;
 mod issue_8089_real_cards;
 mod issue_8097_camellia_forage_activation;
 mod issue_8101_candelabra_target_selection;
+mod issue_8114_braids_arisen_nightmare;
 mod issue_8143_granted_unearth;
 mod issue_8163_was_cast_event_subject;
 mod issue_8183_static_gate_fail_open;
