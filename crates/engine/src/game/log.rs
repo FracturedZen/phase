@@ -277,6 +277,30 @@ fn is_concealed_move(
     };
     !departed_face_up(*from, record)
         && !(to.is_public() && !arrived_face_down(batch, *object_id, index, after))
+        && !publicly_known_hand_arrival(batch, *object_id, *to, index, after)
+}
+
+/// CR 701.20a: a card publicly revealed while it moved into a hand stays known to
+/// every player there (`engine::remember_public_reveals`), so the shared log may
+/// narrate the move. Only the card's last move in the batch can be judged from
+/// `after`; an earlier hop lands on an occurrence that no longer exists.
+fn publicly_known_hand_arrival(
+    batch: &BatchIndex,
+    object_id: ObjectId,
+    to: Zone,
+    index: usize,
+    after: &GameState,
+) -> bool {
+    to == Zone::Hand
+        && batch.next_move(object_id, index + 1).is_none()
+        && after
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| obj.zone == Zone::Hand)
+        && after
+            .players
+            .iter()
+            .all(|player| after.viewer_knows_card_identity(player.id, object_id))
 }
 
 /// CR 800.4a: whether this hidden-origin move is the leaving-player sweep; the journal holding

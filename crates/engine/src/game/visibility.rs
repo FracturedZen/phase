@@ -3626,7 +3626,16 @@ fn library_zone_change_visible_to_viewer(
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     if matches!(to, Zone::Hand | Zone::Library) {
-        return viewer_has_private_access_to_player(state, viewer, owner);
+        // CR 701.20a: a card publicly revealed while it moved into a hand
+        // (`engine::remember_public_reveals`) was seen by every player on its
+        // way there, so the move is no secret to a viewer who knows the
+        // arrived occurrence. A library arrival never qualifies: CR 401.2
+        // keeps its position hidden.
+        return viewer_has_private_access_to_player(state, viewer, owner)
+            || (to == Zone::Hand
+                && state.objects.get(&object_id).is_some_and(|obj| {
+                    obj.zone == Zone::Hand && state.viewer_knows_card_identity(viewer, object_id)
+                }));
     }
 
     // The card was looked at in a hidden library and the event-time move was

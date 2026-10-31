@@ -2375,7 +2375,12 @@ fn finish_action_boundary_with_lifecycle(
     // pool that a spend during this action depleted, before public state is
     // finalized and the next affordability probe runs. No-op when none flagged.
     super::mana_payment::refill_infinite_mana(state);
-    remember_public_reveals(state, &result.events, journal_start);
+    remember_public_reveals(
+        state,
+        &result.events,
+        journal_start,
+        &boundary_snapshot.revealed_cards,
+    );
     // Targeted public-state dirty marking over the full accumulated event set
     // (the auto-pass loop appends events). `finalize_public_state` is the only
     // consumer of `public_state_dirty`, so marking once here over the complete
@@ -9018,7 +9023,12 @@ fn handle_respond_to_shortcut(
     Ok(result)
 }
 
-fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_start: usize) {
+fn remember_public_reveals(
+    state: &mut GameState,
+    events: &[GameEvent],
+    journal_start: usize,
+    open_reveals_at_action_start: &HashSet<ObjectId>,
+) {
     // The journal is truncated at turn boundaries, so an action that
     // auto-advances across a turn leaves `journal_start` past the current end,
     // where `entries_since` yields no this-action controller reveals.
@@ -9067,6 +9077,50 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
                 .collect::<Vec<_>>();
             state.remember_card_identities(audience, &unpublished);
         }
+    }
+
+    // CR 701.20a: a revealed card "remains revealed for as long as necessary to
+    // complete the parts of the effect that card is relevant to". When the
+    // reveal and the instruction that puts the card into a hand are split by a
+    // player choice (Malevolent Rumble's keep, Fact or Fiction's piles), the
+    // reveal was published in an earlier action against the card's library
+    // incarnation, and CR 400.7 makes the hand arrival a new object that the
+    // library-keyed fact no longer names. Every player watched that card go to
+    // the hand, so carry the public knowledge onto the arrived incarnation.
+    // The public reveal window is `revealed_cards` as it stood when this action
+    // began (it survives only choice pauses of the revealing effect) plus any
+    // reveal still open now; the window may already have been closed by a
+    // later step of this same action, so the action-start set is authoritative.
+    let carried = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(from),
+                to: Zone::Hand,
+                ..
+            } if *from != Zone::Hand
+                && (open_reveals_at_action_start.contains(object_id)
+                    || state.revealed_cards.contains(object_id)) =>
+            {
+                Some(*object_id)
+            }
+            _ => None,
+        })
+        .filter(|object_id| {
+            state
+                .objects
+                .get(object_id)
+                .is_some_and(|object| object.zone == Zone::Hand)
+        })
+        .collect::<Vec<_>>();
+    if !carried.is_empty() {
+        let audience = state
+            .players
+            .iter()
+            .map(|player| player.id)
+            .collect::<Vec<_>>();
+        state.remember_card_identities(audience, &carried);
     }
 }
 
@@ -10496,7 +10550,12 @@ pub(crate) fn resume_stack_resolution_session_runner(
             take_and_restore_stack_resolution_session(state);
         }
         super::mana_payment::refill_infinite_mana(state);
-        remember_public_reveals(state, &result.events, journal_start);
+        remember_public_reveals(
+            state,
+            &result.events,
+            journal_start,
+            &boundary_snapshot.revealed_cards,
+        );
         mark_public_state_from_events(state, &result.events);
         finalize_rules_state(state);
         result.waiting_for = state.waiting_for.clone();
