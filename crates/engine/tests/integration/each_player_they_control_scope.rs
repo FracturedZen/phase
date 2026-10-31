@@ -17,14 +17,14 @@
 //! CR 119.5: a "becomes [N]" effect sets each affected player's life total.
 //! CR 120.3: damage to each player is dealt to each player in turn.
 
-use engine::game::effects::life::resolve_set_life_total;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, TargetFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -208,10 +208,9 @@ fn acidic_soil_damages_each_player_by_their_own_land_count() {
 /// (count → `You`) OR the resolver fix (amount resolved once, pre-loop, from the
 /// caster's perspective) sets BOTH players to the caster's count (3) and fails.
 ///
-/// The `AllPlayers`-scoped `SetLifeTotal` is not a targeted spell, so it is
-/// resolved through the public resolver directly (mirroring the in-crate
-/// `set_life_total_all_players_sets_every_player_no_target` unit test) over a
-/// battlefield staged by `GameScenario`. The PARSED Biorhythm effect is used
+/// The `AllPlayers`-scoped `SetLifeTotal` is not a targeted spell (CR 115.1),
+/// so it casts with no targets through the production pipeline (`runner.cast(spell).resolve()`)
+/// over a battlefield staged by `GameScenario`. The PARSED Biorhythm effect is used
 /// verbatim, so the per-player `ScopedPlayer` count is exercised end-to-end.
 ///
 /// CR 119.5: life total is set to the per-player creature count.
@@ -226,15 +225,13 @@ fn biorhythm_sets_each_player_life_to_their_own_creature_count() {
     }
     scenario.add_vanilla(P1, 1, 1);
 
-    // Use the parsed Biorhythm effect (ScopedPlayer creature count).
-    let def = parse_effect_chain(BIORHYTHM, AbilityKind::Spell);
-    let effect = (*def.effect).clone();
+    let biorhythm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Biorhythm", false, BIORHYTHM)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
 
     let mut runner = scenario.build();
-    let state = runner.state_mut();
-    let ability = ResolvedAbility::new(effect, vec![], ObjectId(1), P0);
-    let mut events = Vec::new();
-    resolve_set_life_total(state, &ability, &mut events).unwrap();
+    runner.cast(biorhythm).resolve();
 
     // P0 life -> 3 (its own creatures), P1 life -> 1 (its own creature).
     assert_eq!(
@@ -261,8 +258,16 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
     config.archenemy_player = Some(PlayerId(1));
     let mut scenario = GameScenario::new_with_format(config, 4, 42);
     scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario.add_creature(P0, "Caster Bear", 1, 1).id();
+    let repay = scenario
+        .add_spell_to_hand_from_oracle(P0, "Repay in Kind", false, REPAY_IN_KIND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
     let mut runner = scenario.build();
+
+    // Hand turn and priority to P0 so P0 can cast Repay in Kind.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = engine::types::game_state::WaitingFor::Priority { player: P0 };
 
     // Archenemy at 10; heroes splitting a shared 60.
     runner.state_mut().players[1].life = 10;
@@ -270,11 +275,7 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
     runner.state_mut().players[2].life = 20;
     runner.state_mut().players[3].life = 20;
 
-    let def = parse_effect_chain(REPAY_IN_KIND, AbilityKind::Spell);
-    let effect = (*def.effect).clone();
-    let ability = ResolvedAbility::new(effect, vec![], source, P0);
-    let mut events = Vec::new();
-    resolve_set_life_total(runner.state_mut(), &ability, &mut events).unwrap();
+    runner.cast(repay).resolve();
 
     let state = runner.state();
     assert_eq!(
@@ -286,4 +287,66 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
         heroes_shared, 10,
         "the heroes' shared total is set to the minimum 10"
     );
+}
+
+/// Issue #10455: Untargeted AllPlayers SetLifeTotal spells (Repay in Kind,
+/// Biorhythm, Worldfire) must not demand target slots during announcement (CR 115.1).
+/// `GameAction::CastSpell` with `targets: vec![]` must succeed.
+#[test]
+fn repay_in_kind_cast_spell_action_with_empty_targets_succeeds() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let repay = scenario
+        .add_spell_to_hand_from_oracle(P0, "Repay in Kind", false, REPAY_IN_KIND)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&repay].card_id;
+
+    runner.state_mut().players[0].life = 20;
+    runner.state_mut().players[1].life = 7;
+
+    let result = runner.act(GameAction::CastSpell {
+        object_id: repay,
+        card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        result.is_ok(),
+        "casting Repay in Kind with targets: vec![] must succeed (CR 115.1), got {result:?}"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.life(P0),
+        7,
+        "P0 life total becomes lowest life total (7)"
+    );
+    assert_eq!(
+        runner.life(P1),
+        7,
+        "P1 life total becomes lowest life total (7)"
+    );
+}
+
+/// Issue #10455: Worldfire's untargeted AllPlayers SetLifeTotal effect must cast
+/// without targeting and set every player's life total to 1 (CR 115.1, CR 119.5).
+#[test]
+fn worldfire_cast_sets_all_players_life_to_one() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let worldfire_oracle = "Exile all permanents. Exile all cards from all hands and graveyards. Each player's life total becomes 1.";
+    let worldfire = scenario
+        .add_spell_to_hand_from_oracle(P0, "Worldfire", false, worldfire_oracle)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    scenario.add_vanilla(P0, 2, 2);
+    scenario.add_vanilla(P1, 3, 3);
+
+    let mut runner = scenario.build();
+    runner.cast(worldfire).resolve();
+
+    assert_eq!(runner.life(P0), 1, "P0 life becomes 1 (CR 119.5)");
+    assert_eq!(runner.life(P1), 1, "P1 life becomes 1 (CR 119.5)");
 }

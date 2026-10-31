@@ -27851,6 +27851,13 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
     {
         return None;
     }
+    // CR 115.1 + CR 119.5: "Each player" / "all players" does not target. An
+    // untargeted all-players effect (`TargetFilter::AllPlayers`, e.g. SetLifeTotal
+    // on Repay in Kind / Biorhythm / Worldfire) affects all players at resolution
+    // without stack-time target announcement.
+    if effect.target_filter() == Some(&TargetFilter::AllPlayers) {
+        return None;
+    }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
 
