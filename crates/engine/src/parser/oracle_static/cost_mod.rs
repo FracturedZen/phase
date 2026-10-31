@@ -982,7 +982,8 @@ pub(crate) fn parse_cast_by_paying_life_alt_cost(text: &str) -> Option<StaticDef
 fn parse_commander_tax_paid_with_life(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = tag("rather than pay {2} for each previous time you've cast ").parse(input)?;
     let (input, _) = alt((tag("this spell"), tag("~"))).parse(input)?;
-    let (input, _) = tag(" from the command zone this game, pay 2 life that many times").parse(input)?;
+    let (input, _) =
+        tag(" from the command zone this game, pay 2 life that many times").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     eof(input)?;
     Ok((input, ()))

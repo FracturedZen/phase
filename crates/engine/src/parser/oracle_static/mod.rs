@@ -151,6 +151,7 @@ mod support {
     pub(super) use super::{lower_static_ir, parse_static_line};
 }
 
+pub(crate) use cost_mod::is_commander_tax_paid_with_life_static;
 pub(crate) use cost_mod::{
     parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
@@ -170,7 +171,6 @@ pub(crate) use keyword_grant::{
     parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
-pub(crate) use cost_mod::is_commander_tax_paid_with_life_static;
 pub(crate) use mana_transform::{
     is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
 };

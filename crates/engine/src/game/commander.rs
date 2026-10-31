@@ -23,9 +23,9 @@ pub fn commander_tax(state: &GameState, commander_id: ObjectId) -> u32 {
 /// statics — the ability functions while the spell is being cast.
 pub fn commander_tax_paid_with_life(state: &GameState, object_id: ObjectId) -> bool {
     state.objects.get(&object_id).is_some_and(|obj| {
-        obj.static_definitions.iter_all().any(|def| {
-            def.mode == crate::types::statics::StaticMode::CommanderTaxPaidWithLife
-        })
+        obj.static_definitions
+            .iter_all()
+            .any(|def| def.mode == crate::types::statics::StaticMode::CommanderTaxPaidWithLife)
     })
 }
 
