@@ -254,9 +254,11 @@ pub fn resolve(
                 grants_look: true,
                 ..
             }
-        ) && state.objects.get(&obj_id).is_some_and(|o| {
-            o.zone == crate::types::zones::Zone::Exile && o.face_down
-        }) {
+        ) && state
+            .objects
+            .get(&obj_id)
+            .is_some_and(|o| o.zone == crate::types::zones::Zone::Exile && o.face_down)
+        {
             crate::game::exile_links::push_look_link(
                 state,
                 obj_id,

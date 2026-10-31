@@ -17132,7 +17132,10 @@ fn try_parse_cast_from_tracked_exile_grant(tp: TextPair<'_>) -> Option<ParsedEff
                 tag("them"),
             ))
             .parse(i)?;
-            Ok((i, (parsed.0, parsed.1, explicit_permission, has_look_prefix)))
+            Ok((
+                i,
+                (parsed.0, parsed.1, explicit_permission, has_look_prefix),
+            ))
         })?;
     if !explicit_permission && !owns_exile_lifetime {
         return None;

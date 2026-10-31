@@ -274,5 +274,7 @@ fn arvinox_controller_may_look_at_exiled_instant_it_cannot_cast() {
             _ => None,
         })
         .expect("typed grant");
-    assert!(matches!(grant, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Permanent]));
+    assert!(
+        matches!(grant, TargetFilter::Typed(t) if t.type_filters == vec![TypeFilter::Permanent])
+    );
 }
