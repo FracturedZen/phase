@@ -82,9 +82,12 @@ fn disa_returns_milled_lhurgoyf_to_battlefield() {
         }
     }
     let goyf = make_lhurgoyf(&mut runner, Zone::Library);
-    runner.state_mut().players[0]
-        .mana_pool
-        .add(ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]));
+    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Colorless,
+        ObjectId(0),
+        false,
+        vec![],
+    ));
     runner
         .act(GameAction::ActivateAbility {
             source_id: disa,
