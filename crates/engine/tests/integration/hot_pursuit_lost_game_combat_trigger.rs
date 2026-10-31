@@ -203,3 +203,69 @@ fn princess_luna_remain_exiled_head_keeps_cast_permission() {
         "cast permission kept: {triggers}"
     );
 }
+
+/// CR 608.2c + CR 611.2c: "Untap them" names every creature the mass control
+/// change applied to, including a goaded/suspected creature its controller
+/// already controls (Mutinous Massacre ruling: "You'll untap all creatures,
+/// including those you already control").
+#[test]
+fn hot_pursuit_untaps_and_hastes_already_controlled_suspect() {
+    let Board { mut runner, .. } = board(2);
+    let mine = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| runner.state().objects[*id].name == "Suspect")
+        .unwrap();
+    // Hand P1's suspect to P0 permanently before combat by rewriting the
+    // printed controller: P0 already controls it when the trigger resolves.
+    {
+        let obj = runner.state_mut().objects.get_mut(&mine).unwrap();
+        obj.controller = P0;
+        obj.owner = P0;
+    }
+    layers::flush_layers(runner.state_mut());
+    run_to_combat_trigger(&mut runner);
+    let obj = &runner.state().objects[&mine];
+    assert_eq!(obj.controller, P0);
+    assert!(!obj.tapped, "already-controlled suspect must untap");
+    assert!(
+        obj.has_keyword(&Keyword::Haste),
+        "already-controlled suspect must gain haste"
+    );
+}
+
+const MUTINOUS_MASSACRE_ORACLE: &str = "Choose odd or even. Destroy each creature with mana value of the chosen quality. Then gain control of all creatures until end of turn. Untap them. They gain haste until end of turn. (Zero is even.)";
+
+/// Mutinous Massacre ruling: "You'll untap all creatures, including those you
+/// already control. They'll also gain haste."
+#[test]
+fn mutinous_massacre_untaps_and_hastes_creatures_you_already_control() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mine = scenario.add_creature(P0, "Mine", 2, 2).id();
+    let theirs = scenario.add_creature(P1, "Theirs", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mutinous Massacre", false, MUTINOUS_MASSACRE_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    for id in [mine, theirs] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
+    // Mana value 0 is even: choosing odd destroys nothing.
+    runner.cast(spell).choose_option("Odd").resolve();
+    runner.advance_until_stack_empty();
+    layers::flush_layers(runner.state_mut());
+    let state = runner.state();
+    for (id, label) in [(mine, "already controlled"), (theirs, "stolen")] {
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "{label}: survives (odd chosen)"
+        );
+        assert_eq!(obj.controller, P0, "{label}: controlled by caster");
+        assert!(!obj.tapped, "{label}: untapped");
+        assert!(obj.has_keyword(&Keyword::Haste), "{label}: gains haste");
+    }
+}

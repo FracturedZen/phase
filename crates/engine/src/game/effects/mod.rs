@@ -14557,13 +14557,27 @@ fn affected_objects_from_events(
                 TargetRef::Player(_) => None,
             })
             .collect(),
-        Effect::GainControlAll { .. } => events
-            .iter()
-            .filter_map(|event| match event {
-                GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
-                _ => None,
-            })
-            .collect(),
+        // CR 611.2c + CR 608.2c: "them" names every object the mass control
+        // change applied to, including ones the controller already controlled
+        // (Mutinous Massacre ruling), which emit no `ControllerChanged`. The
+        // resolver's own population (layers are not flushed between resolve
+        // and this publish — see the `PumpAll` note) is unioned with the
+        // events so a member is never dropped if the board was re-settled.
+        Effect::GainControlAll { target } => {
+            let mut ids: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ControllerChanged { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            for id in gain_control::gain_control_all_population(state, ability, target) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            ids
+        }
         Effect::Destroy { .. } | Effect::DestroyAll { .. } => events
             .iter()
             .filter_map(|event| match event {

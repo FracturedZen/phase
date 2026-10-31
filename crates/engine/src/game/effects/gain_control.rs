@@ -319,16 +319,7 @@ pub fn resolve_all(
     // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
     // TargetPlayer`) from the ability before matching.
     let (boundary, matching) = instruction_boundary(state, ability, |state| {
-        let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        state
-            .battlefield
-            .iter()
-            .filter(|id| {
-                crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-            })
-            .copied()
-            .collect()
+        gain_control_all_population(state, ability, target)
     });
 
     for obj_id in matching {
@@ -360,6 +351,30 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+/// CR 611.2c + CR 608.2c: the population a mass "gain control of all …"
+/// applies to — every matching permanent, INCLUDING ones the recipient already
+/// controls (Mutinous Massacre ruling: "You'll untap all creatures, including
+/// those you already control"). SINGLE AUTHORITY shared by `resolve_all` and
+/// `effects::affected_objects_from_events`, so a chained "untap them" names
+/// exactly what the instruction applied to, not only the objects whose
+/// controller changed (`ControllerChanged` skips self-handoffs).
+pub(crate) fn gain_control_all_population(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target: &TargetFilter,
+) -> Vec<ObjectId> {
+    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+        })
+        .copied()
+        .collect()
 }
 
 /// CR 613.3: The player who gains control. Normally the ability controller;
