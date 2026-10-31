@@ -123,3 +123,124 @@ fn disa_does_not_return_lhurgoyf_that_died() {
         "a Lhurgoyf that dies is not from 'anywhere other than the battlefield'"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 111.11: "create a Tarmogoyf token" — a token created by name only, whose
+// name is not a predefined token type, takes the characteristics of the card
+// with that name in the Oracle card reference. Ruling (2024-06-07): "Disa the
+// Restless's last ability creates a token that's a copy of the card Tarmogoyf
+// in the Oracle card reference."
+// ---------------------------------------------------------------------------
+
+const DISA_TOKEN_ORACLE: &str = "Whenever one or more creatures you control deal \
+combat damage to a player, create a Tarmogoyf token.";
+
+const DOUBLING_SEASON_ORACLE: &str = "If an effect would create one or more tokens \
+under your control, it creates twice that many of those tokens instead.\n\
+If an effect would put one or more counters on a permanent you control, it puts \
+twice that many of those counters on that permanent instead.";
+
+fn graveyard_card(runner: &mut GameRunner, core: CoreType) {
+    let state = runner.state_mut();
+    let card_id = CardId(state.next_object_id);
+    let id = engine::game::zones::create_object(
+        state,
+        card_id,
+        engine::types::player::PlayerId(1),
+        format!("{core:?} card"),
+        Zone::Graveyard,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(core);
+    obj.base_card_types = obj.card_types.clone();
+}
+
+/// Resolve Disa's combat-damage trigger body; returns the created tokens.
+fn resolve_disa_token_trigger(with_doubling_season: bool) -> Option<(GameRunner, Vec<ObjectId>)> {
+    let db = crate::support::shared_card_db()?;
+    let goyf_face = db
+        .get_face_by_name("Tarmogoyf")
+        .expect("fixture carries Tarmogoyf")
+        .clone();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let disa = scenario
+        .add_creature_from_oracle(P0, "Disa the Restless", 5, 6, DISA_TOKEN_ORACLE)
+        .id();
+    if with_doubling_season {
+        scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    }
+    let mut runner = scenario.build();
+    crate::support::install_synthetic_card_db(runner.state_mut(), &[goyf_face]);
+    // Two card types among cards in graveyards: land + instant.
+    graveyard_card(&mut runner, CoreType::Land);
+    graveyard_card(&mut runner, CoreType::Instant);
+
+    let execute = {
+        let obj = &runner.state().objects[&disa];
+        let entry = obj
+            .trigger_definitions
+            .iter_unchecked()
+            .next()
+            .expect("Disa has the combat-damage trigger");
+        entry
+            .definition
+            .execute
+            .as_deref()
+            .expect("trigger has an effect")
+            .clone()
+    };
+    let before: Vec<ObjectId> = runner.state().battlefield.iter().copied().collect();
+    let resolved = engine::game::ability_utils::build_resolved_from_def(&execute, disa, P0);
+    let mut events = Vec::new();
+    engine::game::effects::resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+        .expect("Disa's token trigger resolves");
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let tokens = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !before.contains(id))
+        .collect();
+    Some((runner, tokens))
+}
+
+#[test]
+fn disa_creates_oracle_tarmogoyf_token() {
+    let Some((runner, tokens)) = resolve_disa_token_trigger(false) else {
+        return;
+    };
+    assert_eq!(tokens.len(), 1, "exactly one Tarmogoyf token");
+    let token = &runner.state().objects[&tokens[0]];
+    assert!(token.is_token);
+    assert_eq!(token.name, "Tarmogoyf");
+    // CR 111.11 + CR 202.3: the token has Tarmogoyf's mana cost {1}{G}.
+    assert_eq!(token.mana_cost.mana_value(), 2);
+    assert_eq!(
+        token.color,
+        vec![engine::types::mana::ManaColor::Green],
+        "green"
+    );
+    assert!(token.card_types.core_types.contains(&CoreType::Creature));
+    assert!(token.card_types.subtypes.iter().any(|s| s == "Lhurgoyf"));
+    // CR 604.3: Tarmogoyf's CDA — land + instant in graveyards → 2/3.
+    assert_eq!(token.power, Some(2), "power = card types in graveyards");
+    assert_eq!(token.toughness, Some(3), "toughness = that number plus 1");
+}
+
+#[test]
+fn disa_tarmogoyf_token_is_doubled_by_doubling_season() {
+    let Some((runner, tokens)) = resolve_disa_token_trigger(true) else {
+        return;
+    };
+    // CR 614.1a: Doubling Season doubles the CR 111.11 token creation.
+    assert_eq!(tokens.len(), 2, "Doubling Season creates two Tarmogoyfs");
+    for id in tokens {
+        let token = &runner.state().objects[&id];
+        assert!(token.is_token);
+        assert_eq!(token.name, "Tarmogoyf");
+        assert_eq!(token.mana_cost.mana_value(), 2);
+        assert_eq!(token.power, Some(2));
+    }
+}
