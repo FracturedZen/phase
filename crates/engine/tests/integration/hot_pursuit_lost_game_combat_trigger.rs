@@ -12,14 +12,14 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::{layers, zones};
 use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
-use engine::types::game_state::WaitingFor;
-use engine::types::statics::StaticMode;
-use engine::types::zones::Zone;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 
 const HOT_PURSUIT_ORACLE: &str = "When this enchantment enters, suspect target creature an opponent controls. As long as this enchantment remains on the battlefield, that creature is also goaded.\nAt the beginning of combat on your turn, if two or more players have lost the game, gain control of all goaded and/or suspected creatures until end of turn. Untap them. They gain haste until end of turn.";
 
