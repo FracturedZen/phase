@@ -10745,7 +10745,9 @@ fn prepare_spell_cast_announced(
 
     // CR 408.3 + CR 903.8: Commanders cast from the command zone incur a tax.
     if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
+        // CR 903.8 + CR 118.9: Liesa pays this tax with life instead (see
+        // `commander::commander_life_tax`, charged as an imposed cost).
+        let tax = super::commander::commander_mana_tax(state, object_id);
         if tax > 0 {
             match &mut mana_cost {
                 crate::types::mana::ManaCost::Cost { generic, .. } => {
@@ -12692,7 +12694,9 @@ pub(super) fn apply_cost_modifiers_to_base_for_variant(
     let mut mana_cost = base;
     // CR 903.8: Commanders cast from the command zone incur a tax.
     if obj.zone == Zone::Command {
-        let tax = super::commander::commander_tax(state, object_id);
+        // CR 903.8 + CR 118.9: Liesa pays this tax with life instead (see
+        // `commander::commander_life_tax`, charged as an imposed cost).
+        let tax = super::commander::commander_mana_tax(state, object_id);
         if tax > 0 {
             match &mut mana_cost {
                 ManaCost::Cost { generic, .. } => *generic += tax,
@@ -13872,6 +13876,16 @@ pub(super) fn collect_imposed_additional_cast_costs(
     ability: &ResolvedAbility,
 ) -> Vec<AbilityCost> {
     let mut costs = Vec::new();
+    // CR 903.8 + CR 118.9 + CR 601.2f: Liesa — the commander tax for this
+    // command-zone cast is paid as 2 life per previous cast instead of {2}.
+    let life_tax = super::commander::commander_life_tax(state, spell_id);
+    if life_tax > 0 {
+        costs.push(AbilityCost::PayLife {
+            amount: crate::types::ability::QuantityExpr::Fixed {
+                value: life_tax as i32,
+            },
+        });
+    }
     // CR 604.1: O(1) presence gate — no ImposeAdditionalCost static means no imposed costs.
     if !static_kind_present(state, StaticModeKind::ImposeAdditionalCost) {
         return costs;
@@ -21404,6 +21418,15 @@ fn can_cast_prepared_now_with_probe(
                 return false;
             }
         }
+    }
+
+    // CR 903.8 + CR 119.4 + CR 119.8: Liesa's commander tax paid as life must be
+    // payable for the cast from the command zone to be legal.
+    let life_tax = super::commander::commander_life_tax(state, prepared.object_id);
+    if life_tax > 0
+        && !super::life_costs::can_pay_life_cast_or_activation_cost(state, player, life_tax)
+    {
+        return false;
     }
 
     // CR 601.2b + CR 118.3 + CR 119.8: Additional-cost affordability — any

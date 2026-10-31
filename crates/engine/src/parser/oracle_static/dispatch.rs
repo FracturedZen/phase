@@ -1288,6 +1288,11 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 903.8 + CR 118.9: Liesa — commander tax paid with life.
+    if let Some(result) = try_parse_commander_tax_paid_with_life_static(&text, &lower) {
+        return Some(result);
+    }
+
     if let Some(result) = try_parse_unspent_mana_loss_causes_life_loss_static(&text, &lower) {
         return Some(result);
     }

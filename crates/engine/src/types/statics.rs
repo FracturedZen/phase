@@ -2349,6 +2349,13 @@ pub enum StaticMode {
     /// This is a boolean rule modification: multiple active instances do not
     /// multiply the life loss caused by a single mana-loss event.
     UnspentManaLossCausesLifeLoss,
+    /// CR 903.8 + CR 118.9 + CR 601.2f: "Rather than pay {2} for each previous
+    /// time you've cast this spell from the command zone this game, pay 2 life
+    /// that many times." (Liesa, Shroud of Dusk). The commander tax for casting
+    /// this object from the command zone is paid as 2 life per previous cast
+    /// instead of {2}. A self-only marker read from the spell itself while it is
+    /// being cast; it changes only the commander tax, never other costs.
+    CommanderTaxPaidWithLife,
     /// CR 702.3b: Allows creatures with defender to attack despite having the keyword.
     /// "can attack as though it didn't have defender" overrides the defender restriction.
     CanAttackWithDefender,
@@ -2596,6 +2603,7 @@ pub enum StaticModeKind {
     PayLifeAsColoredMana,
     StepEndUnspentMana,
     UnspentManaLossCausesLifeLoss,
+    CommanderTaxPaidWithLife,
     CanAttackWithDefender,
     AttackOnlyNeighbor,
     IgnoreLandwalkForBlocking,
@@ -2766,6 +2774,7 @@ impl StaticMode {
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 StaticModeKind::UnspentManaLossCausesLifeLoss
             }
+            StaticMode::CommanderTaxPaidWithLife => StaticModeKind::CommanderTaxPaidWithLife,
             StaticMode::CanAttackWithDefender => StaticModeKind::CanAttackWithDefender,
             StaticMode::AttackOnlyNeighbor => StaticModeKind::AttackOnlyNeighbor,
             StaticMode::IgnoreLandwalkForBlocking { .. } => {
@@ -2918,6 +2927,7 @@ impl StaticMode {
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::CommanderTaxPaidWithLife
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
             | StaticMode::CanBlockShadow
@@ -3049,6 +3059,7 @@ impl Hash for StaticMode {
                 action.hash(state);
             }
             StaticMode::UnspentManaLossCausesLifeLoss => {}
+            StaticMode::CommanderTaxPaidWithLife => {}
             StaticMode::IgnoreLandwalkForBlocking { qualifier } => qualifier.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
@@ -3300,6 +3311,7 @@ impl StaticMode {
             | StaticMode::PayLifeAsColoredMana { .. }
             | StaticMode::StepEndUnspentMana { .. }
             | StaticMode::UnspentManaLossCausesLifeLoss
+            | StaticMode::CommanderTaxPaidWithLife
             | StaticMode::CanAttackWithDefender
             | StaticMode::IgnoreLandwalkForBlocking { .. }
             | StaticMode::CanActivateAbilitiesAsThoughHaste
@@ -3744,6 +3756,7 @@ impl fmt::Display for StaticMode {
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 write!(f, "UnspentManaLossCausesLifeLoss")
             }
+            StaticMode::CommanderTaxPaidWithLife => write!(f, "CommanderTaxPaidWithLife"),
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             // CR 509.1b + CR 609.4 + CR 702.14c: Display follows the existing
             // parenthesized-payload pattern. `None` = all-landwalk canceller.
@@ -4263,6 +4276,7 @@ impl FromStr for StaticMode {
             "CanBlockShadow" => StaticMode::CanBlockShadow,
             s if s.starts_with("StepEndUnspentMana(") => StaticMode::Other(s.to_string()),
             "UnspentManaLossCausesLifeLoss" => StaticMode::UnspentManaLossCausesLifeLoss,
+            "CommanderTaxPaidWithLife" => StaticMode::CommanderTaxPaidWithLife,
             "UntapsDuringEachOtherPlayersUntapStep" => {
                 StaticMode::UntapsDuringEachOtherPlayersUntapStep
             }

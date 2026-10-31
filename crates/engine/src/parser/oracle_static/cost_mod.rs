@@ -975,3 +975,30 @@ pub(crate) fn parse_cast_by_paying_life_alt_cost(text: &str) -> Option<StaticDef
 
     Some(def)
 }
+
+/// CR 903.8 + CR 118.9: Parse Liesa's commander-tax replacement, "Rather than
+/// pay {2} for each previous time you've cast this spell from the command zone
+/// this game, pay 2 life that many times."
+fn parse_commander_tax_paid_with_life(input: &str) -> OracleResult<'_, ()> {
+    let (input, _) = tag("rather than pay {2} for each previous time you've cast ").parse(input)?;
+    let (input, _) = alt((tag("this spell"), tag("~"))).parse(input)?;
+    let (input, _) = tag(" from the command zone this game, pay 2 life that many times").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof(input)?;
+    Ok((input, ()))
+}
+
+pub(crate) fn is_commander_tax_paid_with_life_static(lower: &str) -> bool {
+    parse_commander_tax_paid_with_life(lower).is_ok()
+}
+
+pub(crate) fn try_parse_commander_tax_paid_with_life_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(text, lower, parse_commander_tax_paid_with_life).map(|_| {
+        StaticDefinition::new(StaticMode::CommanderTaxPaidWithLife)
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string())
+    })
+}

@@ -170,6 +170,7 @@ pub(crate) use keyword_grant::{
     parse_quoted_ability_modifications, split_keyword_list,
     try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
 };
+pub(crate) use cost_mod::is_commander_tax_paid_with_life_static;
 pub(crate) use mana_transform::{
     is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
 };

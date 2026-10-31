@@ -595,6 +595,11 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return true;
     }
 
+    // CR 903.8: Liesa's commander-tax-as-life rule modification.
+    if super::oracle_static::is_commander_tax_paid_with_life_static(lower) {
+        return true;
+    }
+
     if super::oracle_static::is_unspent_mana_loss_causes_life_loss_static(lower) {
         return true;
     }

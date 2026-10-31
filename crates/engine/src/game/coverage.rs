@@ -12768,6 +12768,11 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         && effective_lower.contains("becomes")
                 }
             },
+            StaticMode::CommanderTaxPaidWithLife => {
+                effective_lower.contains("previous time you've cast")
+                    && effective_lower.contains("from the command zone")
+                    && effective_lower.contains("life that many times")
+            }
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 effective_lower.contains("losing unspent mana")
                     && effective_lower.contains("causes that player to lose that much life")

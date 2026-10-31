@@ -17,6 +17,44 @@ pub fn commander_tax(state: &GameState, commander_id: ObjectId) -> u32 {
         * 2
 }
 
+/// CR 903.8 + CR 118.9: Whether this object carries Liesa's "rather than pay
+/// {2} for each previous time you've cast this spell from the command zone this
+/// game, pay 2 life that many times" rule. Read from the object's own printed
+/// statics — the ability functions while the spell is being cast.
+pub fn commander_tax_paid_with_life(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        obj.static_definitions.iter_all().any(|def| {
+            def.mode == crate::types::statics::StaticMode::CommanderTaxPaidWithLife
+        })
+    })
+}
+
+/// CR 903.8: The generic-mana commander tax added to a cast of `object_id` from
+/// the command zone. Zero when the tax is paid with life instead (Liesa).
+pub fn commander_mana_tax(state: &GameState, object_id: ObjectId) -> u32 {
+    if commander_tax_paid_with_life(state, object_id) {
+        0
+    } else {
+        commander_tax(state, object_id)
+    }
+}
+
+/// CR 903.8 + CR 118.9 + CR 119.4: The life paid as commander tax for casting
+/// `object_id` from the command zone — 2 life per previous command-zone cast
+/// when it carries Liesa's rule, else zero. Only the commander tax is replaced;
+/// other additional costs are paid as normal (Liesa ruling 2020-11-10).
+pub fn commander_life_tax(state: &GameState, object_id: ObjectId) -> u32 {
+    let from_command = state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.zone == Zone::Command);
+    if from_command && commander_tax_paid_with_life(state, object_id) {
+        commander_tax(state, object_id)
+    } else {
+        0
+    }
+}
+
 /// CR 408.3 + CR 903.8: Record that a commander was cast from the command zone, incrementing its cast count.
 pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
