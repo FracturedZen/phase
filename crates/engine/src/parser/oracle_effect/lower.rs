@@ -17215,6 +17215,7 @@ mod where_x_tests {
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 source: DigSource::Library,
+                                reveal_chosen: false,
                             },
                         ),
                     )),

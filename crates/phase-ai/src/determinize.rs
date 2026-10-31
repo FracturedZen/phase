@@ -427,6 +427,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source,

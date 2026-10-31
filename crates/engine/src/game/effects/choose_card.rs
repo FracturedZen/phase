@@ -92,6 +92,7 @@ pub fn resolve(
         source_id: Some(ability.source_id),
         enter_tapped: false,
         enters_attacking: false,
+        reveal_chosen: false,
     };
 
     events.push(GameEvent::EffectResolved {

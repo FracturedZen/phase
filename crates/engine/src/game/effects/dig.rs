@@ -26,6 +26,7 @@ pub fn resolve(
         rest_split_top,
         rest_order,
         is_reveal,
+        is_reveal_chosen,
         enter_tapped,
         enters_attacking,
         dig_source,
@@ -42,6 +43,7 @@ pub fn resolve(
             rest_split_top_count,
             rest_order,
             reveal,
+            reveal_chosen,
             enter_tapped,
             enters_attacking,
             source,
@@ -77,6 +79,7 @@ pub fn resolve(
                     .map(|e| resolve_quantity_with_targets(state, e, ability).max(0) as usize),
                 *rest_order,
                 *reveal,
+                *reveal_chosen,
                 *enter_tapped,
                 *enters_attacking,
                 *source,
@@ -92,6 +95,7 @@ pub fn resolve(
             None,
             None,
             DigRestOrder::Preserve,
+            false,
             false,
             false,
             false,
@@ -261,6 +265,11 @@ pub fn resolve(
     // form still goes through the choice path below.
     if raw_keep_num == u32::MAX as usize && !is_up_to {
         if let Some(dest) = kept_dest {
+            // CR 701.20a: "reveal all [filter] cards from among them" — every
+            // matching card is the chosen set, so it is the one revealed.
+            if is_reveal_chosen {
+                reveal_chosen_cards(state, ability.controller, &selectable_cards, events);
+            }
             resolve_mass_put_all(
                 state,
                 ability,
@@ -297,6 +306,7 @@ pub fn resolve(
         source_id: Some(ability.source_id),
         enter_tapped,
         enters_attacking,
+        reveal_chosen: is_reveal_chosen,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -306,6 +316,36 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 701.20a + CR 701.20e: reveal the cards a player chose from among
+/// privately looked-at cards ("you may reveal a creature card from among
+/// them"). Only the chosen cards become public; the rest of the looked-at
+/// cards stay known only to the looking player. The `CardsRevealed` event is
+/// published to every player at the action boundary, and `last_revealed_ids`
+/// names exactly the revealed cards for a later "the revealed card" reference.
+pub(crate) fn reveal_chosen_cards(
+    state: &mut GameState,
+    controller: crate::types::player::PlayerId,
+    chosen: &[crate::types::identifiers::ObjectId],
+    events: &mut Vec<GameEvent>,
+) {
+    if chosen.is_empty() {
+        return;
+    }
+    for &card_id in chosen {
+        state.revealed_cards.insert(card_id);
+    }
+    state.last_revealed_ids = chosen.to_vec();
+    let card_names = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|object| object.name.clone()))
+        .collect();
+    events.push(GameEvent::CardsRevealed {
+        player: controller,
+        card_ids: chosen.to_vec(),
+        card_names,
+    });
 }
 
 /// CR 701.20e + CR 608.2c: Resolve a Dig whose card set comes from a
@@ -460,6 +500,7 @@ fn resolve_from_prior_look(
         source_id: Some(ability.source_id),
         enter_tapped,
         enters_attacking,
+        reveal_chosen: false,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -621,6 +662,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(100),
@@ -718,6 +760,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![crate::types::ability::TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -774,6 +817,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(100),
@@ -830,6 +874,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(100),
@@ -902,6 +947,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),
@@ -986,6 +1032,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let mut events = Vec::new();
 
@@ -1049,6 +1096,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -1123,6 +1171,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
 
         let mut events = Vec::new();
@@ -1189,6 +1238,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
 
         let mut events = Vec::new();
@@ -1252,6 +1302,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
 
         let mut events = Vec::new();
@@ -1324,6 +1375,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1399,6 +1451,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1468,6 +1521,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let mut gain_life = ResolvedAbility::new(
             Effect::GainLife {
@@ -1549,6 +1603,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(100),
@@ -1628,6 +1683,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(100),
@@ -1943,6 +1999,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(200),
@@ -2002,6 +2059,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
             vec![],
             ObjectId(201),
@@ -2071,6 +2129,7 @@ mod tests {
             source_id: Some(ObjectId(100)),
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
         let action = GameAction::SelectCards {
             cards: kept.clone(),

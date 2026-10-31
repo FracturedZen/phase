@@ -7635,6 +7635,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source,
+                reveal_chosen: false,
             }
         }
         fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {

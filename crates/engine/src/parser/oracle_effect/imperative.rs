@@ -4086,6 +4086,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            reveal_chosen: false,
         },
         SearchCreationImperativeAst::ExileTopLookedAt {
             player,

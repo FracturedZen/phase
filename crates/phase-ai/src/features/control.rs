@@ -532,6 +532,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
         ));
         let deck = vec![entry(face, 4)];
@@ -563,6 +564,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
         ));
         let deck = vec![entry(face, 4)];

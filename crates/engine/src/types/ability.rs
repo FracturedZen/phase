@@ -24100,6 +24100,13 @@ pub enum Effect {
         /// CR 701.20a vs CR 701.20e: True = cards are revealed (public), false = looked at (private).
         #[serde(default)]
         reveal: bool,
+        /// CR 701.20a + CR 701.20e: "look at the top N ... you may reveal [a
+        /// card] from among them": the N cards are looked at privately
+        /// (`reveal == false`), and only the cards the player chooses are
+        /// revealed, at the keep. Never set together with `reveal`, which
+        /// publicly reveals every one of the N cards ("reveal the top N").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reveal_chosen: bool,
         /// CR 614.1 / CR 110.5b: Kept cards routed to the battlefield enter
         /// tapped when true (Planar Genesis — "onto the battlefield tapped").
         #[serde(default)]

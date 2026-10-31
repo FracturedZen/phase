@@ -1882,6 +1882,7 @@ mod koh_face_stealer_grants;
 mod kylox_voltstrider;
 mod last_night_together_restricted_combat;
 mod lathiel_distribute_among_concede_panic;
+mod issue_8056_look_reveal_only_chosen;
 mod lead_the_stampede_reveal_visibility_2005;
 mod level_up_keywords;
 mod life_magnitude_display;

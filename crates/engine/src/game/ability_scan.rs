@@ -953,6 +953,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             rest_destination: _,
             rest_order: _,
             reveal: _,
+            reveal_chosen: _,
             enter_tapped: _,
             enters_attacking: _,
             source: _,

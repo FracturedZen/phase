@@ -4713,6 +4713,7 @@ pub(super) fn handle_resolution_choice(
                 enter_tapped,
                 enters_attacking,
                 source_id: dig_source_id,
+                reveal_chosen,
                 ..
             },
             GameAction::SelectCards { cards: kept },
@@ -4752,6 +4753,13 @@ pub(super) fn handle_resolution_choice(
             // at validation entirely whenever `selectable_cards` was empty, so a
             // filtered dig that matched nothing accepted arbitrary object ids.
             validate_dig_selection(&kept, &cards, &selectable_cards)?;
+
+            // CR 701.20a + CR 701.20e: "you may reveal [a card] from among them"
+            // reveals only the chosen cards, at the moment they are chosen; the
+            // unchosen looked-at cards stay private to the looking player.
+            if reveal_chosen {
+                effects::dig::reveal_chosen_cards(state, player, &kept, events);
+            }
 
             let mut unkept: Vec<_> = cards
                 .iter()
@@ -14124,6 +14132,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             },
             GameAction::SelectCards { cards: vec![white] },
             &mut events,
@@ -14208,6 +14217,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,
@@ -14249,6 +14259,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             },
             GameAction::SelectCards { cards: vec![keep] },
             &mut events,

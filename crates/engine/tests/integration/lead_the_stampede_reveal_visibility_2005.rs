@@ -1,18 +1,16 @@
 //! Issue #2005 — Lead the Stampede: "When opponent resolves Lead the Stampede
 //! and selects cards, I can't see the cards, but they have to be revealed."
 //!
-//! Determines the layer that owns the bug. Lead the Stampede parses to a
-//! reveal-dig (`Effect::Dig { reveal: true, .. }`): "Look at the top five cards
-//! of your library. You may reveal any number of creature cards from among them
-//! and put the revealed cards into your hand. Put the rest on the bottom ...".
+//! Lead the Stampede reads: "Look at the top five cards of your library. You
+//! may reveal any number of creature cards from among them and put the revealed
+//! cards into your hand. Put the rest on the bottom ...".
 //!
-//! CR 701.20b / CR 701.20a: revealed cards are public to ALL players, and a
-//! reveal-dig must keep the looked-at cards public for the duration of the
-//! `DigChoice`. This test drives the real resolution path and asserts the
-//! ENGINE exposes those cards in a non-controller's filtered view — i.e. the
-//! data the opponent needs is present at the engine boundary. If this passes,
-//! the reported "can't see the cards" symptom is a frontend rendering gap, not
-//! an engine/visibility defect.
+//! CR 701.20a + CR 701.20e: the five cards are only *looked at* — only their
+//! controller sees them while choosing. Only the creature cards the controller
+//! chooses are revealed, and they are revealed to everyone at the keep. This
+//! test was corrected from the upstream version, which expected all five
+//! looked-at cards to be public during the `DigChoice` (an over-reveal).
+//! The keep step is covered by `issue_8056_look_reveal_only_chosen`.
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
@@ -21,6 +19,7 @@ use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{AbilityKind, Effect};
 use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
@@ -45,18 +44,24 @@ fn library_creature(state: &mut GameState, card_id: u64, owner: PlayerId, name: 
 }
 
 #[test]
-fn lead_the_stampede_reveals_dig_cards_to_opponent_during_choice() {
+fn lead_the_stampede_keeps_looked_at_cards_private_during_choice() {
     let def = parse_effect_chain(LEAD_ORACLE, AbilityKind::Spell);
     assert!(
-        matches!(def.effect.as_ref(), Effect::Dig { reveal: true, .. }),
-        "Lead the Stampede must parse to a reveal-dig: {:?}",
+        matches!(
+            def.effect.as_ref(),
+            Effect::Dig {
+                reveal: false,
+                reveal_chosen: true,
+                ..
+            }
+        ),
+        "Lead the Stampede must parse to a look-dig that reveals only the chosen cards: {:?}",
         def.effect
     );
 
     let mut state = GameState::new_two_player(2005);
 
-    // Six creature cards in the caster's library: the top five are looked at and
-    // revealed; the sixth sits below the look window and must stay hidden.
+    // Six creature cards in the caster's library: the top five are looked at.
     let lib: Vec<ObjectId> = (0..6)
         .map(|i| library_creature(&mut state, 100 + i, PlayerId(0), &format!("Beast {i}")))
         .collect();
@@ -73,57 +78,37 @@ fn lead_the_stampede_reveals_dig_cards_to_opponent_during_choice() {
     resolve_ability_chain(&mut state, &ability, &mut events, 0)
         .expect("Lead the Stampede resolves");
 
-    // The reveal-dig pauses on a player selection (DigChoice), the window during
-    // which the looked-at cards are public.
+    let WaitingFor::DigChoice {
+        cards,
+        reveal_chosen,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("look-dig must surface a DigChoice, got {:?}", state.waiting_for);
+    };
+    assert_eq!(cards.len(), 5, "the top five cards are looked at");
+    assert!(*reveal_chosen, "the keep must reveal the chosen cards");
+
+    // CR 701.20e: looking reveals nothing to other players.
     assert!(
-        matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
-        "reveal-dig must surface a DigChoice, got {:?}",
-        state.waiting_for
+        lib.iter().all(|id| !state.revealed_cards.contains(id)),
+        "no looked-at card may be public before the choice"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, GameEvent::CardsRevealed { .. })),
+        "the look must not emit a reveal: {events:?}"
     );
 
-    // Engine marks the looked-at cards publicly revealed (CR 701.20a). There must
-    // be at least one revealed card and at least one unrevealed library card to
-    // make the visibility contrast meaningful.
-    let revealed: Vec<ObjectId> = lib
-        .iter()
-        .copied()
-        .filter(|id| state.revealed_cards.contains(id))
-        .collect();
-    let unrevealed: Vec<ObjectId> = lib
-        .iter()
-        .copied()
-        .filter(|id| !state.revealed_cards.contains(id))
-        .collect();
-    assert!(
-        !revealed.is_empty(),
-        "reveal-dig must publish looked-at cards"
-    );
-    assert!(
-        !unrevealed.is_empty(),
-        "a card below the five-card look window must remain unrevealed"
-    );
-
-    // The opponent's filtered view (PlayerId(1)) MUST expose the revealed cards'
-    // real identities — this is the data a client needs to display the reveal.
+    // The controller knows the looked-at cards; the opponent sees none of them.
+    let own_view = filter_state_for_viewer(&state, PlayerId(0));
     let opp_view = filter_state_for_viewer(&state, PlayerId(1));
-    for id in &revealed {
-        let real_name = &state.objects[id].name;
-        assert_eq!(
-            &opp_view.objects[id].name, real_name,
-            "opponent must see the revealed dig card's identity (CR 701.20b), got redaction"
-        );
-        assert!(
-            !opp_view.objects[id].face_down,
-            "revealed dig card must not be face-down in the opponent's view"
-        );
-    }
-
-    // Contrast: a library card outside the look window stays redacted for the
-    // opponent, proving the exposure above is reveal-scoped, not a blanket leak.
-    for id in &unrevealed {
+    for id in cards {
+        assert_eq!(own_view.objects[id].name, state.objects[id].name);
         assert_eq!(
             opp_view.objects[id].name, "Hidden Card",
-            "unrevealed library card must remain hidden from the opponent"
+            "the opponent must not see a looked-at card (CR 701.20e)"
         );
     }
 }

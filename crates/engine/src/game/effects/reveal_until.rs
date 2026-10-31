@@ -671,6 +671,7 @@ fn resolve_choose_any_number(
         source_id: Some(ability.source_id),
         enter_tapped: enter_tapped.is_tapped(),
         enters_attacking: false,
+        reveal_chosen: false,
     };
 
     events.push(GameEvent::EffectResolved {

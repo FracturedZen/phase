@@ -17425,6 +17425,7 @@ mod tests {
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -17552,6 +17553,7 @@ mod tests {
                 source_id: None,
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             }
         });
         push("SurveilChoice", &|state| WaitingFor::SurveilChoice {
@@ -18825,6 +18827,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: engine::types::ability::DigSource::Library,
+            reveal_chosen: false,
         });
         let spell_id = builder.id();
         let mut runner = scenario.build();

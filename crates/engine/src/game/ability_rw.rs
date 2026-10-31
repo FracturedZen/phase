@@ -5561,6 +5561,7 @@ fn rw_effect(
             rest_destination: _,
             rest_order: _,
             reveal: _,
+            reveal_chosen: _,
             enter_tapped: _,
             enters_attacking: _,
             source: _,

@@ -5875,6 +5875,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped: false,
                                 enters_attacking: false,
                                 source: DigSource::PriorLook,
+                                reveal_chosen: false,
                             },
                         );
 
@@ -5899,6 +5900,7 @@ pub(super) fn apply_clause_continuation(
                                 enter_tapped,
                                 enters_attacking,
                                 source: DigSource::PriorLook,
+                                reveal_chosen: false,
                             },
                         );
                         // Gate on sacrifice having been performed.
@@ -5941,6 +5943,7 @@ pub(super) fn apply_clause_continuation(
                 rest_split_top_count,
                 rest_order,
                 reveal,
+                reveal_chosen,
                 enter_tapped: dig_enter_tapped,
                 enters_attacking: dig_enters_attacking,
                 ..
@@ -5984,8 +5987,19 @@ pub(super) fn apply_clause_continuation(
                 // to a fixed library position (Fertile Thicket: reveal_verb=true,
                 // kept_dest=Some(Library)). Look-only digs (reveal_verb=false,
                 // kept_dest=Some(...)) keep reveal=false (private look, CR 701.20e).
+                //
+                // CR 701.20a + CR 701.20e: when the Dig itself is a private look
+                // ("look at the top N"), a "reveal ... from among them" clause
+                // reveals ONLY the chosen cards (Narset, Parter of Veils; Lead
+                // the Stampede) — the other looked-at cards are never shown to
+                // the opponents. A Dig that already reveals ("reveal the top N")
+                // keeps every card public.
                 *destination = kept_dest;
-                if kept_dest.is_none() || reveal_verb {
+                if reveal_verb {
+                    if !*reveal {
+                        *reveal_chosen = true;
+                    }
+                } else if kept_dest.is_none() {
                     *reveal = true;
                 }
                 if let Some(rd) = rest_dest {
@@ -13138,6 +13152,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            reveal_chosen: false,
         }
     }
 
@@ -16976,6 +16991,7 @@ mod tests {
             enter_tapped: false,
             enters_attacking: false,
             source: DigSource::Library,
+            reveal_chosen: false,
         }
     }
 

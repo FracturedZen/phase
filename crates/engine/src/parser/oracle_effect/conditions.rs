@@ -6010,6 +6010,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_split_top_count: prev_rest_split_top_count,
         rest_order: prev_rest_order,
         reveal: prev_reveal,
+        reveal_chosen: prev_reveal_chosen,
         ..
     } = &*prev.effect
     else {
@@ -6159,6 +6160,8 @@ pub(crate) fn try_parse_dig_instead_alternative(
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
         source: DigSource::Library,
+        // CR 701.20a + CR 701.20e: inherit the preceding Dig's reveal mode.
+        reveal_chosen: *prev_reveal_chosen,
     };
 
     Some(AbilityIr {

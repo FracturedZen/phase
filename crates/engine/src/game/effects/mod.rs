@@ -50686,6 +50686,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     source: DigSource::Library,
+                    reveal_chosen: false,
                 }),
             ),
             (
@@ -51614,6 +51615,7 @@ mod tests {
                     enter_tapped: false,
                     enters_attacking: false,
                     source: crate::types::ability::DigSource::Library,
+                    reveal_chosen: false,
                 })),
             ),
             (
@@ -59562,6 +59564,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
         )
         .sub_ability(sub)
@@ -60634,6 +60637,7 @@ mod tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: DigSource::Library,
+                reveal_chosen: false,
             },
         )
         .sub_ability(cast_sub);
@@ -65204,6 +65208,7 @@ mod parser_oracle_effect_tests {
                 enter_tapped: false,
                 enters_attacking: false,
                 source: crate::types::ability::DigSource::default(),
+                reveal_chosen: false,
             },
             Effect::ExileHaunting {
                 target: TargetFilter::Any,

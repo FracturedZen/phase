@@ -17103,6 +17103,11 @@ pub enum WaitingFor {
         /// attacking rather than being declared as attackers.
         #[serde(default)]
         enters_attacking: bool,
+        /// CR 701.20a + CR 701.20e: the looked-at cards are private to
+        /// `player`, and the kept selection is revealed to every player when
+        /// it is made ("you may reveal [a card] from among them").
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reveal_chosen: bool,
     },
     /// CR 401.2 + CR 701.20e + CR 608.2c: After a `DigChoice`'s keep-selection
     /// has been routed to its destination, a Telling Time-class dig partitions
@@ -49680,6 +49685,7 @@ mod tests {
             source_id: None,
             enter_tapped: false,
             enters_attacking: false,
+            reveal_chosen: false,
         }));
         variants.push(Box::new(WaitingFor::new_dig_rest_split(
             PlayerId(0),

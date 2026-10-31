@@ -904,6 +904,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                 source_id: Some(source),
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             };
             let pending = runner.state().active_ability_continuation().unwrap();
             assert_eq!(pending.chain.targets, expected_targets);
@@ -1015,6 +1016,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
                 source_id: Some(source),
                 enter_tapped: false,
                 enters_attacking: false,
+                reveal_chosen: false,
             };
             let mut events = runner
                 .act(GameAction::SelectCards {
