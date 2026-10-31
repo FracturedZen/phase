@@ -1021,6 +1021,36 @@ pub fn parent_target_owner(ability: &ResolvedAbility, state: &GameState) -> Opti
         .map(|snapshot| snapshot.lki.owner)
 }
 
+/// CR 400.3 + CR 701.24a: Return all distinct owners of the object targets.
+pub fn parent_target_owners(ability: &ResolvedAbility, state: &GameState) -> Vec<PlayerId> {
+    let mut owners: Vec<PlayerId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            TargetRef::Object(id) => state
+                .objects
+                .get(id)
+                .map(|obj| obj.owner)
+                .or_else(|| state.lki_cache.get(id).map(|lki| lki.owner)),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+
+    if owners.is_empty() {
+        if let Some(owner) = ability
+            .effect_context_object
+            .as_ref()
+            .map(|snapshot| snapshot.lki.owner)
+        {
+            owners.push(owner);
+        }
+    }
+
+    owners.sort_unstable();
+    owners.dedup();
+    owners
+}
+
 pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelectionConstraint> {
     modal
         .constraints

@@ -56,52 +56,68 @@ pub fn resolve(
         return Ok(());
     }
 
-    let target_player = match &shuffle_target {
+    let target_players = match &shuffle_target {
+        // CR 400.3 + CR 701.24a: "into their libraries" / ParentTargetOwner
+        // shuffles each unique owner of the target objects (e.g. Turn the Earth).
+        TargetFilter::ParentTargetOwner => {
+            let mut owners = crate::game::ability_utils::parent_target_owners(ability, state);
+            if owners.is_empty() {
+                if let Some(player) =
+                    super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                {
+                    owners.push(player);
+                }
+            }
+            owners
+        }
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .unwrap_or(ability.controller),
+        TargetFilter::Owner => {
+            let player = state
+                .objects
+                .get(&ability.source_id)
+                .map(|obj| obj.owner)
+                .unwrap_or(ability.controller);
+            vec![player]
+        }
         // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
         TargetFilter::ParentTargetSlot { index } => {
             match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
             {
-                Some(TargetRef::Player(player)) => player,
+                Some(TargetRef::Player(player)) => vec![player],
                 Some(TargetRef::Object(_)) => {
                     let Some(player) =
                         super::resolve_player_for_context_ref(state, ability, &shuffle_target)
                     else {
                         return Ok(());
                     };
-                    player
+                    vec![player]
                 }
                 None => return Ok(()),
             }
         }
         // CR 608.2b: a declared player whose target was illegal names no library.
         _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
-            Some(player) => player,
+            Some(player) => vec![player],
             None => return Ok(()),
         },
     };
 
-    // CR 701.24a: the target player must exist before any shuffle logic runs.
-    // Validate first, unconditionally, so an unknown player is rejected even
-    // when a broad "Can't shuffle" static would otherwise suppress the shuffle.
-    if !state
-        .players
-        .iter()
-        .any(|player| player.id == target_player)
-    {
-        return Err(EffectError::PlayerNotFound);
+    if target_players.is_empty() {
+        return Ok(());
     }
 
-    // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
-    // if a player would shuffle their library and can't, they don't shuffle.
-    // The effect itself still resolves (EffectResolved fires below).
-    let suppressed =
-        crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
+    // CR 701.24a: the target player(s) must exist before any shuffle logic runs.
+    // Validate first, unconditionally, so an unknown player is rejected even
+    // when a broad "Can't shuffle" static would otherwise suppress the shuffle.
+    for &target_player in &target_players {
+        if !state
+            .players
+            .iter()
+            .any(|player| player.id == target_player)
+        {
+            return Err(EffectError::PlayerNotFound);
+        }
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
@@ -109,11 +125,22 @@ pub fn resolve(
         subject: None,
     });
 
-    if !suppressed {
-        // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
-        // event order while the shared resolved-command authority owns the
-        // semantic library permutation and entropy receipt.
-        crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+    for &target_player in &target_players {
+        // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
+        // if a player would shuffle their library and can't, they don't shuffle.
+        // The effect itself still resolves (EffectResolved fires above).
+        let suppressed = crate::game::static_abilities::player_has_static_other(
+            state,
+            target_player,
+            "CantShuffle",
+        );
+
+        if !suppressed {
+            // CR 701.24a: Keep the pre-existing EffectResolved → ShuffledLibrary
+            // event order while the shared resolved-command authority owns the
+            // semantic library permutation and entropy receipt.
+            crate::game::effects::change_zone::shuffle_library(state, target_player, events);
+        }
     }
 
     Ok(())

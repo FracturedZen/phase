@@ -813,6 +813,27 @@ pub(crate) fn optional_triggering_source_move_is_infeasible(
             .all(|id| zone_move_member_cannot_move(state, id, expected_origin))
 }
 
+/// CR 701.24a: True if this ability chain contains a downstream `Effect::Shuffle`.
+/// When a `ChangeZone` into a library is chained to a terminal `Shuffle`, the
+/// individual zone move must not auto-shuffle; the terminal `Shuffle` provides
+/// the single authorized library randomization.
+fn chain_has_terminal_shuffle(ability: &ResolvedAbility) -> bool {
+    fn check(a: &ResolvedAbility) -> bool {
+        if let Some(sub) = a.sub_ability.as_deref() {
+            if matches!(sub.effect, Effect::Shuffle { .. }) || check(sub) {
+                return true;
+            }
+        }
+        if let Some(els) = a.else_ability.as_deref() {
+            if matches!(els.effect, Effect::Shuffle { .. }) || check(els) {
+                return true;
+            }
+        }
+        false
+    }
+    check(ability)
+}
+
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1367,6 +1388,18 @@ pub fn resolve(
             )));
         }
 
+        // CR 701.24a + CR 701.24d: A ChangeZone into a library that is chained to a
+        // terminal Shuffle instruction must not auto-shuffle on the zone move itself;
+        // the terminal Shuffle provides the single authorized library randomization.
+        // Use a transient bottom placement to suppress the delivery tail's auto-shuffle,
+        // mirroring MassLibraryShuffleMode::TerminalShuffle on ChangeZoneAll.
+        let member_library_placement =
+            if dest_zone == Zone::Library && chain_has_terminal_shuffle(ability) {
+                Some(LibraryPosition::Bottom)
+            } else {
+                None
+            };
+
         state.waiting_for = WaitingFor::EffectZoneChoice {
             player: filter_controller,
             cards: eligible,
@@ -1392,7 +1425,7 @@ pub fn resolve(
             enter_with_counters: effect_enter_with_counters.clone(),
             conditional_enter_with_counters: effect_conditional_enter_with_counters.clone(),
             count_param: 0,
-            library_position: None,
+            library_position: member_library_placement.clone(),
             mass_library_order: None,
             is_cost_payment: false,
             // CR 614.12: carry the moved-object type gate across the
@@ -1410,6 +1443,18 @@ pub fn resolve(
         return Ok(None);
     }
 
+    // CR 701.24a + CR 701.24d: A ChangeZone into a library that is chained to a
+    // terminal Shuffle instruction must not auto-shuffle on the zone move itself;
+    // the terminal Shuffle provides the single authorized library randomization.
+    // Use a transient bottom placement to suppress the delivery tail's auto-shuffle,
+    // mirroring MassLibraryShuffleMode::TerminalShuffle on ChangeZoneAll.
+    let member_library_placement =
+        if dest_zone == Zone::Library && chain_has_terminal_shuffle(ability) {
+            Some(LibraryPosition::Bottom)
+        } else {
+            None
+        };
+
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
         controller: ability.controller,
@@ -1421,7 +1466,7 @@ pub fn resolve(
         track_exiled_by_source,
         face_down_in_exile: ability.context.face_down_in_exile,
         face_down_profile: face_down_profile.clone(),
-        library_placement: None,
+        library_placement: member_library_placement,
         enter_attached_to: forward_result_search_attach_host(state, ability),
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)

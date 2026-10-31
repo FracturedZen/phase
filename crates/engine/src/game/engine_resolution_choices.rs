@@ -7141,7 +7141,9 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
-                            library_placement: None,
+                            // CR 701.24a: Honor library_position carried across EffectZoneChoice
+                            // (e.g. transient bottom placement for chained terminal shuffle).
+                            library_placement: library_position.clone(),
                             enter_attached_to: None,
                         };
                         let anticipated_pause =

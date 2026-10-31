@@ -156,3 +156,39 @@ fn paused_cost_resume_keeps_every_occurrence_in_the_span_exactly_once() {
         "the return-to-hand occurrence in the same span must still trigger once",
     );
 }
+
+/// Issue #10465: Worldspine Wurm's "shuffle it into its owner's library"
+/// trigger must emit exactly ONE `ShuffledLibrary` event (CR 701.24a).
+#[test]
+fn worldspine_wurm_shuffle_trigger_emits_exactly_one_shuffle_event() {
+    let (mut runner, _wurm, _) = activate_recurring_nightmare(&[]);
+    let stack_len = runner.state().stack.len();
+    assert_eq!(stack_len, 3);
+
+    // The shuffle trigger is on top of the stack.
+    let mut events = Vec::new();
+    while runner.state().stack.len() == stack_len {
+        let outcome = runner.act(GameAction::PassPriority).expect("pass priority");
+        events.extend(outcome.events);
+    }
+
+    let shuffle_events: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                engine::types::events::GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: engine::types::events::PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        shuffle_events.len(),
+        1,
+        "CR 701.24a: exactly one ShuffledLibrary event must be emitted, got: {events:#?}"
+    );
+}
