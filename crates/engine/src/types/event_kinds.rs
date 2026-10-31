@@ -91,6 +91,8 @@ pub enum PlayerActionKind {
     /// drawing player once; a draw that delivered no card (empty library, or every
     /// unit replaced away) emits nothing because that player did not draw.
     Draw,
+    /// CR 707.10: A player copied a spell onto the stack.
+    CopiedSpell,
 }
 
 /// CR 701.30d: Result of a clash — whether the controller won, lost, or tied.

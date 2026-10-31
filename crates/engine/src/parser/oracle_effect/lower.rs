@@ -6030,6 +6030,25 @@ fn split_for_each_suffix(text: &str) -> Option<(usize, String)> {
 pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let (_, text) = strip_each_copy_targets_distinct_member_suffix(text);
     if let Some((base_len, tail)) = split_for_each_suffix(&text) {
+        let base = text[..base_len].trim_end();
+        let lower_base = base.to_ascii_lowercase();
+        // CR 107.1 + CR 608.2c: "[action] once plus an additional time for each [for_each_clause]"
+        // (Tempt with Mayhem). Represents `1 + (for_each_clause count)`.
+        if let Some(real_base) = lower_base
+            .strip_suffix(" once plus an additional time")
+            .or_else(|| lower_base.strip_suffix(" plus an additional time"))
+        {
+            let clause = tail.trim_end().trim_end_matches('.').trim_end();
+            if let Some(qty) = parse_for_each_clause(clause) {
+                return (
+                    Some(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref { qty }),
+                        offset: 1,
+                    }),
+                    base[..real_base.len()].trim_end().to_string(),
+                );
+            }
+        }
         if let Ok((_, qty)) = all_consuming(terminated(
             nom_quantity::parse_for_each_clause_ref,
             opt(tag::<_, _, OracleError<'_>>(".")),
@@ -6048,10 +6067,7 @@ pub(super) fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>,
             ) || zada_repeat_for_implies_distinct_copy_targets(&QuantityExpr::Ref {
                 qty: qty.clone(),
             }) {
-                return (
-                    Some(QuantityExpr::Ref { qty }),
-                    text[..base_len].trim_end().to_string(),
-                );
+                return (Some(QuantityExpr::Ref { qty }), base.to_string());
             }
         }
     }

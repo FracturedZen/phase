@@ -1082,7 +1082,7 @@ pub fn parse_target_with_syntax<'a>(
     if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
         if let Ok((after, _)) = parse_word_bounded(rest_subject, "spell") {
-            if after.is_empty() || after.starts_with([',', ';']) {
+            if !ctx.parent_target_is_chosen && (after.is_empty() || after.starts_with([',', ';'])) {
                 let orig_after = original_rest.get("spell".len()..).unwrap_or(original_rest);
                 return (TargetFilter::TriggeringSource, orig_after, syntax);
             }
@@ -1677,7 +1677,7 @@ pub fn parse_target_with_syntax<'a>(
                 let orig_after = orig_after.get(consumed..).unwrap_or(orig_after);
                 return (TargetFilter::TriggeringSource, orig_after, syntax);
             }
-            if after.is_empty() || after.starts_with([',', ';']) {
+            if !ctx.parent_target_is_chosen && (after.is_empty() || after.starts_with([',', ';'])) {
                 return (TargetFilter::TriggeringSource, orig_after, syntax);
             }
         }

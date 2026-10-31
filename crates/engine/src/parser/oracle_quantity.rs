@@ -3006,10 +3006,24 @@ pub(crate) fn parse_who_action_this_way(
     input: &str,
 ) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
     let (input, _) = tag("who ").parse(input)?;
-    let (input, action) =
-        alt((parse_searched_arm, parse_investigated_arm, parse_drew_arm)).parse(input)?;
+    let (input, action) = alt((
+        parse_searched_arm,
+        parse_investigated_arm,
+        parse_drew_arm,
+        parse_copied_arm,
+    ))
+    .parse(input)?;
     let (input, _) = tag(" this way").parse(input)?;
     Ok((input, action))
+}
+
+/// "copied/copies a/the/that spell" → `CopiedSpell` (Tempt with Mayhem).
+fn parse_copied_arm(input: &str) -> nom::IResult<&str, PlayerActionKind, OracleError<'_>> {
+    let (input, _) = alt((tag("copied"), tag("copies"), tag("copy"))).parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    let (input, _) = alt((tag("a "), tag("the "), tag("that "))).parse(input)?;
+    let (input, _) = tag("spell").parse(input)?;
+    Ok((input, PlayerActionKind::CopiedSpell))
 }
 
 /// "searches/searched a/their library" → `SearchedLibrary` (Tempting Offer cycle).

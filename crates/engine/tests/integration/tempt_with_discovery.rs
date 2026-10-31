@@ -15,14 +15,16 @@ use engine::game::engine::apply;
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    Effect, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef, ResolvedAbility,
-    SearchSelectionConstraint, TargetFilter, TypedFilter,
+    CopyRetargetPermission, Effect, PlayerFilter, PlayerRelation, QuantityExpr, QuantityRef,
+    ResolvedAbility, SearchSelectionConstraint, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{
+    CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -712,4 +714,291 @@ fn tempt_with_discovery_step_4_fires_n_times_when_n_opponents_accept() {
          should run (one per accepting opponent)"
     );
     assert!(state.active_repeat_for().is_none());
+}
+
+fn tempt_with_mayhem_oracle() -> &'static str {
+    "Tempting offer — Choose target instant or sorcery spell. Each opponent may copy that spell and may choose new targets for the copy they control. You copy that spell once plus an additional time for each opponent who copied the spell this way. You may choose new targets for the copies you control."
+}
+
+/// CR 207.2c + CR 608.2c + CR 707.10: Tempt with Mayhem parses faithfully without dropped
+/// quantity phrases or warnings.
+#[test]
+fn tempt_with_mayhem_parses_faithfully() {
+    let result = parse_oracle_text(
+        tempt_with_mayhem_oracle(),
+        "Tempt with Mayhem",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    assert!(
+        result.parse_warnings.is_empty(),
+        "Expected no parse warnings, got {:?}",
+        result.parse_warnings
+    );
+    assert_eq!(result.abilities.len(), 1);
+    let def = &result.abilities[0];
+    assert!(matches!(&*def.effect, Effect::TargetOnly { .. }));
+    let opp_copy = def.sub_ability.as_ref().expect("opponent copy step");
+    assert!(matches!(
+        &*opp_copy.effect,
+        Effect::CopySpell {
+            target: TargetFilter::ParentTarget,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+    ));
+    assert!(opp_copy.optional);
+    assert_eq!(opp_copy.player_scope, Some(PlayerFilter::Opponent));
+
+    let ctrl_copy = opp_copy
+        .sub_ability
+        .as_ref()
+        .expect("controller bonus copy step");
+    assert!(matches!(
+        &*ctrl_copy.effect,
+        Effect::CopySpell {
+            target: TargetFilter::ParentTarget,
+            retarget: CopyRetargetPermission::MayChooseNewTargets,
+            ..
+        }
+    ));
+    assert!(!ctrl_copy.optional);
+    assert_eq!(ctrl_copy.player_scope, None);
+    assert!(matches!(
+        &ctrl_copy.repeat_for,
+        Some(QuantityExpr::Offset {
+            inner,
+            offset: 1,
+        }) if matches!(&**inner, QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::PerformedActionThisWay {
+                    relation: PlayerRelation::Opponent,
+                    action: PlayerActionKind::CopiedSpell,
+                }
+            }
+        })
+    ));
+}
+
+/// CR 608.2c + CR 608.2d + CR 707.10: When all opponents decline, controller copies the spell once.
+#[test]
+fn tempt_with_mayhem_all_opponents_decline_controller_copies_once() {
+    let parsed = parse_oracle_text(
+        tempt_with_mayhem_oracle(),
+        "Tempt with Mayhem",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+    let bolt = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Lightning Bolt".to_string(),
+        Zone::Stack,
+    );
+    state.objects.get_mut(&bolt).unwrap().card_types.core_types = vec![CoreType::Instant];
+    state.stack.push_back(StackEntry {
+        id: bolt,
+        source_id: bolt,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(10),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 1,
+        },
+    });
+
+    let mut ability = build_resolved_from_def(&parsed.abilities[0], ObjectId(9100), PlayerId(0));
+    ability.targets = vec![TargetRef::Object(bolt)];
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    // P1, P2, P3 prompted in turn and all decline
+    for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { player, .. } if player == p
+        ));
+        apply(
+            &mut state,
+            p,
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+    }
+
+    // Original Bolt + 1 copy by P0 on stack = 2 stack entries
+    assert_eq!(state.stack.len(), 2);
+    assert_eq!(state.stack[0].id, bolt);
+    assert_eq!(state.stack[1].controller, PlayerId(0));
+    assert_ne!(state.stack[1].id, bolt);
+}
+
+/// CR 608.2c + CR 608.2d + CR 707.10: When two opponents accept, each gets 1 copy and controller gets 1 + 2 = 3 copies.
+#[test]
+fn tempt_with_mayhem_two_opponents_accept_controller_copies_three_times() {
+    let parsed = parse_oracle_text(
+        tempt_with_mayhem_oracle(),
+        "Tempt with Mayhem",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+    let bolt = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Lightning Bolt".to_string(),
+        Zone::Stack,
+    );
+    state.objects.get_mut(&bolt).unwrap().card_types.core_types = vec![CoreType::Instant];
+    state.stack.push_back(StackEntry {
+        id: bolt,
+        source_id: bolt,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(10),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 1,
+        },
+    });
+
+    let mut ability = build_resolved_from_def(&parsed.abilities[0], ObjectId(9100), PlayerId(0));
+    ability.targets = vec![TargetRef::Object(bolt)];
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    // P1 accepts
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: PlayerId(1),
+            ..
+        }
+    ));
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::DecideOptionalEffect { accept: true },
+    )
+    .unwrap();
+
+    // P2 declines
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: PlayerId(2),
+            ..
+        }
+    ));
+    apply(
+        &mut state,
+        PlayerId(2),
+        GameAction::DecideOptionalEffect { accept: false },
+    )
+    .unwrap();
+
+    // P3 accepts
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            player: PlayerId(3),
+            ..
+        }
+    ));
+    apply(
+        &mut state,
+        PlayerId(3),
+        GameAction::DecideOptionalEffect { accept: true },
+    )
+    .unwrap();
+
+    // Stack:
+    // [0]: original Bolt (P0)
+    // [1]: P1's copy
+    // [2]: P3's copy
+    // [3, 4, 5]: P0's 3 copies (1 base + 2 from P1 & P3)
+    assert_eq!(state.stack.len(), 6);
+    assert_eq!(state.stack[0].id, bolt);
+    assert_eq!(state.stack[1].controller, PlayerId(1));
+    assert_eq!(state.stack[2].controller, PlayerId(3));
+    assert_eq!(state.stack[3].controller, PlayerId(0));
+    assert_eq!(state.stack[4].controller, PlayerId(0));
+    assert_eq!(state.stack[5].controller, PlayerId(0));
+}
+
+/// CR 608.2c + CR 608.2d + CR 707.10: When all 3 opponents accept, each gets 1 copy and controller gets 1 + 3 = 4 copies.
+#[test]
+fn tempt_with_mayhem_all_three_opponents_accept_controller_copies_four_times() {
+    let parsed = parse_oracle_text(
+        tempt_with_mayhem_oracle(),
+        "Tempt with Mayhem",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+    let bolt = create_object(
+        &mut state,
+        CardId(10),
+        PlayerId(0),
+        "Lightning Bolt".to_string(),
+        Zone::Stack,
+    );
+    state.objects.get_mut(&bolt).unwrap().card_types.core_types = vec![CoreType::Instant];
+    state.stack.push_back(StackEntry {
+        id: bolt,
+        source_id: bolt,
+        controller: PlayerId(0),
+        kind: StackEntryKind::Spell {
+            card_id: CardId(10),
+            ability: None,
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 1,
+        },
+    });
+
+    let mut ability = build_resolved_from_def(&parsed.abilities[0], ObjectId(9100), PlayerId(0));
+    ability.targets = vec![TargetRef::Object(bolt)];
+
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    // P1, P2, P3 all accept
+    for p in [PlayerId(1), PlayerId(2), PlayerId(3)] {
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { player, .. } if player == p
+        ));
+        apply(
+            &mut state,
+            p,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+    }
+
+    // Stack:
+    // [0]: original Bolt (P0)
+    // [1]: P1's copy
+    // [2]: P2's copy
+    // [3]: P3's copy
+    // [4, 5, 6, 7]: P0's 4 copies (1 base + 3 from P1, P2, P3)
+    assert_eq!(state.stack.len(), 8);
+    assert_eq!(state.stack[0].id, bolt);
+    assert_eq!(state.stack[1].controller, PlayerId(1));
+    assert_eq!(state.stack[2].controller, PlayerId(2));
+    assert_eq!(state.stack[3].controller, PlayerId(3));
+    assert_eq!(state.stack[4].controller, PlayerId(0));
+    assert_eq!(state.stack[5].controller, PlayerId(0));
+    assert_eq!(state.stack[6].controller, PlayerId(0));
+    assert_eq!(state.stack[7].controller, PlayerId(0));
 }

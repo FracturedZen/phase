@@ -843,6 +843,7 @@ fn player_action_label(action: PlayerActionKind) -> &'static str {
         PlayerActionKind::Investigate => "investigates",
         PlayerActionKind::Forage => "forages",
         PlayerActionKind::Draw => "draws",
+        PlayerActionKind::CopiedSpell => "copies a spell",
     }
 }
 

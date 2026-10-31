@@ -246,6 +246,20 @@ pub fn resolve(
         .copied();
     crate::game::stack::push_copy_to_stack(state, copy_entry, copied_trigger_firing, events);
 
+    // CR 707.10 + CR 608.2c: Record that `copy_controller` copied a spell during this resolution
+    // for "who copied the spell this way" (Tempt with Mayhem).
+    state.player_actions_this_way.insert((
+        copy_controller,
+        crate::types::events::PlayerActionKind::CopiedSpell,
+    ));
+    events.push(GameEvent::PlayerPerformedAction {
+        player_id: copy_controller,
+        action: crate::types::events::PlayerActionKind::CopiedSpell,
+        look_count: None,
+        scry_bottom_count: None,
+        scry_top_count: None,
+    });
+
     // CR 707.10d: Zada — each copy is put on the stack targeting the current
     // iteration member; no controller choice to change targets.
     if matches!(

@@ -4994,9 +4994,15 @@ pub(super) fn parse_copy_retarget_clause(input: &str) -> OracleResult<'_, bool> 
                 value(true, tag("the copies")),
                 value(false, alt((tag("the copy"), tag("that copy")))),
             )),
+            opt(alt((
+                tag(" they control"),
+                tag(" you control"),
+                tag(" that player controls"),
+                tag(" he or she controls"),
+            ))),
             opt(alt((tag("."), tag(",")))),
         ),
-        |(_, _, _, _, _, _, all_copies, _)| all_copies,
+        |(_, _, _, _, _, _, all_copies, _, _)| all_copies,
     )
     .parse(input)
 }

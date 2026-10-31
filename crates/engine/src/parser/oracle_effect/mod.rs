@@ -27833,6 +27833,9 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
     // caller's unconditional carve-out.
     let mut skipped_conditional = false;
     for prev in clauses.iter().rev() {
+        if matches!(prev.disposition, ClauseDisposition::Continue { .. }) {
+            continue;
+        }
         if let Some(cond) = prev.condition.as_ref() {
             if skip_first_conditional && !skipped_conditional {
                 skipped_conditional = true;
@@ -27898,7 +27901,11 @@ fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
 /// a ParentTarget referent is active and carrying forward (e.g. Code of Constraint's
 /// "tap that creature and it doesn't untap...").
 fn chain_has_prior_parent_target_carrier(clauses: &[ClauseIr]) -> bool {
-    let Some(prev) = clauses.last() else {
+    let Some(prev) = clauses
+        .iter()
+        .rev()
+        .find(|c| !matches!(c.disposition, ClauseDisposition::Continue { .. }))
+    else {
         return false;
     };
     if let Some(cond) = prev.condition.as_ref() {
@@ -27967,6 +27974,9 @@ fn rebind_reanimate_animation_until_leaves(def: &mut AbilityDefinition) {
 /// `.is_some()` of this result.
 fn chain_prior_chosen_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     for prev in clauses.iter().rev() {
+        if matches!(prev.disposition, ClauseDisposition::Continue { .. }) {
+            continue;
+        }
         if prev.condition.is_some() {
             return None;
         }
@@ -29208,6 +29218,9 @@ fn previous_clause_moves_to_battlefield(clauses: &[ClauseIr]) -> bool {
 /// preceding instruction (the comparative "that creature" gate).
 fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &TargetFilter)> {
     for (index, prev) in clauses.iter().enumerate().rev() {
+        if matches!(prev.disposition, ClauseDisposition::Continue { .. }) {
+            continue;
+        }
         // CR 608.2c + CR 118.12 / CR 603.12 / CR 207.2c: an affirmative "if you do" / "when you do" gate
         // or whole-spell casting condition (Addendum / kicker) decides whether its
         // instruction happens, not what that instruction declared, so its declared
@@ -48566,7 +48579,9 @@ fn parse_effect_chain_ir_body(
                     if zada_distinct_copy_targets {
                         *retarget = CopyRetargetPermission::RetargetEachCopyToIterationMember;
                     }
-                    if matches!(target, TargetFilter::ParentTarget | TargetFilter::Any) {
+                    if !ctx.parent_target_is_chosen
+                        && matches!(target, TargetFilter::ParentTarget | TargetFilter::Any)
+                    {
                         *target = TargetFilter::TriggeringSource;
                     }
                 }
