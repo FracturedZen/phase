@@ -16251,6 +16251,19 @@ fn try_parse_event(
         return Some(result);
     }
 
+    // CR 603.6c + CR 603.10a: the negated-origin form "is put into
+    // [possessive] graveyard from anywhere other than <zone>" (Disa the
+    // Restless, issue #7355) has no scalar `origin` representation, so it
+    // routes through the same `ZoneChangeClause` building block the
+    // disjunctive path uses (Syr Konrad clause 2), whose `OriginConstraint`
+    // carries `NotEquals`/`OneOf`. Scalar forms were consumed above.
+    if let Some(clause) = parse_zone_change_clause(subject, rest) {
+        let mut def = make_base();
+        def.mode = TriggerMode::ChangesZone;
+        def.zone_change_clauses = vec![clause];
+        return Some((TriggerMode::ChangesZone, def));
+    }
+
     // CR 400.3 + CR 603.10: "is put into your hand from your graveyard" — dredge-style
     // reanimate triggers (Golgari Brownscale). Fires from the graveyard zone, so
     // trigger_zones must extend beyond the battlefield default.

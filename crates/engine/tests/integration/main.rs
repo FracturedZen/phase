@@ -805,6 +805,7 @@ mod issue_3295_scrapwork_mutt_unearth_zone;
 mod issue_3296_hordewing_skaab_discard;
 mod issue_3297_rite_token_abilities;
 mod issue_3299_syr_konrad_duplicate_damage;
+mod issue_7355_disa_the_restless;
 mod issue_3300_counter_spell;
 mod issue_3301_izzet_charm_counter;
 mod issue_3302_breach_multiverse;
