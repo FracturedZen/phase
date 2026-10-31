@@ -5293,6 +5293,8 @@ fn create_entry_copy_spec_for_replacement(
         // Forwards BecomeCopy mods, but no BecomeCopy+halving card exists, so the
         // None fallback (today's token-id read) preserves behavior on this route.
         donor: None,
+        back_face: None,
+        transformed: false,
     })
 }
 

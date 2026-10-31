@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplayIdentity};
+use crate::game::game_object::{AttachTarget, BackFaceData, DisplayIdentity};
 
 use super::counter::CounterType;
 
@@ -365,6 +365,12 @@ pub struct CopyTokenSpec {
     /// `None` where no donor is in scope; consumers fall back to the token id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub donor: Option<ObjectIncarnationRef>,
+    /// CR 707.8 / CR 707.8a: Double-faced characteristics for a token copying a DFC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_face: Option<Box<BackFaceData>>,
+    /// CR 707.8a: Whether the token enters back face up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transformed: bool,
 }
 
 /// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
@@ -1909,6 +1915,8 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             donor: None,
+            back_face: None,
+            transformed: false,
         }
     }
 

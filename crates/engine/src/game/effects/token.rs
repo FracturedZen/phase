@@ -2061,6 +2061,16 @@ pub(crate) fn materialize_token_copy_body(
     values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
+    // CR 707.8 + CR 707.8a: A copy of a double-faced permanent is double-faced.
+    // A copy of a transforming double-faced permanent is transforming.
+    // If the token is a copy of a double-faced permanent with its back face up,
+    // the token enters the battlefield with its back face up (CR 707.8a).
+    // The entry must not emit a transform event (CR 712.14a).
+    if let Some(back_face) = &copy.back_face {
+        object.back_face = Some((**back_face).clone());
+        object.transformed = copy.transformed;
+    }
+
     // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
     // on top of the copied characteristics. Twinflame's haste copies are the
     // canonical case. Idempotent under repeats.
@@ -9456,6 +9466,8 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    back_face: None,
+                    transformed: false,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

@@ -1,6 +1,6 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::game_object::{DisplayIdentity, DisplaySource, GameObject};
+use crate::game::game_object::{BackFaceData, DisplayIdentity, DisplaySource, GameObject};
 use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -282,6 +282,11 @@ pub fn resolve(
                 // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
                 // bound so donor-referential exceptions halve donor values.
                 donor: Some(source.incarnation),
+                // CR 707.8 + CR 707.8a: A copy of a double-faced permanent is double-faced.
+                // If the token is a copy of a double-faced permanent with its back face up,
+                // the token enters the battlefield with its back face up.
+                back_face: source.back_face.map(Box::new),
+                transformed: source.transformed,
             }),
         });
     }
@@ -306,6 +311,34 @@ pub(crate) enum CopySourceReferent {
     Object(ObjectId),
 }
 
+/// CR 707.8 + CR 707.8a: Whether an object is a double-faced permanent whose
+/// back face should be copied to a created token.
+/// Single-faced layouts that store alternative characteristics in `back_face`
+/// (Adventure, Omen, Split, Flip, Prepare) are single-faced cards and do not
+/// make double-faced tokens.
+pub(crate) fn is_copyable_double_faced(obj: &GameObject) -> bool {
+    use crate::types::card::LayoutKind;
+    if obj.transformed {
+        return true;
+    }
+    if obj.flipped || crate::game::flip::is_flip_permanent(obj) {
+        return false;
+    }
+    let Some(face) = obj.back_face.as_ref() else {
+        return false;
+    };
+    !matches!(
+        face.layout_kind,
+        Some(
+            LayoutKind::Split
+                | LayoutKind::Flip
+                | LayoutKind::Adventure
+                | LayoutKind::Omen
+                | LayoutKind::Prepare,
+        )
+    )
+}
+
 /// CR 707.2: one copy source as a copy effect reads it: the incarnation it
 /// was read from, its copiable values, and the display identity the copy
 /// records with them (not copiable).
@@ -313,6 +346,8 @@ pub(crate) struct CopySource {
     pub(crate) incarnation: ObjectIncarnationRef,
     pub(crate) values: CopiableValues,
     pub(crate) display: DisplayIdentity,
+    pub(crate) back_face: Option<BackFaceData>,
+    pub(crate) transformed: bool,
 }
 
 impl CopySource {
@@ -321,10 +356,21 @@ impl CopySource {
     fn live(state: &GameState, id: ObjectId) -> Option<Self> {
         let values = compute_current_copiable_values(state, id)?;
         let source = state.objects.get(&id)?;
+        // CR 707.8 + CR 707.8a: A copy of a double-faced permanent is double-faced.
+        // A copy of a transforming double-faced permanent is transforming.
+        // If the token is a copy of a double-faced permanent with its back face up,
+        // the token enters the battlefield with its back face up (CR 707.8a).
+        let (back_face, transformed) = if is_copyable_double_faced(source) {
+            (source.back_face.clone(), source.transformed)
+        } else {
+            (None, false)
+        };
         Some(Self {
             incarnation: ObjectIncarnationRef::from_object(source),
             values,
             display: source.display_identity(),
+            back_face,
+            transformed,
         })
     }
 
@@ -356,6 +402,8 @@ impl CopySource {
                 token_image_ref,
                 token_art: None,
             },
+            back_face: None,
+            transformed: false,
         })
     }
 }
@@ -745,6 +793,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         source_id,
         controller,
         donor,
+        back_face,
+        transformed,
     } = copy;
     let name = values.name.clone();
     // CR 508.4: a resume carries the earlier ids so they are republished, but a
@@ -816,6 +866,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 source_id,
                 controller,
                 donor,
+                back_face: back_face.clone(),
+                transformed,
             });
             // CR 707.9b/9c: this seam only runs when every exception is
             // stampable onto copiable values before entry, so the body is
@@ -947,6 +999,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
             controller,
             donor,
+            back_face: back_face.clone(),
+            transformed,
         });
         // CR 707.9: unlike the liminal seam, this one applies its exceptions
         // AFTER the birth through `apply_token_modifications`, which is pausable,
@@ -2401,6 +2455,8 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            back_face: None,
+            transformed: false,
         };
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement(
@@ -2517,6 +2573,8 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            back_face: None,
+            transformed: false,
         }
     }
 

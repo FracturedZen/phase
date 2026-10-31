@@ -1215,6 +1215,8 @@ fn route_debug_token_to_battlefield(
         controller: staged.controller,
         // Debug-token route stages no donor; empty mods are stamp-proof.
         donor: None,
+        back_face: staged.back_face.clone().map(Box::new),
+        transformed: staged.transformed,
     };
     let mut token = super::game_object::GameObject::new(
         object_id,
