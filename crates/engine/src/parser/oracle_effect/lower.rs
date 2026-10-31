@@ -261,6 +261,7 @@ pub(super) fn patch_population_head_tap_anaphor(def: &mut AbilityDefinition) {
     ///     the signal for THIS leg only)          (Lulu, The Fifth Doctor)
     ///   * `PumpAll`       -> `pump::pump_all_affected_objects` (issue #6857)
     ///   * `GenericEffect` -> filter re-enumeration            (issue #6682)
+    ///   * `GainControlAll` -> `ControllerChanged` events      (issue #7239)
     ///
     /// The broadcast test is `is_broadcast_population_filter`, NOT the
     /// runtime's `generic_effect_affected_uses_inherited_targets`: the latter
@@ -271,6 +272,10 @@ pub(super) fn patch_population_head_tap_anaphor(def: &mut AbilityDefinition) {
             Effect::PutCounterAll { target, .. } | Effect::PumpAll { target, .. } => {
                 is_broadcast_population_filter(target)
             }
+            // CR 613.1b + CR 608.2c: `GainControlAll` publishes the objects it
+            // took control of (`ControllerChanged` events), so a chained
+            // "untap them" names that set (Hot Pursuit, Broadcast Takeover).
+            Effect::GainControlAll { target } => is_broadcast_population_filter(target),
             // Same authority the runtime publish arm selects with, so a head can
             // never be routed here and then declined there (or vice versa).
             Effect::GenericEffect {

@@ -3007,6 +3007,23 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
     // filters like "goaded creature you control". Mirrors the "renowned" strip:
     // only consume when a type word follows, so the "goad target creature" verb
     // path is untouched.
+    //
+    // CR 701.15b + CR 701.60a: "goaded and/or suspected creatures" (Hot Pursuit)
+    // is a designation disjunction — goaded OR suspected, not both — so it is
+    // recorded as a property disjunction like "attacking or blocking" above.
+    if let Ok((rest, _)) = preceded(
+        tag::<_, _, OracleError<'_>>("goaded "),
+        alt((tag("and/or suspected "), tag("or suspected "))),
+    )
+    .parse(&lower[pos..])
+    {
+        if starts_with_type_phrase_lead(rest) {
+            property_disjunction_ranges.push((properties.len(), 2));
+            properties.push(FilterProp::Goaded);
+            properties.push(FilterProp::Suspected);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("goaded ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Goaded);

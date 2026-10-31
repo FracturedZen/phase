@@ -380,9 +380,34 @@ fn parse_it_wasnt_cast_or_no_mana_spent(input: &str) -> OracleResult<'_, StaticC
     ))
 }
 
+/// CR 104.3 + CR 800.4a: "<N> or more players have lost the game" — a count of
+/// eliminated players compared to a fixed threshold (Hot Pursuit). Reuses the
+/// `PlayerCount { HasLostTheGame }` quantity, which counts players who have left
+/// the game by losing.
+fn parse_n_or_more_players_have_lost_the_game(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, _) = tag(" or more players have lost the game").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::HasLostTheGame,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
-        parse_they_scoped_player_conditions,
+        // CR 104.3 + CR 800.4a: "N or more players have lost the game" (Hot Pursuit).
+        alt((
+            parse_n_or_more_players_have_lost_the_game,
+            parse_they_scoped_player_conditions,
+        )),
         parse_turn_conditions,
         // CR 208.1 + CR 603.4 + CR 109.3: Superlative-comparison gate
         // ("if its power is greater than each other creature's power" /
