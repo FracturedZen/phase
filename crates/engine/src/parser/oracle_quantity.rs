@@ -170,6 +170,9 @@ pub(crate) fn parse_quantity_ref_with_context(
                 aggregate: AggregateFunction::Sum,
             });
         }
+        if let Some(qty) = try_parse_counters_put_this_way(rest) {
+            return Some(qty);
+        }
     }
 
     // CR 608.2c + CR 701.20b: "the number of [type] cards revealed this way" —
@@ -181,6 +184,10 @@ pub(crate) fn parse_quantity_ref_with_context(
         if let Some(qty) = parse_filtered_revealed_this_way(&rest.to_lowercase()) {
             return Some(qty);
         }
+    }
+
+    if let Some(qty) = try_parse_counters_put_this_way(trimmed) {
+        return Some(qty);
     }
 
     if let Some(qty) = parse_milled_this_way_count(trimmed) {
@@ -2709,6 +2716,70 @@ fn try_parse_counters_removed_this_way(lower: &str) -> bool {
         .is_ok()
 }
 
+/// CR 122.1 + CR 608.2c: Detect "counter[s] put on [target] this way" or
+/// "the number of [kind] counter[s] put on [target] this way" (Kathril, Aspect Warper).
+/// Unlike `TrackedSetSize` which counts distinct objects, this counts the actual
+/// number of counters placed on matching objects during the ability's resolution.
+fn try_parse_counters_put_this_way(input: &str) -> Option<QuantityRef> {
+    let lower = input.to_ascii_lowercase();
+    let trimmed = lower.trim();
+    let body = trimmed.strip_suffix(" this way")?.trim();
+    let body = body
+        .strip_prefix("the number of ")
+        .or_else(|| body.strip_prefix("number of "))
+        .unwrap_or(body)
+        .trim();
+
+    let (counter_part, target_part) = if let Some(idx) = body.find(" put on ") {
+        (&body[..idx], &body[idx + " put on ".len()..])
+    } else if let Some(idx) = body.find(" put onto ") {
+        (&body[..idx], &body[idx + " put onto ".len()..])
+    } else {
+        return None;
+    };
+
+    let counter_part = counter_part.trim();
+    let counter_part = counter_part
+        .strip_suffix(" that was")
+        .or_else(|| counter_part.strip_suffix(" that were"))
+        .or_else(|| counter_part.strip_suffix(" you"))
+        .or_else(|| counter_part.strip_suffix(" a player"))
+        .unwrap_or(counter_part)
+        .trim();
+
+    let counter_kind_part = if let Some(prefix) = counter_part.strip_suffix("counters") {
+        prefix.trim()
+    } else if let Some(prefix) = counter_part.strip_suffix("counter") {
+        prefix.trim()
+    } else {
+        return None;
+    };
+
+    let counters = if counter_kind_part.is_empty() {
+        crate::types::counter::CounterMatch::Any
+    } else if let Ok((_, ct)) =
+        crate::parser::oracle_nom::primitives::parse_counter_type_typed(counter_kind_part)
+    {
+        crate::types::counter::CounterMatch::OfType(ct)
+    } else {
+        crate::types::counter::CounterMatch::Any
+    };
+
+    let target_part = target_part.trim();
+    let target = if target_part == "it" || target_part == "them" {
+        TargetFilter::Any
+    } else {
+        let (f, rem) = crate::parser::oracle_target::parse_type_phrase_folding(target_part);
+        if rem.trim().is_empty() {
+            f
+        } else {
+            TargetFilter::Typed(TypedFilter::creature())
+        }
+    };
+
+    Some(QuantityRef::CountersPutThisResolution { target, counters })
+}
+
 /// Parse the clause after "for each" into a `QuantityExpr`, supporting
 /// the conjunction form "X and each Y" by emitting `QuantityExpr::Sum`.
 /// A single-segment clause delegates to `parse_for_each_clause` and
@@ -3647,6 +3718,12 @@ fn parse_for_each_clause_with_they_controller(
                 channel: crate::types::ability::DamageChannel::Total,
                 aggregate: AggregateFunction::Sum,
             });
+        }
+        // CR 122.1 + CR 608.2c: "counter[s] put on [target] this way" — counts
+        // the number of counters put on matching objects during this resolution,
+        // not the distinct objects themselves (Kathril, Aspect Warper).
+        if let Some(qty) = try_parse_counters_put_this_way(&lower) {
+            return Some(qty);
         }
         // CR 608.2c + CR 400.7: "nontoken creature you controlled that was
         // destroyed this way" — tracked set members matching the filter prefix.

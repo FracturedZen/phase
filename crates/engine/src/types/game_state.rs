@@ -24825,6 +24825,13 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub exiled_from_hand_this_resolution: u32,
 
+    /// CR 122.1 + CR 608.2c: Counters put onto permanents during the currently
+    /// resolving ability chain ("put a counter ... this way"). Read by
+    /// `QuantityRef::CountersPutThisResolution` (Kathril, Aspect Warper).
+    /// Cleared at depth-0 chain entry and action reset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counter_added_this_resolution: Vec<CounterAddedRecord>,
+
     /// CR 725: The current monarch, if any. At the beginning of the monarch's end step,
     /// the monarch draws a card. When a creature deals combat damage to the monarch,
     /// the creature's controller becomes the monarch.
@@ -32422,6 +32429,7 @@ impl GameState {
             control_change_observations: LazyBoxedMap::default(),
             next_control_change_observation_id: 0,
             exiled_from_hand_this_resolution: 0,
+            counter_added_this_resolution: Vec::new(),
             monarch: None,
             city_blessing: HashSet::new(),
             enduring_story: Box::default(),
@@ -35756,6 +35764,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         control_change_observations: _,
         next_control_change_observation_id: _,
         exiled_from_hand_this_resolution: _,
+        counter_added_this_resolution: _,
         monarch: _,
         city_blessing: _,
         enduring_story: _,
@@ -36144,6 +36153,7 @@ impl PartialEq for GameState {
             && self.last_effect_counts_by_player == other.last_effect_counts_by_player
             && self.current_trigger_match_count == other.current_trigger_match_count
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
+            && self.counter_added_this_resolution == other.counter_added_this_resolution
             && self.lki_cache == other.lki_cache
             && self.lki_copiable_values == other.lki_copiable_values
             && self.lki_by_incarnation == other.lki_by_incarnation

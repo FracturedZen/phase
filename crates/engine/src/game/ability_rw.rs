@@ -2333,6 +2333,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         // CR 608.2c: the resolution's placed-sticker record, not a frozen tag.
         | QuantityRef::NameStickerLetterCount {
             stickers: NameStickerSet::ThatSticker,
@@ -6948,6 +6949,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::NameStickerLetterCount {
             stickers: NameStickerSet::ThatSticker,
             letters: _,
@@ -8760,6 +8762,10 @@ mod tests {
             QuantityRef::TurnsTaken,
             QuantityRef::DungeonsCompleted,
             QuantityRef::ExiledFromHandThisResolution,
+            QuantityRef::CountersPutThisResolution {
+                target: TargetFilter::Any,
+                counters: crate::types::counter::CounterMatch::Any,
+            },
             QuantityRef::NameStickerLetterCount {
                 stickers: NameStickerSet::ThatSticker,
                 letters: LetterQuery::UniqueVowels,

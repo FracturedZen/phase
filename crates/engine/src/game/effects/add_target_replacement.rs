@@ -464,6 +464,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::UnspentMana { .. }

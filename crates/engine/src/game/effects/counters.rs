@@ -1560,7 +1560,8 @@ pub fn apply_resolved_counter_edit(
         state.layers_dirty.mark_full();
     }
     if let Some(record) = added_record {
-        state.counter_added_this_turn.push_back(record);
+        state.counter_added_this_turn.push_back(record.clone());
+        state.counter_added_this_resolution.push(record);
     }
     Ok(())
 }

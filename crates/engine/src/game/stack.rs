@@ -97,6 +97,7 @@ pub(super) fn finish_resolving_stack_entry(
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
     state.active_return_result_occurrence = None;
+    state.counter_added_this_resolution.clear();
     // CR 701.20a + CR 608.2n: a reveal-caused triggered ability keeps its card
     // revealed until it leaves the stack, which a resolving ability does only
     // as the final part of its resolution — after any pause for a choice, not

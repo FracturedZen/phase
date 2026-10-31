@@ -9892,6 +9892,7 @@ pub(crate) fn quantity_ref_grammar_any(
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::CountersPutThisResolution { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => filter_grammar_any(filter, visit),
         QuantityRef::TargetObjectManaValue { filter }
@@ -10642,6 +10643,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::CountersPutThisResolution { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => rewrite_filter_props(
             filter,
@@ -13226,6 +13228,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::CountersPutThisResolution { target: filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter }
         | QuantityRef::ControlledByEachPlayer { filter, .. } => {
             target_filter_has_unsupported_selected_ref(filter, true)
@@ -14932,6 +14935,19 @@ pub enum QuantityRef {
     /// the source spell/object at announcement (CR 601.2 / 702.33 / 702.51).
     /// Used to size a reflexive "choose up to that many" modal (CR 700.2d).
     TimesCostPaidThisResolution,
+    /// CR 122.1 + CR 608.2c: Count of counters put on objects matching `target`
+    /// during this resolution ("for each counter put on a creature this way",
+    /// Kathril, Aspect Warper). Unlike `TrackedSetSize` which counts distinct
+    /// objects, this counts the actual number of counters placed.
+    CountersPutThisResolution {
+        #[serde(
+            default = "default_target_filter_any",
+            skip_serializing_if = "is_target_filter_any"
+        )]
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "is_counter_match_any")]
+        counters: crate::types::counter::CounterMatch,
+    },
     /// CR 106.3 + CR 601.2h: Mana spent to cast a spell, parameterized by
     /// which cast object is being measured and which spent-mana metric is
     /// needed. Covers total amount, distinct colors, and source-qualified
@@ -15163,6 +15179,7 @@ impl QuantityRef {
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::DistinctColorsAmong { .. }
             | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::CountersPutThisResolution { .. }
             | QuantityRef::VoteCount { .. } => None,
         }
     }
@@ -15210,6 +15227,7 @@ impl QuantityRef {
             | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
             | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
             | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::CountersPutThisResolution { target: filter, .. }
             | QuantityRef::TokensCreatedThisTurn { filter, .. }
             | QuantityRef::DistinctCounterKindsAmong { filter } => filter.references_cost_paid_object(),
 
@@ -15431,6 +15449,7 @@ impl QuantityRef {
             | QuantityRef::CommanderManaValue { .. }
             | QuantityRef::DistinctColorsAmong { .. }
             | QuantityRef::DistinctCounterKindsAmong { .. }
+            | QuantityRef::CountersPutThisResolution { .. }
             | QuantityRef::VoteCount { .. } => None,
         }
     }
@@ -16798,6 +16817,7 @@ pub(crate) fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRe
         | QuantityRef::EnteredThisTurn { .. } | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::FilteredTrackedSetSize { .. } | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::AttackedThisTurn { .. } | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::DamageDealtThisTurn { .. } | QuantityRef::PropertyAggregate(_)
         | QuantityRef::DistinctCardTypes { .. } | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. } | QuantityRef::DistinctColorsAmong { .. }
@@ -28891,6 +28911,7 @@ pub(crate) fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<Quantit
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
         | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::CountersPutThisResolution { target: filter, .. }
         | QuantityRef::TokensCreatedThisTurn { filter, .. }
         | QuantityRef::DistinctCounterKindsAmong { filter } => population_target_slot_filter(filter),
         QuantityRef::SpellsCastThisTurn { filter, .. }
@@ -29165,7 +29186,8 @@ pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::AttackedThisTurn { filter, .. } => filter
             .as_ref()
             .map_or(RecipientRead::Unread, filter_recipient_read),
-        QuantityRef::CounterAddedThisTurn { target, .. } => filter_recipient_read(target),
+        QuantityRef::CounterAddedThisTurn { target, .. }
+        | QuantityRef::CountersPutThisResolution { target, .. } => filter_recipient_read(target),
         QuantityRef::DamageDealtThisTurn { source, target, .. } => {
             filter_recipient_read(source).max(filter_recipient_read(target))
         }
@@ -29902,6 +29924,14 @@ pub enum GrantedAbilityScope {
 
 pub(crate) fn default_target_filter_any() -> TargetFilter {
     TargetFilter::Any
+}
+
+pub(crate) fn is_target_filter_any(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Any)
+}
+
+pub(crate) fn is_counter_match_any(counters: &crate::types::counter::CounterMatch) -> bool {
+    matches!(counters, crate::types::counter::CounterMatch::Any)
 }
 
 /// Default number of random nonland cards a Heist looks at (Arena reminder: 3).

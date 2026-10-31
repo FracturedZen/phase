@@ -2765,7 +2765,8 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             };
             scan_target_filter(filter, ctx, mode)
         }
-        QuantityRef::ExiledFromHandThisResolution => Axes::NONE,
+        QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. } => Axes::NONE,
         // CR 608.2c: the sticker this resolution's put-a-sticker instruction
         // placed — a resolution-local record, like the ref above.
         QuantityRef::NameStickerLetterCount {

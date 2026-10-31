@@ -32231,6 +32231,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::NameStickerLetterCount {
             stickers: NameStickerSet::ThatSticker,
             letters: _,

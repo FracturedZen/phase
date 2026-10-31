@@ -21276,6 +21276,8 @@ fn resolve_ability_chain_with_root_result(
     }
     if matches!(result, Ok(ResolutionProgress::Waiting)) {
         state.resolution_stack.note_repeat_until_descendant_choice();
+    } else if depth == 0 {
+        state.counter_added_this_resolution.clear();
     }
     result
 }
@@ -21382,6 +21384,7 @@ fn reset_top_level_resolution_state(state: &mut GameState) {
     // the `engine.rs` apply() clear. (CR 706.2 + CR 706.4 + CR 603.12)
     state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
+    state.counter_added_this_resolution.clear();
     // CR 603.12a: a completed repeated-payment frame retains K while its
     // reflexive modal is open. The next top-level resolution no longer
     // needs that cap, so discard only an owner whose driver is absent.

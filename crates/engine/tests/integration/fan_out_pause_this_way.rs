@@ -371,9 +371,9 @@ fn truce_everyone_draws_two_gains_no_life() {
 /// creatures this way and Kathril gets two +1/+1 counters (CR 608.2c). The
 /// second answer must not replace the set the first instruction published.
 ///
-/// Only the distinct-recipient reading is asserted. The count reads the
-/// creatures in the set, not the counters, so two counters on one creature
-/// still give one +1/+1 counter.
+/// Distinct recipients: the flying counter goes on the Bears and the first strike
+/// counter on Kathril, so two counters were put on creatures this way and Kathril
+/// gets two +1/+1 counters (CR 608.2c, CR 122.1).
 #[test]
 fn kathril_counts_each_resolution_chosen_recipient_this_way() {
     let mut scenario = GameScenario::new();
@@ -440,5 +440,88 @@ fn kathril_counts_each_resolution_chosen_recipient_this_way() {
         counters(kathril, CounterType::Keyword(Keyword::FirstStrike.kind())),
         1
     );
+    assert_eq!(counters(kathril, CounterType::Plus1Plus1), 2);
+}
+
+/// CR 122.1 + CR 608.2c + Official Card Ruling (2020-04-17):
+/// "Kathril's ability counts the number of counters put on creatures, not the
+/// number of creatures that had counters put on them. If you put a flying counter
+/// and a first strike counter on the same creature, Kathril will get two +1/+1 counters."
+///
+/// Issue #9865: Two keyword counters put on the SAME creature (Kathril) must
+/// give Kathril two +1/+1 counters, not one (verifying it counts counters, not objects).
+#[test]
+fn kathril_counts_total_counters_put_on_same_creature_this_way() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_to_graveyard(P0, "Skybound Remains", 1, 1)
+        .flying();
+    scenario
+        .add_creature_to_graveyard(P0, "Duelist Remains", 1, 1)
+        .first_strike();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let kathril = scenario
+        .add_creature_to_hand_from_oracle(P0, "Kathril, Aspect Warper", 3, 3, KATHRIL)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::White,
+            ManaType::Black,
+            ManaType::Green,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .zip(9_996u64..)
+        .map(|(mana, id)| ManaUnit::new(mana, ObjectId(id), false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(kathril).commit();
+
+    let mut recipients = [kathril, kathril].into_iter();
+    let mut recipient_prompts = 0;
+    for _ in 0..32 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::ChooseFromZoneChoice { .. } => {
+                recipient_prompts += 1;
+                GameAction::SelectCards {
+                    cards: vec![recipients.next().expect("two recipient prompts")],
+                }
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        runner.act(action).expect("action accepted");
+    }
+
+    let counters = |id: ObjectId, counter: CounterType| {
+        runner.state().objects[&id]
+            .counters
+            .get(&counter)
+            .copied()
+            .unwrap_or(0)
+    };
+    assert_eq!(recipient_prompts, 2);
+    assert_eq!(
+        counters(bears, CounterType::Keyword(Keyword::Flying.kind())),
+        0
+    );
+    assert_eq!(
+        counters(bears, CounterType::Keyword(Keyword::FirstStrike.kind())),
+        0
+    );
+    assert_eq!(
+        counters(kathril, CounterType::Keyword(Keyword::Flying.kind())),
+        1
+    );
+    assert_eq!(
+        counters(kathril, CounterType::Keyword(Keyword::FirstStrike.kind())),
+        1
+    );
+    // Two counters placed on the single creature kathril must yield two +1/+1 counters (CR 122.1).
     assert_eq!(counters(kathril, CounterType::Plus1Plus1), 2);
 }

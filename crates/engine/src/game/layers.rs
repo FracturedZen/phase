@@ -4708,6 +4708,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }
@@ -5044,6 +5045,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::PartySize { .. }

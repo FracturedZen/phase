@@ -232,7 +232,15 @@ expression: "&ir"
                         "count": {
                           "type": "Ref",
                           "qty": {
-                            "type": "TrackedSetSize"
+                            "type": "CountersPutThisResolution",
+                            "target": {
+                              "type": "Typed",
+                              "type_filters": [
+                                "Creature"
+                              ],
+                              "controller": null,
+                              "properties": []
+                            }
                           }
                         },
                         "target": {

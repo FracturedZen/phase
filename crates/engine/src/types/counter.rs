@@ -274,10 +274,11 @@ pub(crate) mod counter_map_serde {
 /// the former by reusing the canonical `CounterType` enum. Prefer this over
 /// `Option<CounterType>`: "Any" is a first-class matching mode rather than
 /// an absence-of-specification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(tag = "type", content = "data")]
 pub enum CounterMatch {
     /// "a counter on it" — any counter type; predicates sum across all types.
+    #[default]
     Any,
     /// A specific counter type, matching the canonical `CounterType` enum.
     OfType(CounterType),

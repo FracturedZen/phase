@@ -15668,6 +15668,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         // CR 608.2c: "that sticker" is the record the preceding PutSticker
         // instruction set, not a chain-local effect result; the object-scoped
         // form reads the object's stickers.
@@ -24065,6 +24066,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::TrackedSetSize
             | QuantityRef::FilteredTrackedSetSize { .. }
             | QuantityRef::ExiledFromHandThisResolution
+            | QuantityRef::CountersPutThisResolution { .. }
             | QuantityRef::PreviousEffectAmount { .. }
             | QuantityRef::PreviousEffectCount
             | QuantityRef::LifeLostThisTurn { .. }

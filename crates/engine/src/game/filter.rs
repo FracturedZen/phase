@@ -3471,6 +3471,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
         | QuantityRef::LifeLostThisTurn { .. }

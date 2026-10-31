@@ -1115,6 +1115,7 @@ mod issue_9658_enters_with_whole_line_claim;
 mod issue_9660_where_x_substitutes_count;
 mod issue_9662_enters_with_second_placement;
 mod issue_9775_non_controller_activation_offered;
+mod issue_9865_kathril_counter_count;
 mod issue_9884_recipient_classifier;
 mod issue_9991_floating_entry_counter_authority;
 mod issue_9991_floating_entry_counter_timing;

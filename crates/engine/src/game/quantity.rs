@@ -2406,6 +2406,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -2749,6 +2750,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -3075,6 +3077,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::SpellsCastLastTurn
         // CR 122.1: counter-addition journal.
         | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         // CR 111.2: creation-time token characteristics.
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -3353,6 +3356,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -6620,6 +6624,24 @@ fn resolve_ref(
                             target,
                             &filter_ctx,
                         )
+                })
+                .fold(0, |total: u32, record| total.saturating_add(record.count)),
+        ),
+        // CR 122.1 + CR 608.2c: Count counters put during this resolution onto
+        // objects matching event-time recipient characteristics (Kathril, Aspect Warper).
+        QuantityRef::CountersPutThisResolution { target, counters } => u32_to_i32_saturating(
+            state
+                .counter_added_this_resolution
+                .iter()
+                .filter(|record| {
+                    counters.matches(&record.counter_type)
+                        && (matches!(target, TargetFilter::Any)
+                            || matches_target_filter_on_counter_added_record(
+                                state,
+                                record,
+                                target,
+                                &filter_ctx,
+                            ))
                 })
                 .fold(0, |total: u32, record| total.saturating_add(record.count)),
         ),
