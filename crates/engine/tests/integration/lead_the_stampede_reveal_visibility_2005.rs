@@ -84,7 +84,10 @@ fn lead_the_stampede_keeps_looked_at_cards_private_during_choice() {
         ..
     } = &state.waiting_for
     else {
-        panic!("look-dig must surface a DigChoice, got {:?}", state.waiting_for);
+        panic!(
+            "look-dig must surface a DigChoice, got {:?}",
+            state.waiting_for
+        );
     };
     assert_eq!(cards.len(), 5, "the top five cards are looked at");
     assert!(*reveal_chosen, "the keep must reveal the chosen cards");

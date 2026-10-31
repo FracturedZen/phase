@@ -5125,6 +5125,7 @@ fn knight_errant_of_eos_binds_convoke_count_in_reveal_filter() {
         up_to,
         filter,
         reveal,
+        reveal_chosen,
         ..
     } = def.effect.as_ref()
     else {
@@ -5136,7 +5137,9 @@ fn knight_errant_of_eos_binds_convoke_count_in_reveal_filter() {
     assert_eq!(*count, QuantityExpr::Fixed { value: 6 });
     assert_eq!(*keep_count, Some(2));
     assert!(*up_to);
-    assert!(*reveal);
+    // CR 701.20a + CR 701.20e: the six are looked at; only the chosen are revealed.
+    assert!(!*reveal);
+    assert!(*reveal_chosen);
     assert!(matches!(
         filter,
         TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
@@ -24926,7 +24929,7 @@ fn delayed_trigger_without_inner_condition_lift_is_noop() {
 ///
 /// Asserts the full compound parse tree:
 /// - Top-level `Dig` with `count=5, keep_count=Some(2), up_to=true,
-///   reveal=true, filter=Or([Creature, Land]), destination=None (no
+///   reveal=false, reveal_chosen=true, filter=Or([Creature, Land]), destination=None (no
 ///   auto-route), rest_destination=Some(Library)`.
 /// - Sub_ability chain routes revealed cards by type through
 ///   `TargetFilter::TrackedSetFiltered`: lands enter battlefield tapped;
@@ -24943,6 +24946,7 @@ fn zimones_experiment_full_parse_tree() {
         keep_count,
         up_to,
         reveal,
+        reveal_chosen,
         filter,
         destination,
         rest_destination,
@@ -24954,7 +24958,9 @@ fn zimones_experiment_full_parse_tree() {
     assert_eq!(*count, QuantityExpr::Fixed { value: 5 });
     assert_eq!(*keep_count, Some(2));
     assert!(*up_to, "up_to must be true (reveal up to two)");
-    assert!(*reveal, "reveal must be true (reveal-form continuation)");
+    // CR 701.20a + CR 701.20e: the five are looked at; only the chosen are revealed.
+    assert!(!*reveal, "the looked-at cards must stay private");
+    assert!(*reveal_chosen, "the chosen cards must be revealed");
     assert_eq!(
         *destination, None,
         "destination must be None (reveal-only; downstream sub_abilities route by type)"

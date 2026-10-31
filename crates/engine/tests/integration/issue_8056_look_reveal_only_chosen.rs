@@ -102,8 +102,12 @@ fn lead_the_stampede_reveals_only_the_chosen_creatures() {
 fn narset_minus_two_reveals_only_the_chosen_card() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let other_spell = scenario.add_spell_to_library_top(P0, "Other Spell", true).id();
-    let kept = scenario.add_spell_to_library_top(P0, "Kept Spell", true).id();
+    let other_spell = scenario
+        .add_spell_to_library_top(P0, "Other Spell", true)
+        .id();
+    let kept = scenario
+        .add_spell_to_library_top(P0, "Kept Spell", true)
+        .id();
     let land = scenario.add_land_to_library_top(P0, "Some Land").id();
     let creature = scenario
         .add_spell_to_library_top(P0, "Some Creature", false)

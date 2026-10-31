@@ -84,7 +84,8 @@ expression: "&lowered"
           },
           "rest_destination": "Library",
           "rest_order": "random",
-          "reveal": true,
+          "reveal": false,
+          "reveal_chosen": true,
           "enter_tapped": false,
           "enters_attacking": false
         },
