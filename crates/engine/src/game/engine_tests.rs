@@ -240,7 +240,7 @@ fn cards_revealed_events_are_remembered_publicly() {
     }];
     let pre_state = state.clone();
 
-    remember_public_reveals(&mut state, &events, 0);
+    remember_public_reveals(&mut state, &events, 0, &pre_state.revealed_cards);
 
     assert!(state.public_revealed_cards.contains(&card_id));
     let command = state
