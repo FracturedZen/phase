@@ -582,7 +582,7 @@ fn effect_benefit_value(
         // creature on the battlefield, so `SINGLE_CARD_VALUE` is the honest
         // floor; how big that creature should be is the scheduling question,
         // which `MomirCurvePolicy` owns.
-        Effect::CreateTokenCopyFromPool { .. } => {
+        Effect::CreateTokenCopyFromPool { .. } | Effect::CreateTokenFromOracleCard { .. } => {
             (recipient == RecipientClass::AiOnly).then_some(SINGLE_CARD_VALUE)
         }
         _ => None,
@@ -992,11 +992,13 @@ fn effect_triviality(
         // priced the payoff at zero and made `SelfCostValuePolicy` hard-veto
         // every activation whose discard met `REAL_COST_FLOOR`, which is every
         // activation. Only the controller's own token is a benefit here.
-        Effect::CreateTokenCopyFromPool { .. } => match recipient {
-            RecipientClass::AiOnly => EffectTriviality::NonTrivial,
-            RecipientClass::OpponentOnly => EffectTriviality::Trivial,
-            RecipientClass::Mixed => EffectTriviality::NonTrivial,
-        },
+        Effect::CreateTokenCopyFromPool { .. } | Effect::CreateTokenFromOracleCard { .. } => {
+            match recipient {
+                RecipientClass::AiOnly => EffectTriviality::NonTrivial,
+                RecipientClass::OpponentOnly => EffectTriviality::Trivial,
+                RecipientClass::Mixed => EffectTriviality::NonTrivial,
+            }
+        }
         _ => EffectTriviality::Unmodeled,
     }
 }

@@ -364,6 +364,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::CreateEmblem { .. }
         | Effect::CreatePlaneswalkReplacement { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::DamageEachPlayer { .. }
         | Effect::Detain { .. }
         | Effect::Dig { .. }

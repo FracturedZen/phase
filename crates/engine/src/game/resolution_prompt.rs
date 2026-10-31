@@ -367,6 +367,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }

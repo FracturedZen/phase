@@ -41075,6 +41075,7 @@ fn rebind_event_context_amount_counts(effect: &mut Effect, gate_qty: &QuantityRe
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::ExileHaunting { .. }

@@ -477,6 +477,7 @@ fn redundancy_delta(
         // Random pool copy (Momir Basic) — not a "redundant if already
         // controlled" effect; the token's identity is chosen at resolution.
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         // CR 702.141a: Encore makes per-opponent copy tokens — like Myriad, it is
         // not a "redundant if already controlled" effect.

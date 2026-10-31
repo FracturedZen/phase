@@ -10769,6 +10769,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -15490,6 +15491,7 @@ impl Effect {
             | Effect::SwitchPT { .. }
             | Effect::CopyTokenOf { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::CombineHost { .. }
@@ -15795,6 +15797,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::SwitchPT { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -22873,6 +22876,23 @@ pub enum Effect {
         #[serde(default)]
         enters_attacking: bool,
     },
+    /// CR 111.11: "Create a <Name> token" where the name is not one of the
+    /// predefined token types (CR 111.10) and the effect defines no other
+    /// characteristics: the token's characteristics are those of the card with
+    /// that name in the Oracle card reference (mana cost, colors, types,
+    /// abilities including characteristic-defining abilities). The canonical
+    /// example is Disa the Restless creating a Tarmogoyf token. Resolved from
+    /// `GameState::card_db` at resolution time.
+    CreateTokenFromOracleCard {
+        /// CR 111.11: the Oracle card name that defines the token.
+        name: String,
+        /// CR 109.4: player who creates (and controls) the token.
+        #[serde(default = "default_target_filter_controller")]
+        owner: TargetFilter,
+        /// Number of tokens to create. Defaults to one.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// CR 702.116a: Myriad creates one tapped attacking copy token for each
     /// opponent other than the defending player for the source creature, then
     /// exiles those tokens at end of combat.
@@ -29849,6 +29869,7 @@ impl Effect {
             | Effect::CastCopyOfCard { .. }
             | Effect::CopyTokenOf { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::CombineHost { .. }
@@ -30102,6 +30123,7 @@ impl Effect {
             | Effect::CastCopyOfCard { .. }
             | Effect::CopyTokenOf { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::CombineHost { .. }
@@ -30683,6 +30705,7 @@ impl Effect {
             // filters; the copy source is chosen from the format pool, not
             // declared as a target.
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             // CR 702.141a: opponents and per-opponent attack binding are chosen
             // by the effect, not declared as targets.
@@ -31180,6 +31203,7 @@ impl Effect {
             | Effect::SwapChosenLabels { .. }
             | Effect::RevealChosenNumbers { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::Meld { .. }
@@ -31829,6 +31853,8 @@ impl Effect {
             // no card changes zones — that point carries no CR, because CR 707.2
             // addresses neither pools nor libraries.
             Effect::CreateTokenCopyFromPool { .. } => false,
+            // CR 111.11: the Oracle card is a reference, not a card in any zone.
+            Effect::CreateTokenFromOracleCard { .. } => false,
             // CR 701.42a: meld puts the pair onto the battlefield; no library
             // endpoint at either end.
             Effect::Meld { .. } => false,
@@ -32042,6 +32068,7 @@ impl Effect {
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             // Keyword actions and abilities that create a token as one step of a
             // larger action: CR 701.16a (investigate), CR 701.47a (amass),
             // CR 701.63a (endure), CR 702.116a (myriad), CR 702.141a (encore),
@@ -32558,6 +32585,9 @@ macro_rules! define_effect_quantity_walk {
                 mv_bound, count, ..
             } => {
                 f(mv_bound);
+                f(count);
+            }
+            Effect::CreateTokenFromOracleCard { count, .. } => {
                 f(count);
             }
             Effect::PutCounter { count, .. } => {
@@ -33195,6 +33225,7 @@ impl Effect {
             | Effect::CastCopyOfCard { .. }
             | Effect::CopyTokenOf { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::CombineHost { .. }
@@ -33397,6 +33428,7 @@ impl Effect {
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
+            | Effect::CreateTokenFromOracleCard { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
             // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
@@ -33668,6 +33700,7 @@ impl Effect {
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
+            | Effect::CreateTokenFromOracleCard { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
             // CR 122.1 + CR 122.6: how many counters of the chosen kind to add.
@@ -33993,6 +34026,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CastCopyOfCard { .. } => "CastCopyOfCard",
         Effect::CopyTokenOf { .. } => "CopyTokenOf",
         Effect::CreateTokenCopyFromPool { .. } => "CreateTokenCopyFromPool",
+        Effect::CreateTokenFromOracleCard { .. } => "CreateTokenFromOracleCard",
         Effect::Myriad => "Myriad",
         Effect::Encore => "Encore",
         Effect::CombineHost { .. } => "CombineHost",
@@ -34266,6 +34300,7 @@ pub enum EffectKind {
     CastCopyOfCard,
     CopyTokenOf,
     CreateTokenCopyFromPool,
+    CreateTokenFromOracleCard,
     Myriad,
     Encore,
     CombineHost,
@@ -34527,6 +34562,7 @@ impl From<&Effect> for EffectKind {
             Effect::CastCopyOfCard { .. } => EffectKind::CastCopyOfCard,
             Effect::CopyTokenOf { .. } => EffectKind::CopyTokenOf,
             Effect::CreateTokenCopyFromPool { .. } => EffectKind::CreateTokenCopyFromPool,
+            Effect::CreateTokenFromOracleCard { .. } => EffectKind::CreateTokenFromOracleCard,
             Effect::Myriad => EffectKind::Myriad,
             Effect::Encore => EffectKind::Encore,
             Effect::CombineHost { .. } => EffectKind::CombineHost,

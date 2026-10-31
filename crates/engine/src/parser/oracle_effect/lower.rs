@@ -3198,6 +3198,7 @@ impl ReflexiveGateParent {
             | Effect::CastCopyOfCard { .. }
             | Effect::CopyTokenOf { .. }
             | Effect::CreateTokenCopyFromPool { .. }
+            | Effect::CreateTokenFromOracleCard { .. }
             | Effect::Myriad
             | Effect::Encore
             | Effect::CombineHost { .. }
@@ -12629,6 +12630,9 @@ pub(super) fn apply_where_x_effect_expression(
             mv_bound, count, ..
         } => {
             bind_where_x_quantity(mv_bound, where_x_expression, &mut unbound_where_x);
+            bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
+        }
+        Effect::CreateTokenFromOracleCard { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
         }
         Effect::PutSticker {

@@ -884,6 +884,7 @@ where
         // copy source comes from the format pool, so this is a leaf for conjure
         // collection.
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::ExileHaunting { .. }

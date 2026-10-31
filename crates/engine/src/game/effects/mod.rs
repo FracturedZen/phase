@@ -116,6 +116,7 @@ pub mod create_draw_replacement;
 pub mod create_emblem;
 pub mod create_planeswalk_replacement;
 pub mod create_token_copy_from_pool;
+pub mod create_token_from_oracle_card;
 pub mod deal_damage;
 pub mod delayed_trigger;
 pub mod destroy;
@@ -5297,6 +5298,7 @@ fn effect_enters_battlefield(effect: &Effect) -> bool {
         | Effect::EpicCopy { .. }
         | Effect::CastCopyOfCard { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::Meld { .. }
@@ -7952,6 +7954,7 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::CastCopyOfCard { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -9092,6 +9095,7 @@ fn effect_fields_read_filter_population(
         Effect::CreateTokenCopyFromPool {
             owner, type_filter, ..
         } => has_filter(owner) || has_filter(type_filter),
+        Effect::CreateTokenFromOracleCard { owner, .. } => has_filter(owner),
         Effect::CombineHost { host, .. } => has_filter(host),
         Effect::ChooseAugmentAndCombineWithHost { filter, host, .. } => {
             has_filter(filter) || has_filter(host)
@@ -12984,6 +12988,9 @@ fn resolve_legacy_effect(
         Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
         Effect::CreateTokenCopyFromPool { .. } => {
             create_token_copy_from_pool::resolve(state, ability, events)
+        }
+        Effect::CreateTokenFromOracleCard { .. } => {
+            create_token_from_oracle_card::resolve(state, ability, events)
         }
         Effect::Myriad => myriad::resolve(state, ability, events),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),

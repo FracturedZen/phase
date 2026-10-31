@@ -3783,6 +3783,9 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_quantity_expr(mv_bound)
                 || legacy_quantity_expr(count)
         }
+        Effect::CreateTokenFromOracleCard { owner, count, .. } => {
+            legacy_target_filter(owner) || legacy_quantity_expr(count)
+        }
         Effect::ChangeZone {
             target,
             enters_under,
@@ -6578,6 +6581,7 @@ fn rw_effect(
         | Effect::SetClassLevel { .. }
         | Effect::FreeCastFromZones { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         // CR 101.4 + CR 707.2 + CR 122.1: this APNAP walk creates token copies
         // and may add counters from a live property read. Fail closed until the
         // copy/counter sub-steps have a precise profile.

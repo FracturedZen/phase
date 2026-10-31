@@ -859,6 +859,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::EpicCopy
         | EffectKind::CopyTokenOf
         | EffectKind::CreateTokenCopyFromPool
+        | EffectKind::CreateTokenFromOracleCard
         | EffectKind::Myriad
         | EffectKind::Encore
         | EffectKind::Meld

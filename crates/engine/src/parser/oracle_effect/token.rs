@@ -154,7 +154,11 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         .map(|(_, rest)| rest)
         .unwrap_or(&text)
         .trim();
-    let mut token = parse_token_description_with_context(after, ctx)?;
+    let Some(mut token) = parse_token_description_with_context(after, ctx) else {
+        // CR 111.11: a bare "<Name> token" the token grammar cannot define is
+        // the Oracle card with that name.
+        return try_parse_oracle_card_token(after, ctx);
+    };
     // CR 608.2k + CR 113.7a: an "its" in the count whose antecedent is the
     // trigger's own self subject ("Whenever this creature enters or attacks,
     // create … equal to its power") is the ability's source, read live or from
@@ -187,6 +191,105 @@ pub(crate) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         static_abilities: token.static_abilities,
         enter_with_counters: vec![],
     })
+}
+
+/// CR 111.11: "create a <Name> token" where the clause names the token and
+/// defines no other characteristics (no P/T, colors, types, keywords, or
+/// abilities) and the name is not one of the predefined token types (CR
+/// 111.10). The token's characteristics come from the Oracle card with that
+/// name, resolved at runtime by `Effect::CreateTokenFromOracleCard`.
+///
+/// Reached only after the regular token grammar failed to define the token,
+/// so names the predefined-token registry fully defines keep `Effect::Token`.
+fn try_parse_oracle_card_token(after: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let clause = after.trim().trim_end_matches('.').trim();
+    let slot = crate::parser::oracle_util::parse_count_slot(clause, ctx)?;
+    if slot.where_x.is_some() {
+        return None;
+    }
+    let noun = slot.noun.trim();
+    let name = noun
+        .strip_suffix(" tokens")
+        .or_else(|| noun.strip_suffix(" token"))?
+        .trim();
+    if !is_bare_oracle_card_name(name) {
+        return None;
+    }
+    Some(Effect::CreateTokenFromOracleCard {
+        name: name.to_string(),
+        // CR 109.4: a "target player creates" subject is lifted into `owner`
+        // the same way as for `Effect::Token`.
+        owner: TargetFilter::Controller,
+        count: slot.count,
+    })
+}
+
+/// Whether `name` reads as a printed card name with no characteristic words:
+/// every word is capitalized (or a lowercase connector inside a card name),
+/// it carries no type, color, supertype, P/T, or quoted text, and it is not a
+/// predefined token type (CR 111.10) or Role (CR 303.7).
+fn is_bare_oracle_card_name(name: &str) -> bool {
+    const CONNECTORS: &[&str] = &["of", "the", "and", "to", "in", "on", "from", "a", "an"];
+    const CHARACTERISTIC_WORDS: &[&str] = &[
+        "white",
+        "blue",
+        "black",
+        "red",
+        "green",
+        "colorless",
+        "artifact",
+        "creature",
+        "enchantment",
+        "land",
+        "planeswalker",
+        "legendary",
+        "snow",
+        "basic",
+        "tapped",
+        "untapped",
+        "with",
+        "token",
+        "tokens",
+        "copy",
+        "copies",
+        "that",
+        "named",
+    ];
+    let lower = name.to_lowercase();
+    if name.is_empty()
+        || known_role_token_identity(&lower).is_some()
+        || matches!(
+            lower.as_str(),
+            "treasure"
+                | "food"
+                | "clue"
+                | "blood"
+                | "map"
+                | "powerstone"
+                | "junk"
+                | "shard"
+                | "gold"
+                | "lander"
+                | "mutagen"
+                | "incubator"
+                | "walker"
+        )
+    {
+        return false;
+    }
+    let mut words = name.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let word_ok = |word: &str| {
+        word.chars()
+            .all(|c| c.is_alphabetic() || matches!(c, '\'' | ',' | '-'))
+            && !CHARACTERISTIC_WORDS.contains(&word.to_lowercase().trim_end_matches(',').as_ref())
+    };
+    let capitalized = |word: &str| word.chars().next().is_some_and(char::is_uppercase);
+    word_ok(first)
+        && capitalized(first)
+        && words.all(|word| word_ok(word) && (capitalized(word) || CONNECTORS.contains(&word)))
 }
 
 pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {

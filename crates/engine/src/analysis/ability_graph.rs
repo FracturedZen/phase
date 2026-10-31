@@ -1175,6 +1175,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Token { .. }
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. }
         | Effect::Investigate
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
