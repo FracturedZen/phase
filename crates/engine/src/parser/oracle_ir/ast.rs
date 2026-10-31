@@ -1585,6 +1585,12 @@ pub(crate) enum SearchCreationImperativeAst {
     Token {
         token: Box<TokenDescription>,
     },
+    /// CR 111.11: "create a <Name> token" defined by the Oracle card with
+    /// that name.
+    OracleCardToken {
+        name: String,
+        count: QuantityExpr,
+    },
     /// Alchemy digital-only: seek card(s) from library matching filter.
     Seek {
         filter: TargetFilter,

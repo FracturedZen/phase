@@ -3877,6 +3877,9 @@ pub(super) fn parse_search_and_creation_ast(
                     attack_destination,
                 }),
             }),
+            Some(Effect::CreateTokenFromOracleCard { name, count, .. }) => {
+                Some(SearchCreationImperativeAst::OracleCardToken { name, count })
+            }
             _ => None,
         };
     }
@@ -4118,6 +4121,13 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             extra_keywords,
             additional_modifications,
         },
+        SearchCreationImperativeAst::OracleCardToken { name, count } => {
+            Effect::CreateTokenFromOracleCard {
+                name,
+                owner: TargetFilter::Controller,
+                count,
+            }
+        }
         SearchCreationImperativeAst::Token { token } => Effect::Token {
             name: token.name,
             power: token.power.unwrap_or(PtValue::Fixed(0)),
