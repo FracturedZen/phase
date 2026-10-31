@@ -34,6 +34,11 @@ const TASTER_OF_WARES: &str = "When this creature enters, target opponent reveal
      for as long as you control this creature, and mana of any type can be spent to cast that \
      spell.";
 
+const THIEVING_SPRITE: &str =
+    "Flying\nWhen this creature enters, target player reveals X cards from \
+     their hand, where X is the number of Faeries you control. You choose one of those cards. \
+     That player discards that card.";
+
 /// Synthetic sorcery (labelled): the lose-life verb's for-each binder over a
 /// quantity no parser reads.
 const LOSE_LIFE_FOR_EACH_UNREAD: &str = "Each opponent loses 1 life for each gorbleflux.";
@@ -204,75 +209,160 @@ fn taster_at_reveal(p1_hand: usize) -> (GameRunner, Vec<ObjectId>, Vec<ObjectId>
         .map(|index| scenario.add_card_to_hand(P0, &format!("P0 Card {index}")))
         .collect();
     let mut runner = scenario.build();
-    let outcome = runner.cast(taster).resolve();
-    assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::RevealChoice { .. }),
-        "Taster's ETB must reach its reveal prompt: {:?}",
-        outcome.final_waiting_for()
-    );
+    let _ = runner.cast(taster).resolve();
     (runner, p1_cards, p0_cards)
 }
 
-/// CR 701.20a + CR 608.2h: Taster of Wares makes the target opponent reveal
-/// exactly X cards (X = Goblins its controller controls, Taster included), and
-/// the exiled card is one of them.
+/// CR 701.20a + CR 701.20c + CR 101.4 + CR 608.2c:
+/// Taster of Wares makes the target opponent choose and reveal exactly X cards
+/// (X = Goblins its controller controls), and controller chooses one to exile.
 #[test]
 fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
     let (mut runner, p1_cards, p0_cards) = taster_at_reveal(5);
-    let WaitingFor::RevealChoice { player, cards, .. } = runner.state().waiting_for.clone() else {
-        unreachable!("taster_at_reveal checked the prompt");
+    // CR 701.20a + CR 101.4: P1 chooses which X cards to reveal from their hand.
+    let WaitingFor::RevealHandCardsChoice {
+        player,
+        cards,
+        count,
+        chooser,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealHandCardsChoice prompt, got {:?}",
+            runner.state().waiting_for
+        );
     };
-    // Reach guard: P0 chooses among the revealed cards.
-    assert_eq!(player, P0);
+    assert_eq!(player, P1);
+    assert_eq!(chooser, P0);
     assert_eq!(
-        cards.len(),
-        2,
+        count, 2,
         "X = Taster + one other Goblin; the Elf does not count"
     );
-    assert!(
-        cards.iter().all(|card| p1_cards.contains(card)),
-        "{cards:?}"
-    );
+    assert_eq!(cards, p1_cards);
     assert!(cards.iter().all(|card| !p0_cards.contains(card)));
 
-    let chosen = cards[0];
+    // P1 chooses 2 cards to reveal.
+    let revealed = vec![p1_cards[1], p1_cards[3]];
     runner
         .act(GameAction::SelectCards {
-            cards: vec![chosen],
+            cards: revealed.clone(),
         })
-        .expect("choosing a revealed card must be accepted");
-    // "You choose one of those cards": the choice is among the revealed cards.
-    let WaitingFor::ChooseFromZoneChoice {
+        .expect("P1 choosing cards to reveal must be accepted");
+
+    // CR 608.2c: P0 chooses one of those revealed cards.
+    let WaitingFor::RevealChoice {
         player,
         cards: offered,
         ..
     } = runner.state().waiting_for.clone()
     else {
         panic!(
-            "expected the choose prompt, got {:?}",
+            "expected RevealChoice prompt, got {:?}",
             runner.state().waiting_for
         );
     };
     assert_eq!(player, P0);
-    assert!(
-        offered.iter().all(|card| cards.contains(card)),
-        "{offered:?} ⊄ {cards:?}"
-    );
+    assert_eq!(offered, revealed);
+
+    let chosen = revealed[0];
     runner
         .act(GameAction::SelectCards {
             cards: vec![chosen],
         })
-        .expect("choosing one of those cards must be accepted");
+        .expect("P0 choosing one of those revealed cards must be accepted");
+
     runner.advance_until_stack_empty();
     assert_eq!(zone(&runner, chosen), Zone::Exile);
     assert_eq!(hand_len(&runner, P1), 4);
 
-    // X greater than the hand reveals the whole (one-card) hand.
+    // CR 701.20c: X greater than the hand reveals the whole (one-card) hand without prompt.
     let (runner, p1_cards, _) = taster_at_reveal(1);
-    let WaitingFor::RevealChoice { cards, .. } = &runner.state().waiting_for else {
-        unreachable!("taster_at_reveal checked the prompt");
+    let WaitingFor::RevealChoice { player, cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected RevealChoice prompt directly when hand <= X, got {:?}",
+            runner.state().waiting_for
+        );
     };
+    assert_eq!(*player, P0);
     assert_eq!(*cards, p1_cards);
+}
+
+/// CR 701.20a + CR 101.4 + CR 608.2c: Thieving Sprite prompts the target player to
+/// reveal X cards from their hand (where X is Faeries controlled), controller chooses one,
+/// and that card is discarded.
+#[test]
+fn thieving_sprite_reveals_x_cards_and_discards_chosen() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sprite = scenario
+        .add_creature_to_hand_from_oracle(P0, "Thieving Sprite", 1, 1, THIEVING_SPRITE)
+        .with_subtypes(vec!["Faerie", "Rogue"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario
+        .add_creature(P0, "Other Faerie", 1, 1)
+        .with_subtypes(vec!["Faerie"]);
+    scenario
+        .add_creature(P0, "Not a Faerie", 2, 2)
+        .with_subtypes(vec!["Bird"]);
+    let p1_cards: Vec<ObjectId> = (0..4)
+        .map(|index| scenario.add_card_to_hand(P1, &format!("P1 Card {index}")))
+        .collect();
+    let mut runner = scenario.build();
+    let _ = runner.cast(sprite).target_player(P1).resolve();
+
+    // P1 chooses 2 cards to reveal (2 Faeries: Thieving Sprite + Other Faerie).
+    let WaitingFor::RevealHandCardsChoice {
+        player,
+        cards,
+        count,
+        chooser,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealHandCardsChoice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1);
+    assert_eq!(chooser, P0);
+    assert_eq!(count, 2, "X = 2 Faeries");
+    assert_eq!(cards, p1_cards);
+
+    let revealed = vec![p1_cards[0], p1_cards[2]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: revealed.clone(),
+        })
+        .expect("P1 choosing cards to reveal must be accepted");
+
+    // P0 chooses one of those cards.
+    let WaitingFor::RevealChoice {
+        player,
+        cards: offered,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected RevealChoice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0);
+    assert_eq!(offered, revealed);
+
+    let chosen = revealed[1];
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![chosen],
+        })
+        .expect("P0 choosing one of those revealed cards must be accepted");
+
+    runner.advance_until_stack_empty();
+    assert_eq!(zone(&runner, chosen), Zone::Graveyard);
+    assert_eq!(hand_len(&runner, P1), 3);
 }
 
 /// CR 119.3: a life loss whose for-each quantity no parser reads loses no life

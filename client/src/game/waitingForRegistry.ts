@@ -127,6 +127,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "DigRestSplitChoice",
     "SurveilChoice",
     "RevealChoice",
+    "RevealHandCardsChoice",
     "SearchChoice",
     "SearchPartitionChoice",
     "OutsideGameChoice",

@@ -248,6 +248,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. }
+        | WaitingFor::RevealHandCardsChoice { .. }
         | WaitingFor::DiscardChoice { .. } => HumanResponseModel::Select,
         WaitingFor::DeclareAttackers { .. } => {
             HumanResponseModel::CombatRelations(CombatRelationAction::Attackers)
@@ -550,6 +551,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::DiscardToHandSize { .. }
         | WaitingFor::WardDiscardChoice { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
+        | WaitingFor::RevealHandCardsChoice { .. }
         | WaitingFor::SeparatePilesPartition { .. } => (
             InteractionWaitingForCode::Select,
             None,
@@ -4390,6 +4392,7 @@ fn selection_projection(
         | WaitingFor::DrawnThisTurnTopdeckChoice { cards, .. }
         | WaitingFor::DiscardToHandSize { cards, .. }
         | WaitingFor::WardDiscardChoice { cards, .. }
+        | WaitingFor::RevealHandCardsChoice { cards, .. }
         | WaitingFor::CollectEvidenceChoice { cards, .. } => cards.len(),
         WaitingFor::DigChoice {
             selectable_cards, ..
@@ -4866,6 +4869,20 @@ fn selection_projection(
         } => Some(SelectionProjection {
             object_ids: cards.clone(),
             constraint: count_constraint(*count, *count),
+            confirm: ConfirmSemantics::Explicit,
+            intent: InteractionIntentCode::Choose,
+            action: SelectionAction::SelectCards,
+            source_id: Some(*source_id),
+        }),
+        WaitingFor::RevealHandCardsChoice {
+            cards,
+            count,
+            source_id,
+            choice_optional,
+            ..
+        } => Some(SelectionProjection {
+            object_ids: cards.clone(),
+            constraint: count_constraint(if *choice_optional { 0 } else { *count }, *count),
             confirm: ConfirmSemantics::Explicit,
             intent: InteractionIntentCode::Choose,
             action: SelectionAction::SelectCards,

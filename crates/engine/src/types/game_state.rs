@@ -17228,6 +17228,18 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         decline_runs_continuation: bool,
     },
+    /// CR 701.20a + CR 101.4: Target player chooses which cards from their hand to reveal.
+    RevealHandCardsChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        count: usize,
+        chooser: PlayerId,
+        #[serde(default = "super::ability::default_target_filter_any")]
+        card_filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        choice_optional: bool,
+        source_id: ObjectId,
+    },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {
         player: PlayerId,
@@ -19660,6 +19672,7 @@ impl WaitingFor {
             WaitingFor::DigRestSplitChoice { .. } => "DigRestSplitChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
+            WaitingFor::RevealHandCardsChoice { .. } => "RevealHandCardsChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
             WaitingFor::SearchPartitionChoice { .. } => "SearchPartitionChoice",
             WaitingFor::OutsideGameChoice { .. } => "OutsideGameChoice",
@@ -19828,6 +19841,7 @@ impl WaitingFor {
             | WaitingFor::DigRestSplitChoice { player, .. }
             | WaitingFor::SurveilChoice { player, .. }
             | WaitingFor::RevealChoice { player, .. }
+            | WaitingFor::RevealHandCardsChoice { player, .. }
             | WaitingFor::SearchChoice { player, .. }
             | WaitingFor::SearchPartitionChoice { player, .. }
             | WaitingFor::OutsideGameChoice { player, .. }
@@ -20192,6 +20206,7 @@ impl WaitingFor {
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
+            | WaitingFor::RevealHandCardsChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -20396,6 +20411,7 @@ impl WaitingFor {
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
+            | WaitingFor::RevealHandCardsChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -26376,6 +26392,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
+        | WaitingFor::RevealHandCardsChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }

@@ -125,16 +125,6 @@ pub fn resolve(
         .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
-    let mut hand = full_hand;
-    if random {
-        hand.shuffle(state.rng.draw(RandomDraw::Outcome));
-    }
-    // CR 701.20a: If a count is specified, reveal only that many cards.
-    if let Some(count_expr) = &count {
-        let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
-        hand.truncate(n);
-    }
-
     let needs_reveal_choice = reveal_hand_parks_card_choice(&card_filter, choice_optional);
     // CR 109.5 + CR 608.2c + CR 608.2d: the post-reveal choice belongs to the
     // player the choosing instruction addresses. The parser only produces a
@@ -147,6 +137,55 @@ pub fn resolve(
     // the iterating player and preserves the printed one in
     // `original_controller`.
     let chooser = ability.original_controller.unwrap_or(ability.controller);
+
+    // CR 701.20a + CR 101.4: If a count is specified and selection is player-chosen,
+    // the target player chooses which cards to reveal (unless hand <= count).
+    let (hand, needs_choice_to_reveal) = match (&count, random) {
+        (Some(count_expr), false) => {
+            let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
+            if full_hand.len() > n {
+                (Vec::new(), Some(n))
+            } else {
+                // CR 701.20c: If a player is instructed to reveal cards from a hidden zone
+                // and they have fewer cards in that zone than the specified number,
+                // they reveal all cards in that zone.
+                (full_hand, None)
+            }
+        }
+        (Some(count_expr), true) => {
+            let n = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
+            let mut hand = full_hand;
+            hand.shuffle(state.rng.draw(RandomDraw::Outcome));
+            hand.truncate(n);
+            (hand, None)
+        }
+        (None, _) => (full_hand, None),
+    };
+
+    if let Some(n) = needs_choice_to_reveal {
+        // CR 701.20a + CR 101.4: target player chooses which cards from their hand to reveal.
+        let candidates: Vec<_> = state
+            .players
+            .iter()
+            .find(|p| p.id == target_player)
+            .map(|p| p.hand.iter().copied().collect())
+            .unwrap_or_default();
+        state.waiting_for = WaitingFor::RevealHandCardsChoice {
+            player: target_player,
+            cards: candidates,
+            count: n,
+            chooser,
+            card_filter,
+            choice_optional,
+            source_id: ability.source_id,
+        };
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     if hand.is_empty() {
         if needs_reveal_choice {
@@ -204,6 +243,7 @@ pub fn resolve(
             card_ids: hand.clone(),
             card_names,
         });
+        super::publish_reveal_result(state, hand.clone());
     } else {
         // CR 701.20e + CR 109.5: "Look at" privately shows the hand to the printed controller (the chooser) — inside a player-scope fan-out `controller` is the iterating player.
         state.remember_card_identities(
@@ -212,6 +252,7 @@ pub fn resolve(
         );
         state.private_look_ids = hand.clone();
         state.private_look_player = Some(chooser);
+        super::publish_reveal_result(state, hand.clone());
     }
 
     if !needs_reveal_choice {
@@ -951,6 +992,39 @@ mod tests {
         );
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
+
+        // CR 701.20a + CR 101.4: Target player chooses 3 cards (inner(2) + 1 = 3) to reveal.
+        match &state.waiting_for {
+            WaitingFor::RevealHandCardsChoice {
+                player,
+                count,
+                chooser,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(*chooser, PlayerId(0));
+                assert_eq!(
+                    *count, 3,
+                    "Offset count must resolve to inner(2) + 1 = 3 cards to choose"
+                );
+            }
+            other => panic!("Expected RevealHandCardsChoice, got {other:?}"),
+        }
+
+        let p1_chosen: Vec<_> = state.players[1].hand.iter().copied().take(3).collect();
+        let waiting_for = std::mem::replace(
+            &mut state.waiting_for,
+            WaitingFor::GameOver { winner: None },
+        );
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            crate::types::actions::GameAction::SelectCards {
+                cards: p1_chosen.clone(),
+            },
+            &mut events,
+        )
+        .unwrap();
 
         // 2 creatures in graveyard + 1 = 3 cards revealed (not the full 5).
         assert_eq!(

@@ -7079,7 +7079,10 @@ pub(super) fn continuation_absorbs_current(
 ) -> bool {
     match continuation {
         ContinuationAst::RevealHandFilter { .. } => {
-            matches!(current_effect, Effect::RevealHand { .. })
+            matches!(
+                current_effect,
+                Effect::RevealHand { .. } | Effect::ChooseFromZone { .. }
+            )
         }
         ContinuationAst::ManaRestriction { .. }
         | ContinuationAst::ManaGrant { .. }

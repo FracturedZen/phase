@@ -151,6 +151,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::DigRestSplitChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
+        | WaitingFor::RevealHandCardsChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::SearchPartitionChoice { .. }
         | WaitingFor::OutsideGameChoice { .. }

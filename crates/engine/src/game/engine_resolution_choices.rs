@@ -1150,6 +1150,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::DigRestSplitChoice { .. }
             | WaitingFor::SurveilChoice { .. }
             | WaitingFor::RevealChoice { .. }
+            | WaitingFor::RevealHandCardsChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::SearchPartitionChoice { .. }
             | WaitingFor::OutsideGameChoice { .. }
@@ -5126,6 +5127,126 @@ pub(super) fn handle_resolution_choice(
                 Some(completion),
                 events,
             );
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::RevealHandCardsChoice {
+                player,
+                cards,
+                count,
+                chooser,
+                card_filter,
+                choice_optional,
+                source_id,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            if chosen.len() != count {
+                return Err(EngineError::InvalidAction(format!(
+                    "Must select exactly {} card(s) to reveal, got {}",
+                    count,
+                    chosen.len()
+                )));
+            }
+            for card_id in &chosen {
+                if !cards.contains(card_id) {
+                    return Err(EngineError::InvalidAction(
+                        "Selected card not in hand".to_string(),
+                    ));
+                }
+            }
+            let unique: HashSet<ObjectId> = chosen.iter().copied().collect();
+            if unique.len() != chosen.len() {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards must be distinct".to_string(),
+                ));
+            }
+
+            // CR 701.20a + CR 101.4: Reveal the chosen cards to all players.
+            state
+                .resolve_and_apply_information(
+                    &chosen,
+                    ResolvedInformationAudience::Controller(chooser),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Reveal,
+                )
+                .expect("resolved hand-reveal occurrences must be live and distinct");
+            state
+                .resolve_and_apply_information(
+                    &chosen,
+                    ResolvedInformationAudience::Public,
+                    ResolvedInformationLifetime::UntilZoneChange,
+                    ResolvedInformationEdit::Reveal,
+                )
+                .expect("published hand-reveal occurrences must be live and distinct");
+
+            let card_names: Vec<String> = chosen
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player,
+                card_ids: chosen.clone(),
+                card_names,
+            });
+            effects::publish_reveal_result(state, chosen.clone());
+
+            let needs_reveal_choice =
+                crate::types::ability::reveal_hand_parks_card_choice(&card_filter, choice_optional);
+
+            if !needs_reveal_choice {
+                set_priority(state, chooser);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
+            let eligible: Vec<_> =
+                if matches!(card_filter, crate::types::ability::TargetFilter::Any) {
+                    chosen
+                } else {
+                    let ctx = crate::game::filter::FilterContext::from_source(state, source_id);
+                    chosen
+                        .into_iter()
+                        .filter(|&id| {
+                            crate::game::filter::matches_target_filter(
+                                state,
+                                id,
+                                &card_filter,
+                                &ctx,
+                            )
+                        })
+                        .collect()
+                };
+
+            if eligible.is_empty() {
+                state.last_parent_target_missing_reason =
+                    Some(crate::types::ability::ParentTargetMissingReason::RevealHandChoice);
+                if choice_optional {
+                    state.waiting_for = WaitingFor::RevealChoice {
+                        player: chooser,
+                        cards: vec![],
+                        filter: card_filter,
+                        optional: true,
+                        decline_runs_continuation: false,
+                    };
+                } else {
+                    set_priority(state, chooser);
+                    super::engine::resume_pending_continuation_if_priority(state, events)
+                        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                }
+            } else {
+                state.waiting_for = WaitingFor::RevealChoice {
+                    player: chooser,
+                    cards: eligible,
+                    filter: card_filter,
+                    optional: choice_optional,
+                    decline_runs_continuation: false,
+                };
+            }
+
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (

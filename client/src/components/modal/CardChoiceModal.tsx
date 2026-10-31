@@ -240,6 +240,18 @@ export function CardChoiceModal() {
     case "RevealChoice":
       if (!canActForWaitingState) return null;
       return <RevealModal data={waitingFor.data} />;
+    case "RevealHandCardsChoice":
+      if (!canActForWaitingState) return null;
+      return (
+        <DiscardModal
+          key={waitingFor.data.cards.join(",")}
+          data={{ cards: waitingFor.data.cards, count: waitingFor.data.count }}
+          title={t("cardChoice.reveal.titleChooseToReveal", {
+            count: waitingFor.data.count,
+            defaultValue: "Choose cards to reveal",
+          })}
+        />
+      );
     case "SearchChoice":
       if (!canActForWaitingState) return null;
       return <SearchModal data={waitingFor.data} />;

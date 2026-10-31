@@ -2273,6 +2273,7 @@ impl GameRunner {
             WaitingFor::SeparatePilesChoice { .. } => "SeparatePilesChoice",
             WaitingFor::ActivationCostOneOfChoice { .. } => "ActivationCostOneOfChoice",
             WaitingFor::ResolutionOptionalPaymentChoice { .. } => "ResolutionOptionalPaymentChoice",
+            WaitingFor::RevealHandCardsChoice { .. } => "RevealHandCardsChoice",
         }
     }
 

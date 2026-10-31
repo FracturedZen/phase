@@ -1124,6 +1124,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::ChooseFromZoneChoice { up_to, .. }
         | WaitingFor::DiscardChoice { up_to, .. } => optional_if(*up_to),
         WaitingFor::RevealChoice { optional, .. } => optional_if(*optional),
+        WaitingFor::RevealHandCardsChoice { choice_optional, .. } => optional_if(*choice_optional),
         // CR 732.2a + CR 104.4b: the shortcut and Resolve All negotiations are not instructions.
         WaitingFor::ResolveAllConsent { .. }
         | WaitingFor::ResolveAllReady { .. }

@@ -1233,6 +1233,7 @@ const PARTITION_FIXTURES: Record<
   DigRestSplitChoice: NO_TARGET_REF_LEGAL_SET,
   SurveilChoice: NO_TARGET_REF_LEGAL_SET,
   RevealChoice: NO_TARGET_REF_LEGAL_SET,
+  RevealHandCardsChoice: NO_TARGET_REF_LEGAL_SET,
   SearchChoice: NO_TARGET_REF_LEGAL_SET,
   SearchPartitionChoice: NO_TARGET_REF_LEGAL_SET,
   OutsideGameChoice: NO_TARGET_REF_LEGAL_SET,

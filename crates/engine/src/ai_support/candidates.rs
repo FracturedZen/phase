@@ -2204,6 +2204,12 @@ pub fn candidate_actions_broad_with_probe(
             player,
             count,
             cards,
+        }
+        | WaitingFor::RevealHandCardsChoice {
+            player,
+            count,
+            cards,
+            ..
         } => bounded_select_card_candidates(*player, cards, [*count]),
         WaitingFor::DiscardChoice {
             player,

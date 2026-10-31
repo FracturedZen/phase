@@ -827,9 +827,14 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
     // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
     // advanced by `game::contest::advance_contest`.
-    if declared.len() != 144 {
+    // 144 -> 145 is adjudicated: CR 701.20a + CR 101.4's hand-reveal card choice added
+    // `RevealHandCardsChoice`. It names one acting `player` (the player whose hand is
+    // revealed choosing which cards to reveal) and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not actorless:
+    // the prompt cannot advance without that player's `GameAction::SelectCards`.
+    if declared.len() != 145 {
         failures.push(format!(
-            "PIN declared.len()={} != 144.\n\
+            "PIN declared.len()={} != 145.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\
