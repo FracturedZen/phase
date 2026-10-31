@@ -44,12 +44,7 @@ fn board(lost: usize) -> Board {
         state.objects.get_mut(&id).unwrap().tapped = true;
     }
     state.objects.get_mut(&suspected).unwrap().is_suspected = true;
-    state
-        .objects
-        .get_mut(&goaded)
-        .unwrap()
-        .goaded_by
-        .insert(P1);
+    state.objects.get_mut(&goaded).unwrap().goaded_by.insert(P1);
     for seat in 3..3 + lost {
         state.players[seat].is_eliminated = true;
     }
@@ -79,15 +74,24 @@ fn hot_pursuit_two_losses_steals_untaps_and_hastes_goaded_and_suspected() {
     for (id, label) in [(suspected, "suspected"), (goaded, "goaded")] {
         let obj = &state.objects[&id];
         assert_eq!(obj.controller, P0, "{label} creature: control gained");
-        assert!(!obj.tapped, "{label} creature: untapped (them = gained set)");
+        assert!(
+            !obj.tapped,
+            "{label} creature: untapped (them = gained set)"
+        );
         assert!(
             obj.has_keyword(&Keyword::Haste),
             "{label} creature: gains haste"
         );
     }
     let bystander = &state.objects[&plain];
-    assert_eq!(bystander.controller, P1, "neither goaded nor suspected: untouched");
-    assert!(bystander.tapped, "neither goaded nor suspected: stays tapped");
+    assert_eq!(
+        bystander.controller, P1,
+        "neither goaded nor suspected: untouched"
+    );
+    assert!(
+        bystander.tapped,
+        "neither goaded nor suspected: stays tapped"
+    );
 }
 
 #[test]
