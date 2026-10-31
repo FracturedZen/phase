@@ -2626,6 +2626,9 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         // (Fortune, Loyal Steed: "at end of combat, exile it and …").
         tag("at end of combat"),
         tag("for as long as "),
+        // CR 611.2b: bare "As long as ~ remains on the battlefield, [effect]"
+        // (Hot Pursuit) — same duration prefix without "for".
+        tag("as long as "),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
         // whole clause together so the leading-conditional splitter (which gates
@@ -5513,6 +5516,25 @@ pub(super) fn apply_clause_continuation(
                 },
             ));
         }
+        ContinuationAst::GoadParentTarget { duration } => {
+            // CR 701.15b + CR 611.2b: the parent's target is goaded for as long
+            // as the source remains on the battlefield. The controller of the
+            // installed effect is the goading player.
+            defs.push(AbilityDefinition::new(
+                kind,
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }])
+                        .description("goaded".to_string())],
+                    duration: Some(duration),
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                },
+            ));
+        }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate { scope } => {
             // CR 608.2c: walk backward through the definition chain to find
@@ -7095,6 +7117,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
+        ContinuationAst::GoadParentTarget { .. } => true,
         ContinuationAst::CantRegenerate { .. } => true,
         // CR 116.2c: recognition was already gated on a preceding
         // continuous-effect-installing `GenericEffect`, so absorption is
@@ -9622,6 +9645,11 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         {
             Some(continuation)
         }
+        // CR 701.15b + CR 611.2b: "As long as ~ remains on the battlefield, that
+        // creature is also goaded" after a single-target effect (Hot Pursuit).
+        _ if let Some(duration) = try_parse_parent_goaded_while_host_continuation(&lower) => {
+            Some(ContinuationAst::GoadParentTarget { duration })
+        }
         Effect::ControlNextTurn { .. }
             if nom_primitives::scan_contains(&lower, "after that turn")
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
@@ -9789,6 +9817,34 @@ fn parse_nonland_permanent_domain(
             TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
         ),
     ))
+}
+
+/// CR 701.15b + CR 611.2b: Parse "as long as <host> remains on the battlefield,
+/// that creature is [also] goaded". Only the presence-bound duration is accepted;
+/// any other "as long as" condition returns `None`.
+fn try_parse_parent_goaded_while_host_continuation(lower: &str) -> Option<Duration> {
+    let clause = lower.trim().trim_end_matches('.').trim_end();
+    let (rest, condition) = preceded(
+        tag::<_, _, OracleError<'_>>("as long as "),
+        terminated(take_until(", "), tag(", ")),
+    )
+    .parse(clause)
+    .ok()?;
+    let (_, duration) =
+        super::super::oracle_nom::duration::parse_for_as_long_as_condition(condition).ok()?;
+    if duration != Duration::WhileHostOnBattlefield {
+        return None;
+    }
+    (
+        alt((tag::<_, _, OracleError<'_>>("that creature"), tag("it"))),
+        tag(" is "),
+        opt(tag("also ")),
+        tag("goaded"),
+        eof,
+    )
+        .parse(rest)
+        .ok()?;
+    Some(duration)
 }
 
 /// CR 701.15a + CR 701.15b: Parse "the token(s) (is|are) goaded [duration]" after token creation.

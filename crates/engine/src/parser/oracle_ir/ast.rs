@@ -451,6 +451,11 @@ pub(crate) enum ContinuationAst {
     /// CR 701.15a + CR 701.15b: "The token(s) (is|are) goaded [duration]" after token
     /// creation — grants `StaticMode::Goaded` on `TargetFilter::LastCreated`.
     GoadLastCreated { duration: Option<Duration> },
+    /// CR 701.15b + CR 611.2b: "As long as ~ remains on the battlefield, that
+    /// creature is also goaded" after a single-target effect (Hot Pursuit) —
+    /// grants `StaticMode::Goaded` on `TargetFilter::ParentTarget` for the
+    /// presence-bound host lifetime.
+    GoadParentTarget { duration: Duration },
     /// CR 702.34a / CR 702.128a / CR 702.180a: "The/Its [flashback|embalm|harmonize]
     /// cost is equal to its/that card's mana cost." after a self-cost graveyard
     /// keyword grant. Redundant reminder text — the grant already carries

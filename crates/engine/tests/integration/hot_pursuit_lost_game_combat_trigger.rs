@@ -10,6 +10,11 @@
 //! and binds "them" to the creatures whose control was gained (CR 608.2c).
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::{layers, zones};
+use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+use engine::types::game_state::WaitingFor;
+use engine::types::statics::StaticMode;
+use engine::types::zones::Zone;
 use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -107,4 +112,75 @@ fn hot_pursuit_one_loss_does_nothing() {
     assert_eq!(state.objects[&suspected].controller, P1);
     assert_eq!(state.objects[&goaded].controller, P2);
     assert!(state.objects[&suspected].tapped);
+}
+
+/// The transient goad designations on `id` whose goader is `player`
+/// (CR 701.15b: the controller of the installing effect is the goading player).
+fn goad_effects_on(runner: &GameRunner, id: ObjectId, player: PlayerId) -> usize {
+    runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .filter(|tce| {
+            matches!(tce.affected, TargetFilter::SpecificObject { id: a } if a == id)
+                && tce.controller == player
+                && tce.duration == Duration::WhileHostOnBattlefield
+                && tce.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded
+                        }
+                    )
+                })
+        })
+        .count()
+}
+
+/// Cast Hot Pursuit and resolve its ETB against P1's only creature.
+fn cast_and_resolve_etb() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let foe = scenario.add_creature(P1, "Foe", 2, 2).id();
+    let pursuit = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Hot Pursuit", HOT_PURSUIT_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(pursuit).resolve();
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. }
+        ) {
+            runner.choose_first_legal_target().expect("target the foe");
+        } else {
+            break;
+        }
+    }
+    runner.advance_until_stack_empty();
+    (runner, pursuit, foe)
+}
+
+/// CR 701.60a + CR 701.15b + CR 611.2b: the ETB suspects the target and goads it
+/// (P0 is the goader) for as long as Hot Pursuit remains on the battlefield.
+#[test]
+fn hot_pursuit_etb_suspects_and_goads_while_on_battlefield() {
+    let (runner, pursuit, foe) = cast_and_resolve_etb();
+    let state = runner.state();
+    assert_eq!(state.objects[&pursuit].zone, Zone::Battlefield);
+    assert!(state.objects[&foe].is_suspected, "target suspected");
+    assert_eq!(goad_effects_on(&runner, foe, P0), 1, "target goaded by P0");
+}
+
+/// CR 611.2b: once Hot Pursuit leaves the battlefield the goad ends; the
+/// suspected designation (CR 701.60c) stays.
+#[test]
+fn hot_pursuit_goad_ends_when_it_leaves() {
+    let (mut runner, pursuit, foe) = cast_and_resolve_etb();
+    assert_eq!(goad_effects_on(&runner, foe, P0), 1, "reach guard: goaded");
+    let mut events = Vec::new();
+    zones::move_to_zone(runner.state_mut(), pursuit, Zone::Graveyard, &mut events);
+    layers::flush_layers(runner.state_mut());
+    assert_eq!(goad_effects_on(&runner, foe, P0), 0, "goad ended");
+    assert!(runner.state().objects[&foe].is_suspected, "still suspected");
 }
