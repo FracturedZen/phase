@@ -13821,32 +13821,97 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
-    if let Effect::ChangeZoneAll { target, .. } = effect {
-        // CR 608.2c: a mass zone move can consume the selected set through a
-        // typed property as well as a bare `TrackedSet` leg. In particular,
-        // "exile the rest" uses `Not(InTrackedSet)` inside its typed filter;
-        // the search choice must publish its chosen set before this effect
-        // resolves or that complement would include the chosen cards too.
+
+    // CR 608.2c: The mass-population family (ChangeZoneAll, DestroyAll, DamageAll,
+    // BounceAll, CounterAll, GainControlAll, PumpAll, PutCounterAll, DoublePTAll)
+    // carries its population filter in `target`. `Effect::target_filter()` intentionally
+    // returns None for them (they are mass operations enumerated at resolution, not
+    // declared player-target slots), so they are invisible to the primary filter check
+    // above. When that population filter consumes the chain's tracked set (either
+    // directly via `TrackedSet`/`TrackedSetFiltered` or through an `InTrackedSet`
+    // property or dynamic quantity), the preceding producer must publish its affected set
+    // (issue #7458).
+    if let Some(target) = crate::types::ability::mass_population_target(effect) {
         if filter_references_tracked_set(target)
             || filter_properties_reference_tracked_membership(target)
+            || filter_properties_reference_tracked_quantity(target)
         {
             return true;
         }
     }
-    if let Effect::PutCounterAll { target, .. } = effect {
-        if filter_references_tracked_set(target) {
+
+    // CR 115.10a + CR 608.2c: Broadcast/mass variants of targeted effects hide their
+    // population filter from `target_filter()` (no player-declared slot), but consume
+    // the chain's tracked set when that filter references it.
+    if let Effect::PreventDamage {
+        recipient_scope: EffectScope::All,
+        target,
+        ..
+    }
+    | Effect::Transform {
+        scope: EffectScope::All,
+        target,
+        ..
+    }
+    | Effect::ForceAttack {
+        scope: EffectScope::All,
+        target,
+        ..
+    }
+    | Effect::Suspect {
+        scope: EffectScope::All,
+        target,
+    }
+    | Effect::Unsuspect {
+        scope: EffectScope::All,
+        target,
+    }
+    | Effect::BecomePrepared {
+        scope: EffectScope::All,
+        target,
+    }
+    | Effect::BecomeUnprepared {
+        scope: EffectScope::All,
+        target,
+    }
+    | Effect::AddTargetReplacement { target, .. }
+    | Effect::TurnFaceUp { target, .. }
+    | Effect::GoadAll { target } = effect
+    {
+        if filter_references_tracked_set(target)
+            || filter_properties_reference_tracked_membership(target)
+            || filter_properties_reference_tracked_quantity(target)
+        {
             return true;
         }
     }
+
+    if let Effect::Cloak {
+        target,
+        object_source,
+        ..
+    }
+    | Effect::Manifest {
+        target,
+        object_source,
+        ..
+    } = effect
+    {
+        if filter_references_tracked_set(target)
+            || filter_properties_reference_tracked_membership(target)
+            || object_source.as_ref().is_some_and(|f| {
+                filter_references_tracked_set(f)
+                    || filter_properties_reference_tracked_membership(f)
+            })
+        {
+            return true;
+        }
+    }
+
     if let Effect::SearchLibrary { filter, .. } = effect {
         if filter_references_tracked_set(filter)
             || filter_properties_reference_tracked_quantity(filter)
         {
-            return true;
-        }
-    }
-    if let Effect::GoadAll { target } = effect {
-        if filter_references_tracked_set(target) {
             return true;
         }
     }
@@ -13913,23 +13978,6 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
                 .as_ref()
                 .is_some_and(filter_references_tracked_set)
         }) {
-            return true;
-        }
-    }
-    // CR 608.2c + CR 108.3: `ForceAttack` with scope `All` ("Each of those
-    // creatures attacks its owner", The Dead Shall Serve) carries its
-    // subject in `target`, which `Effect::target_filter()` deliberately
-    // hides (no creature slot is announced for the broadcast scope). A
-    // `TrackedSet`-bound rider still consumes the moved set, so inspect
-    // the field directly — without this the producer never publishes and
-    // the rider grafts nothing.
-    if let Effect::ForceAttack {
-        scope: EffectScope::All,
-        target,
-        ..
-    } = effect
-    {
-        if filter_references_tracked_set(target) {
             return true;
         }
     }
@@ -14621,6 +14669,29 @@ fn affected_objects_from_events(
                 .filter_map(|event| match event {
                     GameEvent::PermanentTapped { object_id, .. }
                     | GameEvent::PermanentUntapped { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            if !from_events.is_empty() {
+                from_events
+            } else {
+                fallback_targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            }
+        }
+        // CR 509.1h + CR 608.2c: become-blocked publishes the affected attackers
+        // so downstream "each of those creatures" sub-abilities (Choking Vines)
+        // bind to exactly the creatures that became blocked.
+        Effect::BecomeBlocked { .. } => {
+            let from_events: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(*attacker),
                     _ => None,
                 })
                 .collect();
@@ -37371,6 +37442,109 @@ mod tests {
         assert!(
             effect_references_tracked_set(&effect),
             "a tracked face-down-pile count must make the continuation consume the chain tracked set"
+        );
+    }
+
+    /// CR 608.2c: Issue #7458 — DamageAll, DestroyAll, and mass-population effects
+    /// carrying `TargetFilter::TrackedSet` or `TrackedSetFiltered` must be recognized as
+    /// tracked-set consumers by `effect_references_tracked_set` so preceding producers
+    /// publish their affected sets.
+    #[test]
+    fn mass_population_tracked_set_marks_effect_as_referencing_tracked_set() {
+        let tracked_target = TargetFilter::TrackedSet {
+            id: crate::types::identifiers::TrackedSetId(0),
+        };
+
+        let damage_all = Effect::DamageAll {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: tracked_target.clone(),
+            player_filter: None,
+            damage_source: None,
+        };
+        assert!(
+            effect_references_tracked_set(&damage_all),
+            "DamageAll with TrackedSet must consume tracked set"
+        );
+
+        let destroy_all = Effect::DestroyAll {
+            target: tracked_target.clone(),
+            cant_regenerate: false,
+        };
+        assert!(
+            effect_references_tracked_set(&destroy_all),
+            "DestroyAll with TrackedSet must consume tracked set"
+        );
+
+        let bounce_all = Effect::BounceAll {
+            target: tracked_target.clone(),
+            destination: None,
+            count: None,
+        };
+        assert!(
+            effect_references_tracked_set(&bounce_all),
+            "BounceAll with TrackedSet must consume tracked set"
+        );
+
+        let counter_all = Effect::CounterAll {
+            target: tracked_target.clone(),
+        };
+        assert!(
+            effect_references_tracked_set(&counter_all),
+            "CounterAll with TrackedSet must consume tracked set"
+        );
+
+        let gain_control_all = Effect::GainControlAll {
+            target: tracked_target.clone(),
+        };
+        assert!(
+            effect_references_tracked_set(&gain_control_all),
+            "GainControlAll with TrackedSet must consume tracked set"
+        );
+
+        let pump_all = Effect::PumpAll {
+            target: tracked_target.clone(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+        };
+        assert!(
+            effect_references_tracked_set(&pump_all),
+            "PumpAll with TrackedSet must consume tracked set"
+        );
+
+        let prevent_damage_all = Effect::PreventDamage {
+            amount: crate::types::ability::PreventionAmount::All,
+            amount_dynamic: None,
+            target: tracked_target.clone(),
+            recipient_scope: EffectScope::All,
+            scope: crate::types::ability::PreventionScope::AllDamage,
+            damage_source_filter: None,
+            prevention_duration: None,
+        };
+        assert!(
+            effect_references_tracked_set(&prevent_damage_all),
+            "PreventDamage(All) with TrackedSet must consume tracked set"
+        );
+
+        let add_replacement = Effect::AddTargetReplacement {
+            replacement: Box::new(crate::types::ability::ReplacementDefinition::new(
+                crate::types::ReplacementEvent::Moved,
+            )),
+            target: tracked_target.clone(),
+        };
+        assert!(
+            effect_references_tracked_set(&add_replacement),
+            "AddTargetReplacement with TrackedSet must consume tracked set"
+        );
+
+        let cloak = Effect::Cloak {
+            target: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 1 },
+            object_source: Some(tracked_target.clone()),
+            enters_under: None,
+        };
+        assert!(
+            effect_references_tracked_set(&cloak),
+            "Cloak with object_source TrackedSet must consume tracked set"
         );
     }
 

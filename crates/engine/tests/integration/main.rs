@@ -175,6 +175,7 @@ mod chaos_wand_targeted_free_cast_301;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
 mod chittering_rats;
+mod choking_vines_tracked_set_7458;
 mod choose_creature_and_opponent_flip;
 mod choose_flip_context_coverage;
 mod choose_from_zone_exiled_this_way_anaphor;
