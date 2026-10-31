@@ -2627,8 +2627,15 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("at end of combat"),
         tag("for as long as "),
         // CR 611.2b: bare "As long as ~ remains on the battlefield, [effect]"
-        // (Hot Pursuit) — same duration prefix without "for".
-        tag("as long as "),
+        // (Hot Pursuit) — same duration prefix without "for". Only the
+        // presence-bound condition: other "as long as" heads (Princess Luna's
+        // "remain exiled") keep their comma split.
+        recognize((
+            tag("as long as "),
+            verify(rest, |cond: &str| {
+                nom_primitives::scan_contains(cond, "remains on the battlefield")
+            }),
+        )),
         // CR 508.6: "During any turn [you attacked with X], [effect]" — temporal
         // attack-history gate (Neyali, Neriv, Boros Strike-Captain). Keep the
         // whole clause together so the leading-conditional splitter (which gates

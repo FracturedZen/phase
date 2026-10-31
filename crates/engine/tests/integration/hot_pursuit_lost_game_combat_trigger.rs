@@ -184,3 +184,22 @@ fn hot_pursuit_goad_ends_when_it_leaves() {
     assert_eq!(goad_effects_on(&runner, foe, P0), 0, "goad ended");
     assert!(runner.state().objects[&foe].is_suspected, "still suspected");
 }
+
+/// Regression guard for the narrowed "as long as" prefix: only the
+/// presence-bound "remains on the battlefield" head is kept with its comma.
+/// Princess Luna's "As long as those cards remain exiled, you may cast them"
+/// must still split so its cast permission (`CastFromZone`) survives.
+#[test]
+fn princess_luna_remain_exiled_head_keeps_cast_permission() {
+    const LUNA: &str = "Flying\nWhen this creature transforms into Princess Luna, choose up to six cards you own from outside the game with a moon in their art, then exile those cards. As long as those cards remain exiled, you may cast them, and your friends may cast them with your permission.";
+    let mut scenario = GameScenario::new();
+    let luna = scenario
+        .add_creature_from_oracle(P0, "Princess Luna", 4, 4, LUNA)
+        .id();
+    let runner = scenario.build();
+    let triggers = format!("{:?}", runner.state().objects[&luna].trigger_definitions);
+    assert!(
+        triggers.contains("CastFromZone"),
+        "cast permission kept: {triggers}"
+    );
+}
