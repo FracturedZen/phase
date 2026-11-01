@@ -31,6 +31,7 @@ mod ajani_nacatl_pariah_co_departure_6427;
 mod ajani_nacatl_pariah_sacrifice_outlet_6018;
 mod ajani_nacatl_pariah_transform;
 mod akroan_horse;
+mod alabaster_potion;
 mod alchemists_gift_pump_modal_keyword_choice;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;

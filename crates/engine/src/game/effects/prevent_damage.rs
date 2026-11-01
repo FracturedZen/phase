@@ -1,5 +1,5 @@
 use crate::game::effects::choose_damage_source;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
@@ -417,11 +417,13 @@ pub fn resolve(
         )
     );
 
-    // CR 615.11: A dynamic prevention amount is resolved to a concrete depletion
-    // count at effect-resolution time; the Next(n) shield itself is always static.
+    // CR 615.11 + CR 107.3 / CR 608.2b: A dynamic prevention amount is resolved to
+    // a concrete depletion count at effect-resolution time using the resolving ability's
+    // context (including announced `chosen_x` and targets); the Next(n) shield itself is
+    // always static.
     let amount = match amount_dynamic {
         Some(expr) => {
-            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            let n = resolve_quantity_with_targets(state, &expr, ability);
             PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
         }
         None => amount,

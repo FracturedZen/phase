@@ -8215,29 +8215,79 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
 /// must be tried before the bare "all " arm because it shares that prefix.
 /// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
 /// (issue #1094) so amount detection lives in one authority.
-pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+/// CR 107.3 / CR 615.7: Parse a prevention amount quantity, either variable "X" or
+/// a parsed quantity expression (fixed number, dynamic quantity ref, etc.).
+fn parse_prevention_qty(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        map(
+            |i| crate::parser::oracle_target::parse_word_bounded(i, "x"),
+            |_| QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        ),
+        nom_quantity::parse_quantity,
+    ))
+    .parse(input)
+}
+
+/// CR 615.1a + CR 615.7 + CR 107.3: Amount detection for prevention effects.
+///
+/// Returns `(amount, amount_dynamic)`:
+/// - "all but N" -> `(AllBut(N), None)`
+/// - "all" -> `(All, None)`
+/// - "the next N" (fixed number) -> `(Next(N), None)`
+/// - "the next X" (or dynamic quantity) -> `(Next(1), Some(qty))`
+/// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
+/// (issue #1094) so amount detection lives in one authority.
+pub(super) fn parse_prevention_amount_with_dynamic(
+    rest: &str,
+) -> (PreventionAmount, Option<QuantityExpr>) {
     if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
         let n = nom_primitives::parse_number
             .parse(after_all_but)
             .map(|(_, n)| n)
             .unwrap_or(1);
-        PreventionAmount::AllBut(n)
+        (PreventionAmount::AllBut(n), None)
     } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-        PreventionAmount::All
+        (PreventionAmount::All, None)
     } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-        let n = nom_primitives::parse_number
-            .parse(after_next)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
+        if let Ok((_, qty)) = parse_prevention_qty(after_next) {
+            match qty {
+                QuantityExpr::Fixed { value } => {
+                    (PreventionAmount::Next(value.max(0) as u32), None)
+                }
+                _ => (PreventionAmount::Next(1), Some(qty)),
+            }
+        } else {
+            let n = nom_primitives::parse_number
+                .parse(after_next)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            (PreventionAmount::Next(n), None)
+        }
     } else {
-        // Fallback: try to extract a number.
-        let n = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
+        // Fallback: try to extract a number or dynamic quantity.
+        if let Ok((_, qty)) = parse_prevention_qty(rest) {
+            match qty {
+                QuantityExpr::Fixed { value } => {
+                    (PreventionAmount::Next(value.max(0) as u32), None)
+                }
+                _ => (PreventionAmount::Next(1), Some(qty)),
+            }
+        } else {
+            let n = nom_primitives::parse_number
+                .parse(rest)
+                .map(|(_, n)| n)
+                .unwrap_or(1);
+            (PreventionAmount::Next(n), None)
+        }
     }
+}
+
+pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+    parse_prevention_amount_with_dynamic(rest).0
 }
 
 /// CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): Resolve a prevent-damage
@@ -8428,8 +8478,10 @@ fn parse_prevent_effect_with_context(
         nom_primitives::scan_preceded(rest, crate::parser::oracle_nom::duration::parse_duration)
             .map(|(_, d, _)| d);
 
-    // Determine amount: "all damage" vs "all but N" vs "the next N damage".
-    let amount = parse_prevention_amount(rest);
+    // Determine amount: "all damage" vs "all but N" vs "the next N damage" vs "the next X damage".
+    // CR 615.7 + CR 107.3: Fixed amounts populate `amount`; dynamic amounts populate
+    // `amount_dynamic` alongside the static fallback in `amount`.
+    let (amount, amount_dynamic) = parse_prevention_amount_with_dynamic(rest);
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal
@@ -8444,7 +8496,7 @@ fn parse_prevent_effect_with_context(
         // shield captures it via `ParentTargetSlot { index: 0 }`.
         return Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,
@@ -8464,7 +8516,7 @@ fn parse_prevent_effect_with_context(
         return match dealt_by {
             Ok(source_filter) => Effect::PreventDamage {
                 amount,
-                amount_dynamic: None,
+                amount_dynamic,
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope,
@@ -8584,15 +8636,13 @@ fn parse_prevent_effect_with_context(
         recipient_scope = EffectScope::All;
     }
 
-    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
-    // <quantity>" override) is populated at chunk level by
-    // `apply_where_x_effect_expression`, not here — the chunk machinery
-    // strips the trailing "where x is …" binding before this parser ever
-    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
-    // is present (or when the binding fails to resolve to a known quantity).
+    // CR 615.11 + CR 107.3 / CR 601.2b: `amount_dynamic` is populated directly
+    // by `parse_prevention_amount_with_dynamic` for variable amounts ("the next X damage").
+    // If a trailing "where X is …" clause is present, `apply_where_x_effect_expression`
+    // downstream rebinds `amount_dynamic` to the parsed where-X expression.
     Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic,
         target,
         recipient_scope,
         scope,

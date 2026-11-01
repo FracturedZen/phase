@@ -25216,6 +25216,198 @@ fn prevention_followup_if_this_way_does_not_emit_condition_warning() {
 }
 
 #[test]
+fn alabaster_potion_variable_prevention_mode_and_sibling_forms() {
+    // CR 107.3 + CR 615.7 + CR 615.11: Alabaster Potion has two modes with {X}{W}{W} in cost.
+    // Mode 0: "You gain X life." -> GainLife with Variable("X").
+    // Mode 1: "Prevent the next X damage that would be dealt to any target this turn."
+    // -> PreventDamage with amount Next(1) and amount_dynamic Some(Variable("X")).
+    let oracle = "Choose one —\n• You gain X life.\n• Prevent the next X damage that would be dealt to any target this turn.";
+    let parsed = parse(oracle, "Alabaster Potion", &[], &["Instant"], &[]);
+    assert_eq!(parsed.abilities.len(), 2, "must parse two modes");
+
+    // Mode 0: GainLife with Variable("X")
+    match parsed.abilities[0].effect.as_ref() {
+        Effect::GainLife { amount, player } => {
+            assert_eq!(
+                amount,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
+            );
+            assert_eq!(player, &TargetFilter::Controller);
+        }
+        other => panic!("mode 0 expected GainLife with Variable(X), got {other:?}"),
+    }
+
+    // Mode 1: PreventDamage with Variable("X") and AnyTarget
+    match parsed.abilities[1].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            target,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(1));
+            assert_eq!(
+                amount_dynamic.as_ref(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            );
+            assert_eq!(target, &TargetFilter::Any);
+            assert_eq!(
+                parsed.abilities[1].duration.as_ref(),
+                Some(&Duration::UntilEndOfTurn)
+            );
+        }
+        other => panic!("mode 1 expected PreventDamage with Variable(X), got {other:?}"),
+    }
+
+    // Sibling form 1: Recipient-scoped with target creature
+    let sibling1 = parse(
+        "Prevent the next X damage that would be dealt to target creature this turn.",
+        "Sibling 1",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    match sibling1.abilities[0].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            target,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(1));
+            assert_eq!(
+                amount_dynamic.as_ref(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            );
+            assert!(matches!(target, TargetFilter::Typed(_)));
+        }
+        other => panic!("sibling 1 expected PreventDamage with Variable(X), got {other:?}"),
+    }
+
+    // Sibling form 2: Recipient-scoped "to you"
+    let sibling2 = parse(
+        "Prevent the next X damage that would be dealt to you this turn.",
+        "Sibling 2",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    match sibling2.abilities[0].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            target,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(1));
+            assert_eq!(
+                amount_dynamic.as_ref(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            );
+            assert_eq!(target, &TargetFilter::Controller);
+        }
+        other => panic!("sibling 2 expected PreventDamage with Variable(X), got {other:?}"),
+    }
+
+    // Sibling form 3: Source-scoped "dealt by target attacking creature"
+    let sibling3 = parse(
+        "Prevent the next X damage that would be dealt this turn by target attacking creature.",
+        "Sibling 3",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    match sibling3.abilities[0].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            damage_source_filter,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(1));
+            assert_eq!(
+                amount_dynamic.as_ref(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            );
+            assert!(damage_source_filter.is_some());
+        }
+        other => panic!("sibling 3 expected PreventDamage with Variable(X), got {other:?}"),
+    }
+
+    // Sibling form 4: Source-scoped stack spell ("target instant or sorcery spell would deal")
+    let sibling4 = parse(
+        "Prevent the next X damage target instant or sorcery spell would deal this turn.",
+        "Sibling 4",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    match sibling4.abilities[0].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            damage_source_filter,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(1));
+            assert_eq!(
+                amount_dynamic.as_ref(),
+                Some(&QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                })
+            );
+            assert!(damage_source_filter.is_some());
+        }
+        other => panic!("sibling 4 expected PreventDamage with Variable(X), got {other:?}"),
+    }
+
+    // Fixed prevention: "the next 3 damage" must NOT populate amount_dynamic
+    let fixed = parse(
+        "Prevent the next 3 damage that would be dealt to any target this turn.",
+        "Fixed",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    match fixed.abilities[0].effect.as_ref() {
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            ..
+        } => {
+            assert_eq!(*amount, PreventionAmount::Next(3));
+            assert!(
+                amount_dynamic.is_none(),
+                "fixed amount must not set amount_dynamic"
+            );
+        }
+        other => panic!("fixed expected PreventDamage Next(3), got {other:?}"),
+    }
+}
+
+#[test]
 fn may_cost_decline_if_you_dont_does_not_emit_condition_or_optional_warning() {
     let oracle = "({T}: Add {B} or {R}.)\nAs this land enters, you may pay 2 life. If you don't, it enters tapped.";
     let parsed = parse(
