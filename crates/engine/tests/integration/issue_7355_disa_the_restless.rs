@@ -244,3 +244,43 @@ fn disa_tarmogoyf_token_is_doubled_by_doubling_season() {
         assert_eq!(token.power, Some(2));
     }
 }
+
+fn oracle_token_names(oracle: &str, name: &str) -> Vec<String> {
+    let parsed = engine::parser::parse_oracle_text(oracle, name, &[], &[], &[]);
+    let json = serde_json::to_string(&parsed).unwrap();
+    let mut names = Vec::new();
+    let marker = "\"type\":\"CreateTokenFromOracleCard\"";
+    for (i, _) in json.match_indices(marker) {
+        let tail = &json[i..];
+        if let Some(start) = tail.find("\"name\":\"") {
+            let rest = &tail[start + 8..];
+            names.push(rest[..rest.find('"').unwrap()].to_string());
+        }
+    }
+    names
+}
+
+/// CR 111.11 + MB2 playtest rulings (Dwarven Confluencer, Ginger, Disa): a token
+/// named after a real card is a copy of that Oracle card; a "(They're …)" /
+/// "(It's a land with …)" parenthetical only summarizes it.
+#[test]
+fn worzel_scryb_sprites_reminder_is_summary_not_definition() {
+    let oracle = "\u{2212}8: Create ten Scryb Sprites tokens. (They're {G} 1/1 Faerie creatures with flying.)";
+    assert_eq!(
+        oracle_token_names(oracle, "Worzel, the Protector"),
+        vec!["Scryb Sprites".to_string()]
+    );
+}
+
+#[test]
+fn waste_land_creates_oracle_wastes_token() {
+    let oracle = "{T}, Sacrifice Waste Land: Destroy target nonbasic land. That land's controller creates a Wastes token. (It's a land with {T}: Add {C}.)";
+    assert_eq!(oracle_token_names(oracle, "Waste Land"), vec!["Wastes".to_string()]);
+}
+
+/// CR 111.10/111.4: Scythe is not a card name; the reminder defines it, so no lookup.
+#[test]
+fn keeper_scythe_reminder_defined_token_is_not_oracle_lookup() {
+    let oracle = "When The Keeper of Four Scythes enters, create four Scythe tokens. (They're Equipment with \"Equipped creature gets +1/+1\" and equip {2}.)";
+    assert!(oracle_token_names(oracle, "The Keeper of Four Scythes").is_empty());
+}
