@@ -643,7 +643,8 @@ pub(crate) fn resolution_token_mint(effect: &Effect) -> Option<&QuantityExpr> {
     match effect {
         Effect::Token { count, .. }
         | Effect::CopyTokenOf { count, .. }
-        | Effect::CreateTokenCopyFromPool { count, .. } => Some(count),
+        | Effect::CreateTokenCopyFromPool { count, .. }
+        | Effect::CreateTokenFromOracleCard { count, .. } => Some(count),
         // CR 701.16a: investigate creates one Clue token.
         Effect::Investigate => Some(&ONE),
         _ => None,

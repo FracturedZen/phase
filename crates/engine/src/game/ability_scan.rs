@@ -7611,7 +7611,8 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::PutOnTopOrBottom { .. }
         | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
         | Effect::RememberCard { .. }
-        | Effect::CreateTokenCopyFromPool { .. } => CensusRole::Relax(RelaxReason::ZoneDisjoint),
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::CreateTokenFromOracleCard { .. } => CensusRole::Relax(RelaxReason::ZoneDisjoint),
 
         // -- BOUNDED / NO BATTLEFIELD POPULATION: a single announced/bounded
         // target, a fixed-category iteration, or a player-/self-only read - none
