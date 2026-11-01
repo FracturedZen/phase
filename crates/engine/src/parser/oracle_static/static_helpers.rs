@@ -128,8 +128,35 @@ fn parse_cost_mod_mana_value_qualifier(prefix: &str) -> OracleResult<'_, (&str, 
 fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp>) {
     match parse_cost_mod_mana_value_qualifier(prefix) {
         Ok((_, (before, prop))) => (before, Some(prop)),
-        Err(_) => (prefix, None),
+        Err(_) => match parse_cost_mod_pt_qualifier(prefix) {
+            Ok((_, (before, prop))) => (before, Some(prop)),
+            Err(_) => (prefix, None),
+        },
     }
+}
+
+/// CR 208.1 + CR 601.2f: "with power N or greater/less" (or toughness) gate on a
+/// cost-modifier subject — Goreclaw, Terror of Qal Sisma (#6375): "Creature
+/// spells you cast with power 4 or greater cost {2} less". Delegates the
+/// property itself to the shared `parse_with_property` combinator and only
+/// accepts a power/toughness comparison, so the composed filter is the same
+/// `PtComparison` used everywhere else.
+fn parse_cost_mod_pt_qualifier(prefix: &str) -> OracleResult<'_, (&str, FilterProp)> {
+    let (rest, before) = alt((
+        take_until::<_, _, OracleError<'_>>(" with power "),
+        take_until(" with toughness "),
+    ))
+    .parse(prefix)?;
+    let (rest, prop) = crate::parser::oracle_nom::filter::parse_with_property(&rest[1..])?;
+    // Only a trailing, complete power/toughness gate is peeled; anything else
+    // (a compound "and ..." tail, a non-P/T property) is left untouched.
+    if !matches!(prop, FilterProp::PtComparison { .. }) || !rest.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::new(
+            prefix,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((rest, (before, prop)))
 }
 
 /// Compose an optional mana-value `FilterProp::Cmc` (from

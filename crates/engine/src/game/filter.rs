@@ -8769,6 +8769,28 @@ fn spell_object_matches_property(
                 .get(&spell_id)
                 .is_some_and(|obj| !obj.kickers_paid.is_empty())
         }),
+        // CR 208.1 + CR 601.2f: "creature spells you cast with power N or
+        // greater" (Goreclaw, Terror of Qal Sisma, #6375). The cast-record
+        // snapshot carries no P/T, so live cost-modifier evaluation reads the
+        // spell object's own power/toughness; snapshot callers fail closed.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => context.is_some_and(|ctx| {
+            let Some(spell_obj) = ctx
+                .spell_object_id
+                .and_then(|id| ctx.state.objects.get(&id))
+            else {
+                return false;
+            };
+            let threshold = match value {
+                QuantityExpr::Fixed { value } => *value,
+                _ => resolve_quantity(ctx.state, value, ctx.source_controller, ctx.source_id),
+            };
+            comparator.evaluate(object_pt_value(spell_obj, *stat, *scope), threshold)
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
