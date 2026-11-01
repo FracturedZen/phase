@@ -21590,6 +21590,16 @@ fn can_cast_prepared_now_with_probe(
         if matches!(cost, AbilityCost::Unimplemented { .. }) {
             return false;
         }
+        // CR 601.2h + CR 733.1: the total cost includes every REQUIRED
+        // additional cost, so a required leg with no legal choice (Village
+        // Rites' "sacrifice a creature" with no creature, a discard from an
+        // empty hand) makes the cast illegal. Use the same payability
+        // authority the required-cost payment flow checks before paying
+        // (`casting_costs` deferred/required branches), so the offer cannot
+        // admit a cast that payment is certain to reverse.
+        if !cost.is_payable_for_spell(state, player, prepared.object_id) {
+            return false;
+        }
     }
 
     // CR 118.3 + CR 601.2f-h: A mandatory choice of additional costs is
