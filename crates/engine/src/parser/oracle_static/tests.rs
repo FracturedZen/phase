@@ -1834,6 +1834,35 @@ fn cost_mod_mana_value_gate_instant_sorcery_ge() {
     );
 }
 
+/// CR 208.1 + CR 601.2f (#6375): Goreclaw — "Creature spells you cast with power 4
+/// or greater" must fold a power gate onto the creature filter, not drop the
+/// whole subject (which reduced every spell).
+#[test]
+fn cost_mod_power_gate_creature_ge() {
+    let def = parse_static_line(
+        "Creature spells you cast with power 4 or greater cost {2} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + power), got {spell_filter:?}");
+    };
+    assert!(tf.type_filters.contains(&TypeFilter::Creature), "{tf:?}");
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::PtComparison {
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        )),
+        "missing power >= 4 gate: {tf:?}"
+    );
+}
+
 /// CR 202.3 (#5606): single-type + "mana value N or less" gate folds the Cmc prop
 /// directly onto the typed filter (no `And` wrapper needed for a single `Typed`).
 #[test]
