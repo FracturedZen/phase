@@ -2281,11 +2281,18 @@ impl GameObject {
             PerpetualModification::SetBasePowerToughness { power, toughness } => {
                 // The base_* fields are the persistent baseline the layer pass
                 // copies into live P/T each recalc, so editing them here makes the
-                // change permanent and zone-independent.
+                // change permanent and zone-independent. Off the battlefield,
+                // `flush_layers` does not re-seed live P/T from base, so sync
+                // `power`/`toughness` immediately for non-battlefield characteristic
+                // checks (CR 208.1 / CR 613.1).
                 self.base_power = Some(*power);
                 self.base_toughness = Some(*toughness);
                 self.layer_base_power = Some(*power);
                 self.layer_base_toughness = Some(*toughness);
+                if self.zone != crate::types::zones::Zone::Battlefield {
+                    self.power = self.base_power;
+                    self.toughness = self.base_toughness;
+                }
             }
             PerpetualModification::ModifyPowerToughness {
                 power,
@@ -2327,6 +2334,10 @@ impl GameObject {
                 self.base_toughness = Some(base_toughness);
                 self.layer_base_power = Some(base_power);
                 self.layer_base_toughness = Some(base_toughness);
+                if self.zone != crate::types::zones::Zone::Battlefield {
+                    self.power = self.base_power;
+                    self.toughness = self.base_toughness;
+                }
                 // Mixed "perpetually gets +N/+M and gains [keywords]" (Jaheira):
                 // same live+base grant as the standalone GrantKeywords arm.
                 for keyword in keywords {
@@ -2387,6 +2398,10 @@ impl GameObject {
                 self.base_toughness = Some(*toughness);
                 self.layer_base_power = Some(*power);
                 self.layer_base_toughness = Some(*toughness);
+                if self.zone != crate::types::zones::Zone::Battlefield {
+                    self.power = self.base_power;
+                    self.toughness = self.base_toughness;
+                }
                 for keyword in keywords {
                     if !self.base_keywords.contains(keyword) {
                         self.base_keywords.push(keyword.clone());

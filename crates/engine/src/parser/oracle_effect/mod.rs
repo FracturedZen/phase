@@ -13594,8 +13594,22 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Opt
         } else {
             (rest, Vec::new())
         };
+        // CR 400.7e + CR 608.2c: On a self-subject trigger with no prior chain
+        // target or non-self pronoun referent ("When Hook Horror dies, it
+        // perpetually gets -1/-1"), "it" refers to the trigger's own source
+        // (`SelfRef`), routing through `self_ref_is_current` rather than an
+        // anaphoric `ParentTarget`.
+        let target = if ctx.object_pronoun_ref.is_none()
+            && !ctx.parent_target_available
+            && ctx.in_trigger
+            && matches!(ctx.subject, Some(TargetFilter::SelfRef))
+        {
+            TargetFilter::SelfRef
+        } else {
+            TargetFilter::ParentTarget
+        };
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
+            target,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
                 power: QuantityExpr::Fixed { value: power_delta },
                 toughness: QuantityExpr::Fixed {

@@ -90,7 +90,16 @@ fn perpetual_target_object_ids(
         return state.last_created_token_ids.clone();
     }
 
-    if !ability.targets.is_empty() {
+    // CR 400.7 + CR 400.7e + CR 201.5: Explicit source-identity filters (`SelfRef`
+    // and `GrantingObject`) must resolve through the source/granter authority in
+    // `resolved_targets`, never through `effect_object_targets`'s wildcard fallback
+    // to inherited parent chain targets.
+    if !ability.targets.is_empty()
+        && !matches!(
+            target,
+            TargetFilter::SelfRef | TargetFilter::GrantingObject { .. }
+        )
+    {
         let propagated = super::effect_object_targets(target, &ability.targets);
         if !propagated.is_empty()
             && !(matches!(target, TargetFilter::ParentTarget) && propagated == [ability.source_id])
@@ -122,6 +131,14 @@ fn perpetual_target_object_ids(
     if matches!(target, TargetFilter::ParentTarget) && ids == [ability.source_id] {
         if let Some(id) = parent_object_from_resolution_trigger_context(state) {
             return vec![id];
+        }
+        // CR 400.7 + CR 400.7e: When an unresolved `ParentTarget` fell back to
+        // `ability.source_id` via `targeting::resolved_targets`'s `use_self` arm
+        // (no declared targets and no distinct event referent, e.g. a self
+        // zone-change trigger), honor the source-identity authority so a stale
+        // later incarnation at the same `ObjectId` is rejected.
+        if ability.targets.is_empty() && !ability.self_ref_is_current(state) {
+            return Vec::new();
         }
     }
 
@@ -156,8 +173,19 @@ fn perpetual_target_object_ids(
     //
     // The source fallback below is for `TargetFilter::Any` and friends, where a
     // perpetual rider with no declared target genuinely means "this object"
-    // (Mutable Pupa's self-grant).
-    if ids.is_empty() && matches!(target, TargetFilter::ParentTarget) {
+    // (Mutable Pupa's self-grant). Explicit source-identity references (`SelfRef`,
+    // `GrantingObject`) already consulted `self_ref_is_current` / `source_is_current`
+    // (CR 400.7 / CR 400.7e) inside `resolved_effect_object_ids`; an empty result
+    // means the authority rejected a stale or absent source, which must not be
+    // bypassed by pushing raw `ability.source_id`.
+    if ids.is_empty()
+        && matches!(
+            target,
+            TargetFilter::ParentTarget
+                | TargetFilter::SelfRef
+                | TargetFilter::GrantingObject { .. }
+        )
+    {
         return ids;
     }
 
@@ -1681,5 +1709,109 @@ mod tests {
         assert_eq!(obj.toughness, Some(4));
         assert!(obj.has_keyword(&Keyword::Flying));
         assert!(obj.perpetual_mods.contains(&modification));
+    }
+
+    /// CR 400.7 + CR 400.7e: When `SelfRef` or `GrantingObject` is rejected by
+    /// the source-identity authority (`self_ref_is_current` / `source_is_current`),
+    /// `perpetual_target_object_ids` must honor the empty result instead of
+    /// falling back to raw `ability.source_id` or inheriting unrelated chain
+    /// targets.
+    #[test]
+    fn perpetual_self_ref_and_granting_object_respect_rejected_source_identity() {
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(7);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hook Horror".to_string(),
+            Zone::Battlefield,
+        );
+        let bystander_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source_id, bystander_id] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.base_power = Some(3);
+            obj.base_toughness = Some(3);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+        }
+
+        let captured_incarnation = state.objects.get(&source_id).unwrap().incarnation;
+        // Advance the live object at `source_id` to a new incarnation (simulating a
+        // zone-change cycle before the ability resolves).
+        state.objects.get_mut(&source_id).unwrap().incarnation = captured_incarnation + 2;
+
+        let modification = PerpetualModification::ModifyPowerToughness {
+            power: QuantityExpr::Fixed { value: -1 },
+            toughness: QuantityExpr::Fixed { value: -1 },
+            keywords: Vec::new(),
+        };
+
+        // 1. Stale SelfRef (even with an inherited chain target in `ability.targets`)
+        // must neither edit the inherited target nor fall back to raw `source_id`.
+        let mut self_ref_ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::SelfRef,
+                modification: modification.clone(),
+            },
+            vec![TargetRef::Object(bystander_id)],
+            source_id,
+            PlayerId(0),
+        );
+        self_ref_ability.source_incarnation = Some(captured_incarnation);
+        let mut events = Vec::new();
+        super::resolve(&mut state, &self_ref_ability, &mut events).unwrap();
+
+        assert!(
+            state
+                .objects
+                .get(&source_id)
+                .unwrap()
+                .perpetual_mods
+                .is_empty(),
+            "stale SelfRef must not fall back to raw source_id"
+        );
+        assert!(
+            state
+                .objects
+                .get(&bystander_id)
+                .unwrap()
+                .perpetual_mods
+                .is_empty(),
+            "SelfRef must not inherit unrelated chain targets"
+        );
+
+        // 2. Stale GrantingObject must likewise produce no edit.
+        let stale_granter = ObjectIncarnationRef::of(source_id, captured_incarnation);
+        let mut granter_ability = ResolvedAbility::new(
+            Effect::ApplyPerpetual {
+                target: TargetFilter::GrantingObject {
+                    bound: Some(stale_granter),
+                },
+                modification,
+            },
+            vec![TargetRef::Object(bystander_id)],
+            source_id,
+            PlayerId(0),
+        );
+        granter_ability.source_incarnation = Some(captured_incarnation);
+        super::resolve(&mut state, &granter_ability, &mut events).unwrap();
+
+        assert!(
+            state
+                .objects
+                .get(&source_id)
+                .unwrap()
+                .perpetual_mods
+                .is_empty(),
+            "stale GrantingObject must not fall back to raw source_id"
+        );
     }
 }

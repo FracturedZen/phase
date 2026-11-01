@@ -712,6 +712,27 @@ fn bound_move_members(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> Vec<ObjectId> {
+    // CR 400.7 + CR 400.7e: When a self-departure trigger's return clause was
+    // lifted from `ParentTarget` to `TriggeringSource` (e.g. Hook Horror's
+    // "return it to the battlefield under its owner's control"), the event
+    // referent IS the ability's own source. If the source moved again after the
+    // triggering zone change (even if it later re-entered the same zone at the
+    // same `ObjectId`), `self_ref_is_current` rejects the stale later
+    // incarnation and it must not be moved.
+    if matches!(target_filter, TargetFilter::TriggeringSource)
+        && ability
+            .trigger_source
+            .as_ref()
+            .is_some_and(|source| source.identity.reference.object_id == ability.source_id)
+        && state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            == Some(ability.source_id)
+        && !ability.self_ref_is_current(state)
+    {
+        return Vec::new();
+    }
     // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
     // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
     // effects whose subject can be the source itself, an event-context
@@ -1049,11 +1070,25 @@ pub fn resolve(
             return Ok(completed_result(0));
         }
 
-        // CR 400.7: SelfRef resolves only to the exact source or, for a departure
-        // trigger, its immediate recorded event successor. When no such binding
-        // remains (for example, a Warp delayed exile after a blink), the zone-scan
-        // fallback must not rediscover a same-id return by raw equality.
-        if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        // CR 400.7 + CR 400.7e: SelfRef (or a self-departure trigger's lifted
+        // `TriggeringSource`) resolves only to the exact source or, for a
+        // departure trigger, its immediate recorded event successor. When no
+        // such binding remains (for example, a Warp delayed exile after a
+        // blink, or a dies trigger whose graveyard card moved again before
+        // resolution), the zone-scan fallback must not rediscover a same-id
+        // return by raw equality.
+        if (matches!(target_filter, TargetFilter::SelfRef)
+            || (matches!(target_filter, TargetFilter::TriggeringSource)
+                && ability.trigger_source.as_ref().is_some_and(|source| {
+                    source.identity.reference.object_id == ability.source_id
+                })
+                && state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event)
+                    == Some(ability.source_id)))
+            && !ability.self_ref_is_current(state)
+        {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
