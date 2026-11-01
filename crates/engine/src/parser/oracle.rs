@@ -10021,7 +10021,10 @@ fn demote_reminder_defined_oracle_card_tokens(parsed: &mut ParsedAbilities, orac
             let reminder = reminder.trim_start();
             reminder.contains(&format!("{name} token is "))
                 || reminder.contains(&format!("{name} tokens are "))
-                || reminder.starts_with("they're ")
+                // A "(They're {G} 1/1 Faerie …)" summary of a real card (Worzel's
+                // Scryb Sprites) is not a definition; only type-led definitions are.
+                || reminder.starts_with("they're equipment")
+                || reminder.starts_with("they're artifact")
                 || reminder.starts_with("it's an artifact")
                 || reminder.starts_with("it's an equipment")
         })

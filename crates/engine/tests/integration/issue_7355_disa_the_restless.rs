@@ -275,7 +275,10 @@ fn worzel_scryb_sprites_reminder_is_summary_not_definition() {
 #[test]
 fn waste_land_creates_oracle_wastes_token() {
     let oracle = "{T}, Sacrifice Waste Land: Destroy target nonbasic land. That land's controller creates a Wastes token. (It's a land with {T}: Add {C}.)";
-    assert_eq!(oracle_token_names(oracle, "Waste Land"), vec!["Wastes".to_string()]);
+    assert_eq!(
+        oracle_token_names(oracle, "Waste Land"),
+        vec!["Wastes".to_string()]
+    );
 }
 
 /// CR 111.10/111.4: Scythe is not a card name; the reminder defines it, so no lookup.
