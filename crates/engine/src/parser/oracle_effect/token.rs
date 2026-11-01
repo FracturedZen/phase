@@ -277,6 +277,14 @@ fn is_bare_oracle_card_name(name: &str) -> bool {
     {
         return false;
     }
+    // A descriptor made only of subtypes ("Bear", "Elf Warrior") names a
+    // token type, not an Oracle card; its body must come from the text.
+    if name
+        .split_whitespace()
+        .all(|word| crate::parser::oracle_util::is_subtype_word(&word.to_lowercase()))
+    {
+        return false;
+    }
     let mut words = name.split_whitespace();
     let Some(first) = words.next() else {
         return false;
