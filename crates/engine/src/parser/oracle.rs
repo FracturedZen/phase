@@ -10012,52 +10012,82 @@ fn demote_reminder_defined_oracle_card_tokens(parsed: &mut ParsedAbilities, orac
     if reminders.is_empty() {
         return;
     }
-    demote_definitions(parsed, "reminder_defined_named_token", |node| {
-        let tree = match &node {
-            DefinitionNode::Ability(def) => serde_json::to_value(def),
-            DefinitionNode::Trigger(def) => serde_json::to_value(def),
-            DefinitionNode::Static(def) => serde_json::to_value(def),
-            DefinitionNode::Replacement(def) => serde_json::to_value(def),
-        };
-        let mut names = Vec::new();
-        if let Ok(tree) = tree {
-            collect_oracle_card_token_names(&tree, &mut names);
-        }
-        names.iter().any(|name| {
-            let name = name.to_lowercase();
-            reminders.iter().any(|reminder| {
-                let reminder = reminder.trim_start();
-                reminder.contains(&format!("{name} token is "))
-                    || reminder.contains(&format!("{name} tokens are "))
-                    || reminder.starts_with("they're ")
-                    || reminder.starts_with("it's an artifact")
-                    || reminder.starts_with("it's an equipment")
-            })
+    // CR 111.10/111.4: when reminder text defines the named token, CR 111.11's
+    // Oracle-card lookup does not apply. Demote only the effect node in place so the
+    // surrounding trigger/loyalty-ability structure is preserved.
+    let defined = |name: &str| {
+        let name = name.to_lowercase();
+        reminders.iter().any(|reminder| {
+            let reminder = reminder.trim_start();
+            reminder.contains(&format!("{name} token is "))
+                || reminder.contains(&format!("{name} tokens are "))
+                || reminder.starts_with("they're ")
+                || reminder.starts_with("it's an artifact")
+                || reminder.starts_with("it's an equipment")
         })
-    });
+    };
+    fn rewrite<T: serde::Serialize + serde::de::DeserializeOwned>(
+        item: &mut T,
+        defined: &dyn Fn(&str) -> bool,
+    ) {
+        let Ok(mut tree) = serde_json::to_value(&*item) else {
+            return;
+        };
+        if demote_named_token_nodes(&mut tree, defined) {
+            if let Ok(updated) = serde_json::from_value(tree) {
+                *item = updated;
+            }
+        }
+    }
+    parsed
+        .abilities
+        .iter_mut()
+        .for_each(|d| rewrite(d, &defined));
+    parsed
+        .triggers
+        .iter_mut()
+        .for_each(|d| rewrite(d, &defined));
+    parsed.statics.iter_mut().for_each(|d| rewrite(d, &defined));
+    parsed
+        .replacements
+        .iter_mut()
+        .for_each(|d| rewrite(d, &defined));
 }
 
-fn collect_oracle_card_token_names(tree: &serde_json::Value, names: &mut Vec<String>) {
+fn demote_named_token_nodes(tree: &mut serde_json::Value, defined: &dyn Fn(&str) -> bool) -> bool {
     match tree {
         serde_json::Value::Object(map) => {
-            if map
+            let hit = map
                 .get("type")
-                .is_some_and(|tag| tag == "CreateTokenFromOracleCard")
-            {
-                if let Some(serde_json::Value::String(name)) = map.get("name") {
-                    names.push(name.clone());
-                }
+                .is_some_and(|t| t == "CreateTokenFromOracleCard")
+                && matches!(map.get("name"), Some(serde_json::Value::String(n)) if defined(n));
+            if hit {
+                let name = map
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                *tree = serde_json::json!({
+                    "type": "Unimplemented",
+                    "name": "reminder_defined_named_token",
+                    "description": format!("create {name} token"),
+                });
+                return true;
             }
-            map.values()
-                .for_each(|value| collect_oracle_card_token_names(value, names));
+            let mut changed = false;
+            for value in map.values_mut() {
+                changed |= demote_named_token_nodes(value, defined);
+            }
+            changed
         }
-        serde_json::Value::Array(items) => items
-            .iter()
-            .for_each(|value| collect_oracle_card_token_names(value, names)),
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_) => {}
+        serde_json::Value::Array(items) => {
+            let mut changed = false;
+            for value in items.iter_mut() {
+                changed |= demote_named_token_nodes(value, defined);
+            }
+            changed
+        }
+        _ => false,
     }
 }
 
