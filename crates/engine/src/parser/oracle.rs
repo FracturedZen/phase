@@ -9817,6 +9817,7 @@ fn parse_oracle_pipeline(
     demote_unenforceable_replacement_lifetimes(&mut parsed);
     demote_unsupported_composite_counter_choice_costs(&mut parsed);
     demote_crew_history_population_counts(&mut parsed);
+    demote_reminder_defined_oracle_card_tokens(&mut parsed, oracle_text);
     #[cfg(debug_assertions)]
     crate::parser::oracle_effect::debug_assert_exile_top_opponent_sentinel_lifted(
         &parsed, card_name,
@@ -9995,6 +9996,71 @@ fn demote_unreached_granter_references(parsed: &mut ParsedAbilities) {
 /// node is judged TYPED — it must decode as a `QuantityRef`, and the shared
 /// `quantity_ref_uses_filter_prop` authority (exhaustive over `QuantityRef`)
 /// decides whether any filter it carries reads the crew relation.
+/// CR 111.11 applies only when the effect "doesn't define any other
+/// characteristics for that token". A card whose reminder text defines the
+/// named token ("Hat tokens are artifact tokens with …", "A Pizza token is a
+/// Food artifact …", "(They're Equipment with …)") is not an Oracle-card
+/// token, so a `CreateTokenFromOracleCard` for it is an honest gap instead of
+/// a lookup that would find no card.
+fn demote_reminder_defined_oracle_card_tokens(parsed: &mut ParsedAbilities, oracle_text: &str) {
+    let lower = oracle_text.to_lowercase();
+    let reminders: Vec<&str> = lower
+        .split('(')
+        .skip(1)
+        .filter_map(|rest| rest.split(')').next())
+        .collect();
+    if reminders.is_empty() {
+        return;
+    }
+    demote_definitions(parsed, "reminder_defined_named_token", |node| {
+        let tree = match &node {
+            DefinitionNode::Ability(def) => serde_json::to_value(def),
+            DefinitionNode::Trigger(def) => serde_json::to_value(def),
+            DefinitionNode::Static(def) => serde_json::to_value(def),
+            DefinitionNode::Replacement(def) => serde_json::to_value(def),
+        };
+        let mut names = Vec::new();
+        if let Ok(tree) = tree {
+            collect_oracle_card_token_names(&tree, &mut names);
+        }
+        names.iter().any(|name| {
+            let name = name.to_lowercase();
+            reminders.iter().any(|reminder| {
+                let reminder = reminder.trim_start();
+                reminder.contains(&format!("{name} token is "))
+                    || reminder.contains(&format!("{name} tokens are "))
+                    || reminder.starts_with("they're ")
+                    || reminder.starts_with("it's an artifact")
+                    || reminder.starts_with("it's an equipment")
+            })
+        })
+    });
+}
+
+fn collect_oracle_card_token_names(tree: &serde_json::Value, names: &mut Vec<String>) {
+    match tree {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("type")
+                .is_some_and(|tag| tag == "CreateTokenFromOracleCard")
+            {
+                if let Some(serde_json::Value::String(name)) = map.get("name") {
+                    names.push(name.clone());
+                }
+            }
+            map.values()
+                .for_each(|value| collect_oracle_card_token_names(value, names));
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|value| collect_oracle_card_token_names(value, names)),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
 fn demote_crew_history_population_counts(parsed: &mut ParsedAbilities) {
     demote_definitions(parsed, "crew_history_population_count", |node| {
         let tree = match &node {
