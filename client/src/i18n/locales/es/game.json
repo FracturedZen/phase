@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
+  "playerLatency": {
+    "host": "Anfitrión",
+    "waiting": "Esperando",
+    "value": "{{ms}} ms",
+    "description": "Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."
+  },
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -642,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Zona de mando",
+    "conspiracy": "Conspiración",
+    "conspiracyTitle": "Conspiración: {{name}}",
+    "turnFaceUp": "Poner {{name}} boca arriba",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -1552,6 +1561,7 @@
     "effectZone": {
       "titleSacrifice": "Sacrificar",
       "titleTopdeck": "Poner en la biblioteca",
+      "titleBottomdeck": "Poner en la biblioteca",
       "titleBattlefield": "Poner en el campo de batalla",
       "titleHand": "Devolver",
       "titleExile": "Exiliar",
@@ -1571,6 +1581,12 @@
       "subtitleTopdeckUpTo_other": "Elige hasta {{count}} cartas para poner en la parte superior de tu biblioteca",
       "subtitleTopdeckRange_one": "Elige {{min}}-{{count}} carta para poner en la parte superior de tu biblioteca",
       "subtitleTopdeckRange_other": "Elige {{min}}-{{count}} cartas para poner en la parte superior de tu biblioteca",
+      "subtitleBottomdeckExact_one": "Elige {{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckExact_other": "Elige {{count}} cartas para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckUpTo_one": "Elige hasta {{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckUpTo_other": "Elige hasta {{count}} cartas para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckRange_one": "Elige {{min}}-{{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckRange_other": "Elige {{min}}-{{count}} cartas para poner en la parte inferior de tu biblioteca",
       "subtitleBattlefieldExact_one": "Elige {{count}} carta para poner en el campo de batalla",
       "subtitleBattlefieldExact_other": "Elige {{count}} cartas para poner en el campo de batalla",
       "subtitleBattlefieldUpTo_one": "Elige hasta {{count}} carta para poner en el campo de batalla",
@@ -1616,14 +1632,17 @@
       "labelSkip": "Omitir",
       "labelDecline": "Rechazar",
       "labelPutOnTop": "Poner encima ({{order}})",
+      "labelPutOnBottom": "Poner en el fondo ({{order}})",
       "labelConfirm": "Confirmar ({{selected}}/{{count}})",
       "labelTop": "Superior ({{selected}}/{{count}})",
+      "labelBottom": "Fondo ({{selected}}/{{count}})",
       "labelPut": "Poner ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exiliar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Lanzar ({{selected}}/{{count}})",
       "orderTop": "Superior",
+      "orderBottom": "Fondo",
       "orderSecond": "2.º",
       "orderThird": "3.º",
       "orderFourth": "4.º",
@@ -2116,13 +2135,18 @@
   "freeCastWindow": {
     "eyebrow": "Lanzamiento gratis",
     "title": "Lanza un hechizo gratis",
+    "titlePlay": "Juega cartas gratis",
     "subtitle": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
     "subtitleNoBudget": "Elige un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
+    "subtitlePlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)). Valor de maná total restante: {{budget}}.",
+    "subtitleNoBudgetPlay": "Elige una tierra para jugar o un hechizo para lanzar sin pagar su coste de maná ({{remaining}} restante(s)).",
     "remainingAny": "cualquier cantidad",
     "castNamed": "Lanzar {{name}}",
+    "playNamed": "Jugar {{name}}",
     "castSuffix": "(sin pagar su coste de maná)",
     "done": "Listo",
-    "doneSuffix": "(deja de lanzar hechizos de esta forma)"
+    "doneSuffix": "(deja de lanzar hechizos de esta forma)",
+    "doneSuffixPlay": "(deja de jugar cartas de esta forma)"
   },
   "castingVariant": {
     "eyebrow": "Lanzar",
@@ -2205,7 +2229,8 @@
     "unitDamage": "de daño",
     "unitLife": "de vida",
     "title": "Distribuir {{total}} {{unit}}",
-    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}"
+    "subtitle": "Asigna al menos 1 {{unit}} a cada objetivo. Restante: {{remaining}}",
+    "subtitleAnyNumber": "Asigna al menos 1 {{unit}} a cada uno que elijas, entre cualquier número de ellos. Restante: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Elegir una mazmorra",
@@ -2291,6 +2316,8 @@
       "fallback": "Toma una decisión"
     },
     "searchSubtitle": "Escribe para buscar en todas las cartas",
+    "secretAgendaTitle": "Nombra una carta en secreto ({{current}} de {{total}})",
+    "secretAgendaSubtitle": "Oculto hasta que pongas esta conspiración boca arriba",
     "searchPlaceholder": "Buscar por nombre...",
     "noCardsFound": "No se encontraron cartas",
     "buttonSubtitle": "Selecciona una opción",
@@ -2389,6 +2416,7 @@
     "cardFallback": "Card",
     "title": "Pon {{name}} en la parte superior o inferior de la biblioteca",
     "top": "Superior de la biblioteca",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Inferior de la biblioteca"
   },
   "mutateMerge": {
@@ -2902,6 +2930,36 @@
       "winner": "{{name}} ha ganado el concurso.",
       "tie": "Empate: no pasa nada.",
       "cancelled": "El concurso se canceló: no pasa nada."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

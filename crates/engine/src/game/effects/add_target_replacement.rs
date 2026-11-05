@@ -414,6 +414,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::Speed { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -476,6 +477,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::ColorsInCommandersColorIdentity
@@ -572,6 +574,11 @@ fn replacement_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<TargetRef> {
+    // CR 608.2b: a bound ParentTarget, including authoritative emptiness,
+    // precedes event and attached-host fallback.
+    if matches!(target, TargetFilter::ParentTarget) {
+        return crate::game::targeting::resolved_targets(ability, target, state);
+    }
     if matches!(target, TargetFilter::Any) {
         if let Some(context) = &ability.context.forwarded_result_context {
             // CR 608.2c + CR 400.7: a forward-result reanimation rider binds to

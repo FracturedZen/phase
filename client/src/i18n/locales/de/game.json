@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Warten",
+    "value": "{{ms}} ms",
+    "description": "Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."
+  },
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -642,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Kommandozone",
+    "conspiracy": "Verschwörung",
+    "conspiracyTitle": "Verschwörung: {{name}}",
+    "turnFaceUp": "{{name}} aufdecken",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
@@ -1552,6 +1561,7 @@
     "effectZone": {
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
+      "titleBottomdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
       "titleHand": "Zurückgeben",
       "titleExile": "Ins Exil schicken",
@@ -1571,6 +1581,12 @@
       "subtitleTopdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie oben auf deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_one": "Wähle {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_other": "Wähle {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_one": "Wähle bis zu {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie unter deine Bibliothek zu legen",
       "subtitleBattlefieldExact_one": "Wähle {{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldExact_other": "Wähle {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldUpTo_one": "Wähle bis zu {{count}} Karte, um sie auf das Schlachtfeld zu legen",
@@ -1616,14 +1632,17 @@
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
+      "labelPutOnBottom": "Nach unten legen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
+      "labelBottom": "Unten ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Wirken ({{selected}}/{{count}})",
       "orderTop": "Oben",
+      "orderBottom": "Unten",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -2116,13 +2135,18 @@
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
     "title": "Wirke einen Zauberspruch kostenlos",
+    "titlePlay": "Karten kostenlos spielen",
     "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
     "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "subtitlePlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
     "remainingAny": "beliebig viele",
     "castNamed": "{{name}} wirken",
+    "playNamed": "{{name}} spielen",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "done": "Fertig",
-    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)",
+    "doneSuffixPlay": "(keine weiteren Karten auf diese Weise spielen)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",
@@ -2205,7 +2229,8 @@
     "unitDamage": "Schaden",
     "unitLife": "Leben",
     "title": "{{total}} {{unit}} verteilen",
-    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}"
+    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}",
+    "subtitleAnyNumber": "Teile jedem gewählten Ziel mindestens 1 {{unit}} zu, beliebig viele davon. Verbleibend: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wähle einen Dungeon",
@@ -2291,6 +2316,8 @@
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
+    "secretAgendaTitle": "Nenne heimlich eine Karte ({{current}} von {{total}})",
+    "secretAgendaSubtitle": "Verborgen, bis du diese Verschwörung aufdeckst",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",
@@ -2389,6 +2416,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2902,6 +2930,36 @@
       "winner": "{{name}} hat den Wettbewerb gewonnen.",
       "tie": "Unentschieden – nichts passiert.",
       "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

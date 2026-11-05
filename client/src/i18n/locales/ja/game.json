@@ -32,6 +32,7 @@
     "shorten": "短縮",
     "decline": "ショートカットを拒否",
     "untilLethal": "ゲームが終了するまで繰り返す。",
+    "withoutEnd": "終わりなく繰り返す。すべてのプレイヤーが受け入れた場合、ゲームは引き分けになる。",
     "fixedCount_one": "最大1回繰り返す。",
     "fixedCount_other": "最大{{count}}回繰り返す。",
     "convokeInfo_one": "各反復で召集のために最大1体のクリーチャーを自動タップします。",
@@ -680,6 +681,9 @@
   },
   "zone": {
     "commandZone": "統率領域",
+    "conspiracy": "謀略",
+    "conspiracyTitle": "謀略: {{name}}",
+    "turnFaceUp": "{{name}}を表向きにする",
     "emblem": "紋章",
     "emblemFallback": "紋章",
     "commander": "統率者",
@@ -1595,6 +1599,7 @@
     "effectZone": {
       "titleSacrifice": "生け贄に捧げる",
       "titleTopdeck": "ライブラリーの上に置く",
+      "titleBottomdeck": "ライブラリーの一番下に置く",
       "titleBattlefield": "戦場に置く",
       "titleHand": "戻す",
       "titleExile": "追放",
@@ -1614,6 +1619,12 @@
       "subtitleTopdeckUpTo_other": "最大{{count}}個のカードをライブラリーの一番上に置く",
       "subtitleTopdeckRange_one": "{{min}}〜{{count}}個のカードをライブラリーの一番上に置く",
       "subtitleTopdeckRange_other": "{{min}}〜{{count}}個のカードをライブラリーの一番上に置く",
+      "subtitleBottomdeckExact_one": "{{count}}個のカードをライブラリーの一番下に置く",
+      "subtitleBottomdeckExact_other": "{{count}}個のカードをライブラリーの一番下に置く",
+      "subtitleBottomdeckUpTo_one": "最大{{count}}個のカードをライブラリーの一番下に置く",
+      "subtitleBottomdeckUpTo_other": "最大{{count}}個のカードをライブラリーの一番下に置く",
+      "subtitleBottomdeckRange_one": "{{min}}〜{{count}}個のカードをライブラリーの一番下に置く",
+      "subtitleBottomdeckRange_other": "{{min}}〜{{count}}個のカードをライブラリーの一番下に置く",
       "subtitleBattlefieldExact_one": "{{count}}個のカードを戦場に置く",
       "subtitleBattlefieldExact_other": "{{count}}個のカードを戦場に置く",
       "subtitleBattlefieldUpTo_one": "最大{{count}}個のカードを戦場に置く",
@@ -1659,14 +1670,17 @@
       "labelSkip": "スキップ",
       "labelDecline": "断る",
       "labelPutOnTop": "一番上に置く（{{order}}）",
+      "labelPutOnBottom": "一番下に置く（{{order}}）",
       "labelConfirm": "確認（{{selected}}/{{count}}）",
       "labelTop": "一番上（{{selected}}/{{count}}）",
+      "labelBottom": "一番下（{{selected}}/{{count}}）",
       "labelPut": "置く（{{selected}}/{{count}}）",
       "labelReturn": "戻す（{{selected}}/{{count}}）",
       "labelExile": "追放（{{selected}}/{{count}}）",
       "labelAttach": "つける（{{selected}}/{{count}}）",
       "labelCast": "唱える（{{selected}}/{{count}}）",
       "orderTop": "一番上",
+      "orderBottom": "一番下",
       "orderSecond": "2番目",
       "orderThird": "3番目",
       "orderFourth": "4番目",
@@ -2159,13 +2173,18 @@
   "freeCastWindow": {
     "eyebrow": "無料で唱える",
     "title": "呪文を無料で唱える",
+    "titlePlay": "カードを無料でプレイする",
     "subtitle": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
     "subtitleNoBudget": "マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
+    "subtitlePlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。残りのマナ総量：{{budget}}。",
+    "subtitleNoBudgetPlay": "プレイする土地か、マナ・コストを支払わずに唱える呪文を選択（残り{{remaining}}回）。",
     "remainingAny": "任意の数",
     "castNamed": "{{name}}を唱える",
+    "playNamed": "{{name}}をプレイする",
     "castSuffix": "（マナ・コストを支払わずに）",
     "done": "完了",
-    "doneSuffix": "（この方法で呪文を唱えるのを停止）"
+    "doneSuffix": "（この方法で呪文を唱えるのを停止）",
+    "doneSuffixPlay": "（この方法でカードをプレイするのを停止）"
   },
   "castingVariant": {
     "eyebrow": "唱える",
@@ -2248,7 +2267,8 @@
     "unitDamage": "ダメージ",
     "unitLife": "ライフ",
     "title": "{{total}}{{unit}}を分配",
-    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
+    "subtitle": "各対象に少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}",
+    "subtitleAnyNumber": "任意の数を選び、選んだそれぞれに少なくとも1{{unit}}を割り当ててください。残り：{{remaining}}"
   },
   "dungeonChoice": {
     "title": "ダンジョンを選択",
@@ -2334,6 +2354,8 @@
       "fallback": "選択する"
     },
     "searchSubtitle": "入力してすべてのカードを検索",
+    "secretAgendaTitle": "カード名を秘密裏に選ぶ（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "この策略を表向きにするまで非公開です",
     "searchPlaceholder": "名前で検索…",
     "noCardsFound": "カードが見つかりません",
     "buttonSubtitle": "選択肢を1つ選択",
@@ -2432,6 +2454,7 @@
     "cardFallback": "カード",
     "title": "{{name}}をライブラリーの一番上か一番下に置く",
     "top": "ライブラリーの一番上",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "ライブラリーの一番下"
   },
   "mutateMerge": {
@@ -2907,6 +2930,36 @@
       "winner": "{{name}}が対決に勝ちました。",
       "tie": "引き分け：何も起こりません。",
       "cancelled": "対決は中止されました：何も起こりません。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

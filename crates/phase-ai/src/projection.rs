@@ -554,6 +554,7 @@ fn resolve_choice(
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::TributeChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. } => {
             // For the actor: pick the "no" option (decline) unless it's the
             // opponent and there's a clearly growth-maximizing yes.
@@ -1270,6 +1271,7 @@ mod tests {
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 
