@@ -110,6 +110,11 @@ fn rashmi_casts_spell_with_strictly_lesser_mana_value_for_free() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, floating_mana(5, ManaType::Blue));
     scenario.add_creature_from_oracle(P0, "Rashmi, Eternities Crafter", 2, 3, RASHMI_ORACLE);
+    // CR 704.5b: cards beneath the revealed one so the cast Divination's
+    // "draw two" never decks the player and ends the game mid-test.
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Filler");
+    }
 
     let shock = scenario
         .add_spell_to_library_top(P0, "Shock", false)
@@ -146,6 +151,13 @@ fn rashmi_casts_spell_with_strictly_lesser_mana_value_for_free() {
         }
     }
 
+    assert!(
+        !matches!(
+            commit.state().waiting_for,
+            engine::types::game_state::WaitingFor::GameOver { .. }
+        ),
+        "scenario must not end the game (CR 704.5b)"
+    );
     assert!(offered, "free cast must be offered for MV 1 < MV 3");
     assert_eq!(
         commit.state().objects.get(&shock).map(|o| o.zone),
@@ -160,6 +172,11 @@ fn rashmi_declining_puts_lesser_mana_value_spell_into_hand() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, floating_mana(5, ManaType::Blue));
     scenario.add_creature_from_oracle(P0, "Rashmi, Eternities Crafter", 2, 3, RASHMI_ORACLE);
+    // CR 704.5b: cards beneath the revealed one so the cast Divination's
+    // "draw two" never decks the player and ends the game mid-test.
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Filler");
+    }
 
     let shock = scenario
         .add_spell_to_library_top(P0, "Shock", false)
@@ -196,6 +213,13 @@ fn rashmi_declining_puts_lesser_mana_value_spell_into_hand() {
         }
     }
 
+    assert!(
+        !matches!(
+            commit.state().waiting_for,
+            engine::types::game_state::WaitingFor::GameOver { .. }
+        ),
+        "scenario must not end the game (CR 704.5b)"
+    );
     assert!(offered, "free cast must be offered for MV 1 < MV 3");
     assert_eq!(
         commit.state().objects.get(&shock).map(|o| o.zone),
@@ -210,6 +234,11 @@ fn rashmi_greater_mana_value_spell_is_not_castable_and_goes_to_hand() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, floating_mana(5, ManaType::Blue));
     scenario.add_creature_from_oracle(P0, "Rashmi, Eternities Crafter", 2, 3, RASHMI_ORACLE);
+    // CR 704.5b: cards beneath the revealed one so the cast Divination's
+    // "draw two" never decks the player and ends the game mid-test.
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Filler");
+    }
 
     let big_spell = scenario
         .add_spell_to_library_top(P0, "Big Spell", false)
@@ -246,6 +275,13 @@ fn rashmi_greater_mana_value_spell_is_not_castable_and_goes_to_hand() {
         }
     }
 
+    assert!(
+        !matches!(
+            commit.state().waiting_for,
+            engine::types::game_state::WaitingFor::GameOver { .. }
+        ),
+        "scenario must not end the game (CR 704.5b)"
+    );
     assert!(!offered, "free cast must NOT be offered for MV 4 > MV 3");
     assert_eq!(
         commit.state().objects.get(&big_spell).map(|o| o.zone),
@@ -260,6 +296,11 @@ fn rashmi_equal_mana_value_spell_is_not_castable_and_goes_to_hand() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, floating_mana(5, ManaType::Blue));
     scenario.add_creature_from_oracle(P0, "Rashmi, Eternities Crafter", 2, 3, RASHMI_ORACLE);
+    // CR 704.5b: cards beneath the revealed one so the cast Divination's
+    // "draw two" never decks the player and ends the game mid-test.
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Filler");
+    }
 
     let equal_spell = scenario
         .add_spell_to_library_top(P0, "Equal Spell", false)
@@ -296,6 +337,13 @@ fn rashmi_equal_mana_value_spell_is_not_castable_and_goes_to_hand() {
         }
     }
 
+    assert!(
+        !matches!(
+            commit.state().waiting_for,
+            engine::types::game_state::WaitingFor::GameOver { .. }
+        ),
+        "scenario must not end the game (CR 704.5b)"
+    );
     assert!(!offered, "free cast must NOT be offered for MV 3 == MV 3");
     assert_eq!(
         commit.state().objects.get(&equal_spell).map(|o| o.zone),
@@ -310,6 +358,11 @@ fn rashmi_revealed_land_cannot_be_cast_and_goes_to_hand() {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, floating_mana(5, ManaType::Blue));
     scenario.add_creature_from_oracle(P0, "Rashmi, Eternities Crafter", 2, 3, RASHMI_ORACLE);
+    // CR 704.5b: cards beneath the revealed one so the cast Divination's
+    // "draw two" never decks the player and ends the game mid-test.
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Library Filler");
+    }
 
     let island = scenario.add_land_to_library_top(P0, "Island").id();
 
@@ -343,6 +396,13 @@ fn rashmi_revealed_land_cannot_be_cast_and_goes_to_hand() {
         }
     }
 
+    assert!(
+        !matches!(
+            commit.state().waiting_for,
+            engine::types::game_state::WaitingFor::GameOver { .. }
+        ),
+        "scenario must not end the game (CR 704.5b)"
+    );
     assert!(!offered, "free cast must NOT be offered for land");
     assert_eq!(
         commit.state().objects.get(&island).map(|o| o.zone),
