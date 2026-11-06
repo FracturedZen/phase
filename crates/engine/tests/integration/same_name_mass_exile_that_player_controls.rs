@@ -182,6 +182,81 @@ fn legions_end_spares_the_casters_same_name_creature() {
     );
 }
 
+/// CR 608.2c + CR 701.13a + CR 201.2a (Issue #10692): Legion's End:
+/// "Exile target creature an opponent controls with mana value 2 or less and all
+/// other creatures that player controls with the same name as that creature. Then
+/// that player reveals their hand and exiles all cards with that name from their
+/// hand and graveyard."
+///
+/// Exiles the targeted creature on battlefield, all other same-named creatures that
+/// player controls on battlefield, reveals their hand, and exiles all cards with
+/// that name from their hand and graveyard.
+/// Spares different-named cards in that player's hand and graveyard, and spares
+/// the caster's same-named cards across all zones.
+#[test]
+fn legions_end_second_sentence_exiles_from_hand_and_graveyard() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Forest", "Forest"]);
+    scenario.with_library_top(P1, &["Forest", "Forest"]);
+
+    // P1 (opponent):
+    // Battlefield: target victim + duplicate twin
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let twin = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    // Hand: copy of Grizzly Bears + unrelated card
+    let hand_bear = scenario
+        .add_creature_to_hand(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let hand_other = scenario.add_card_to_hand(P1, "Lightning Bolt");
+    // Graveyard: copy of Grizzly Bears + unrelated card
+    let grave_bear = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let grave_other = scenario
+        .add_creature_to_graveyard(P1, "Llanowar Elves", 1, 1)
+        .id();
+
+    // P0 (caster):
+    // Battlefield, hand, graveyard copies of Grizzly Bears (must all be spared)
+    let mine_board = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mine_hand = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .id();
+    let mine_grave = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Legion's End", false, LEGIONS_END)
+        .with_mana_cost(free())
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Legion's End must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
+    );
+
+    // Opponent's battlefield copies exiled:
+    outcome.assert_zone(&[victim, twin], Zone::Exile);
+    // Opponent's hand copy exiled:
+    outcome.assert_zone(&[hand_bear], Zone::Exile);
+    // Opponent's graveyard copy exiled:
+    outcome.assert_zone(&[grave_bear], Zone::Exile);
+
+    // Opponent's other cards remain in their zones:
+    outcome.assert_zone(&[hand_other], Zone::Hand);
+    outcome.assert_zone(&[grave_other], Zone::Graveyard);
+
+    // Caster's copies spared in all zones:
+    outcome.assert_zone(&[mine_board], Zone::Battlefield);
+    outcome.assert_zone(&[mine_hand], Zone::Hand);
+    outcome.assert_zone(&[mine_grave], Zone::Graveyard);
+}
+
 /// CR 610.3: Deputy of Detention's "until this creature leaves the
 /// battlefield" covers the whole exile instruction, so the same-name mass
 /// exile returns with the target when Deputy leaves.

@@ -22447,9 +22447,11 @@ fn try_parse_verb_and_target<'a>(
         // "graveyard" conjunct. Claiming the whole clause here (empty remainder)
         // keeps it single — the actual `ChangeZoneAll { InAnyZone }` is built by
         // `parse_exile_ast`, which mirrors this recognizer.
-        if let Some((type_filters, owner, zones)) =
-            imperative::try_parse_multi_zone_player_exile(rest_lower)
+        if let Some((type_filters, properties, owner, zones)) =
+            imperative::try_parse_multi_zone_player_exile(rest_lower, ctx)
         {
+            let mut props = vec![crate::types::ability::FilterProp::InAnyZone { zones }];
+            props.extend(properties);
             return Some((
                 TargetedImperativeAst::ZoneCounterProxy(Box::new(
                     ZoneCounterImperativeAst::Exile {
@@ -22457,9 +22459,7 @@ fn try_parse_verb_and_target<'a>(
                         target: TargetFilter::Typed(crate::types::ability::TypedFilter {
                             type_filters,
                             controller: Some(owner),
-                            properties: vec![crate::types::ability::FilterProp::InAnyZone {
-                                zones,
-                            }],
+                            properties: props,
                         }),
                         all: true,
                         enter_with_counters: vec![],
@@ -31037,6 +31037,7 @@ fn extract_player_anchor(
         } => (filter, true),
         Effect::Shuffle { target } => (target, false),
         Effect::ChangeZoneAll { target, .. } => (target, false),
+        Effect::RevealHand { target, .. } => (target, false),
         _ => return None,
     };
     // CR 608.2c + CR 108.3: Multi-zone name-hate search clauses lower to
@@ -31413,6 +31414,22 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter, draw_inherit
                 && *target == TargetFilter::Controller =>
         {
             *target = anchor.clone();
+        }
+        Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(typed),
+            ..
+        } if matches!(anchor, TargetFilter::ParentTargetController)
+            && typed.controller == Some(ControllerRef::TargetPlayer) =>
+        {
+            typed.controller = Some(ControllerRef::ParentTargetController);
+        }
+        Effect::ChangeZoneAll {
+            target: TargetFilter::Typed(typed),
+            ..
+        } if matches!(anchor, TargetFilter::ParentTargetOwner)
+            && typed.controller == Some(ControllerRef::TargetPlayer) =>
+        {
+            typed.controller = Some(ControllerRef::ParentTargetOwner);
         }
         // CR 608.2c: a trailing "…, then draws …" continuation is a separate
         // chunk with no subject of its own, so it defaults its target to the

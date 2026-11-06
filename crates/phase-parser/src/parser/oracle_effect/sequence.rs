@@ -3542,6 +3542,11 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // cluster over and trip the `Choice<...>` trait-bound check at compile
     // time.
     .or(value((), tag("puts ")))
+    // CR 701.13a + CR 608.2c: third-person mass exile conjugation (Legion's End:
+    // "Then that player reveals their hand and exiles all cards with that name...").
+    // Must NOT match "exiles it" / "exiles them" (Gonti look-and-exile fusion / resolution choice).
+    .or(value((), tag("exiles all ")))
+    .or(value((), tag("exiles each ")))
     // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
     // not noun-phrase continuations. Keep the matcher narrow so name-based
     // chains like "put counters on it and attach Fractal Harness to it" stay

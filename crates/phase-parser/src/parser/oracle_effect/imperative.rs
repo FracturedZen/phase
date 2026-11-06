@@ -3302,10 +3302,13 @@ fn parse_zone_word(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
 }
 
 /// Parse output of the multi-zone player-exile recognizer: remaining input paired
-/// with the (optional) card-type restriction, the owner axis, and the origin-zone
-/// union. Named so the inner `nom` combinator signature stays under
-/// `clippy::type_complexity`.
-type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, Vec<Zone>));
+/// with the (optional) card-type restriction, (optional) filter properties (such
+/// as same-name restriction), the owner axis, and the origin-zone union. Named
+/// so the inner `nom` combinator signature stays under `clippy::type_complexity`.
+type MultiZonePlayerExileParse<'a> = (
+    &'a str,
+    (Vec<TypeFilter>, Vec<FilterProp>, ControllerRef, Vec<Zone>),
+);
 
 /// CR 508.1d + CR 506.3: result of the defender-bound "attack(s) `<defender>`
 /// [window] if able" parse — the required defender plus the window it states for
@@ -3372,62 +3375,151 @@ fn operand_dropped_player_possessive_source(rest_lower: &str, target: &TargetFil
 /// owner possessive is parsed into a `ControllerRef` here — the owner scope the
 /// filter carries, so the exile is confined to that player's zones.
 ///
+/// CR 201.2a + CR 608.2c + CR 701.13a: Parse name restriction qualifier from
+/// multi-zone exile head noun phrase ("cards with that name", "nonland cards with
+/// that name", "cards with the same name as that creature").
+fn parse_multi_zone_head_name_restriction(head: &str) -> (&str, Option<FilterProp>) {
+    let Ok((with_tail, prefix)) = take_until::<_, _, OracleError<'_>>(" with ").parse(head) else {
+        return (head, None);
+    };
+    let with_tail = with_tail.trim_start();
+    let suffix_parse: Result<(&str, FilterProp), nom::Err<OracleError<'_>>> = alt((
+        value(
+            FilterProp::SameNameAsParentTarget,
+            tag::<_, _, OracleError<'_>>("with that name"),
+        ),
+        value(
+            FilterProp::SameNameAsParentTarget,
+            (
+                tag("with the same name as that "),
+                alt((
+                    tag("creature"),
+                    tag("permanent"),
+                    tag("planeswalker"),
+                    tag("artifact"),
+                    tag("enchantment"),
+                    tag("land"),
+                    tag("spell"),
+                    tag("card"),
+                )),
+            ),
+        ),
+    ))
+    .parse(with_tail);
+    if let Ok((rem, prop)) = suffix_parse {
+        if rem.trim().is_empty() {
+            return (prefix.trim(), Some(prop));
+        }
+    }
+    (head, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultiZoneOwnerPhrase {
+    ItsOwner,
+    ItsController,
+    Anaphoric,
+    TargetPlayer,
+    Opponent,
+    You,
+}
+
 /// Returns the card-type restriction (empty for the bare form — a semantic no-op
-/// preserving the pre-existing representation), the owner axis, and the origin
-/// zones (always `>= 2`). Declines (`None`) on a single zone so the generic
-/// single-origin `exile all` path keeps handling those, and on any trailing
-/// fragment so nothing is silently dropped.
+/// preserving the pre-existing representation), the filter properties (such as
+/// `SameNameAsParentTarget`), the owner axis, and the origin zones (always `>= 2`).
+/// Declines (`None`) on a single zone so the generic single-origin `exile all` path
+/// keeps handling those, and on any trailing fragment so nothing is silently dropped.
 pub(super) fn try_parse_multi_zone_player_exile(
     rest_lower: &str,
-) -> Option<(Vec<TypeFilter>, ControllerRef, Vec<Zone>)> {
-    fn run(input: &str) -> Result<MultiZonePlayerExileParse<'_>, nom::Err<OracleError<'_>>> {
+    ctx: &ParseContext,
+) -> Option<(Vec<TypeFilter>, Vec<FilterProp>, ControllerRef, Vec<Zone>)> {
+    fn run<'a>(
+        input: &'a str,
+        ctx: &ParseContext,
+    ) -> Result<MultiZonePlayerExileParse<'a>, nom::Err<OracleError<'a>>> {
         // CR 108.2 vs CR 205.2a: bare "card(s) from" is tried first so its filter
         // stays type-restriction-free (byte-identical to before); only a genuine
         // "<types> cards from" leading phrase takes the type-phrase branch.
-        let (input, type_filters) = if let Ok((after, _)) = alt((
+        let (input, (type_filters, properties)) = if let Ok((after, _)) = alt((
             tag::<_, _, OracleError<'_>>("cards from "),
             tag("card from "),
         ))
         .parse(input)
         {
-            (after, Vec::new())
+            (after, (Vec::new(), Vec::new()))
         } else {
             // Type-qualified head "<types> card(s) from <owner> …" (CR 205.2a +
-            // CR 205.3a). Delimit the head noun phrase at the " from " that
-            // introduces the owner possessive, parse it as a full type phrase, and
+            // CR 205.3a) or same-name head "cards with that name from <owner> …"
+            // (CR 201.2a + CR 608.2c). Delimit the head noun phrase at the " from "
+            // that introduces the owner possessive, parse it as a full type phrase, and
             // require it to be FULLY consumed — a malformed or non-type head (e.g.
             // "creatures except X from …") leaves a remainder and is declined, so
             // only a clean "<type restriction> card(s)" head is claimed. The
             // owner-possessive + 2-zone-union structure parsed below is the rest of
             // the discriminator (CR 108.2 — cards in a player's zones).
             let (after_head, head) = take_until::<_, _, OracleError<'_>>(" from ").parse(input)?;
-            let (tf, head_rem) = parse_type_phrase_folding(head);
-            let TargetFilter::Typed(tf) = tf else {
-                return Err(oracle_err(head));
+            let (type_phrase, prop) = parse_multi_zone_head_name_restriction(head);
+            let type_filters = if type_phrase == "cards" || type_phrase == "card" {
+                Vec::new()
+            } else {
+                let (tf, head_rem) = parse_type_phrase_folding(type_phrase);
+                let TargetFilter::Typed(tf) = tf else {
+                    return Err(oracle_err(type_phrase));
+                };
+                if !head_rem.trim().is_empty() {
+                    return Err(oracle_err(head_rem));
+                }
+                tf.type_filters
             };
-            if !head_rem.trim().is_empty() {
-                return Err(oracle_err(head_rem));
-            }
             let (input, _) = tag::<_, _, OracleError<'_>>(" from ").parse(after_head)?;
-            (input, tf.type_filters)
+            let properties = prop.into_iter().collect();
+            (input, (type_filters, properties))
         };
-        let (input, owner) = alt((
+        let (input, owner_phrase) = alt((
             value(
-                ControllerRef::ParentTargetOwner,
+                MultiZoneOwnerPhrase::ItsOwner,
                 tag::<_, _, OracleError<'_>>("its owner's "),
             ),
             value(
-                ControllerRef::ParentTargetController,
+                MultiZoneOwnerPhrase::ItsController,
                 tag("its controller's "),
             ),
-            value(ControllerRef::TargetPlayer, tag("their ")),
-            value(ControllerRef::TargetPlayer, tag("that player's ")),
-            value(ControllerRef::TargetPlayer, tag("target player's ")),
-            value(ControllerRef::Opponent, tag("target opponent's ")),
-            value(ControllerRef::Opponent, tag("an opponent's ")),
-            value(ControllerRef::You, tag("your ")),
+            value(MultiZoneOwnerPhrase::Anaphoric, tag("their ")),
+            value(MultiZoneOwnerPhrase::Anaphoric, tag("that player's ")),
+            value(MultiZoneOwnerPhrase::TargetPlayer, tag("target player's ")),
+            value(MultiZoneOwnerPhrase::Opponent, tag("target opponent's ")),
+            value(MultiZoneOwnerPhrase::Opponent, tag("an opponent's ")),
+            value(MultiZoneOwnerPhrase::You, tag("your ")),
         ))
         .parse(input)?;
+        let owner = match owner_phrase {
+            MultiZoneOwnerPhrase::ItsOwner => ControllerRef::ParentTargetOwner,
+            MultiZoneOwnerPhrase::ItsController => ControllerRef::ParentTargetController,
+            MultiZoneOwnerPhrase::TargetPlayer => ControllerRef::TargetPlayer,
+            MultiZoneOwnerPhrase::Opponent => ControllerRef::Opponent,
+            MultiZoneOwnerPhrase::You => ControllerRef::You,
+            MultiZoneOwnerPhrase::Anaphoric => {
+                // CR 608.2c + CR 109.4: If the context established relative player scope to
+                // the parent target's controller/owner, or if the chain declared an object target
+                // (e.g. Legion's End targeting a creature), "their" / "that player's" refers to
+                // that player rather than declaring a new target player requirement.
+                if ctx.relative_player_scope == Some(ControllerRef::ParentTargetController)
+                    || (ctx.chain_declared_object_target.is_some()
+                        && !ctx.chain_prior_targeted_player)
+                    || matches!(
+                        ctx.chain_prior_hand_reveal_target,
+                        Some(TargetFilter::ParentTargetController)
+                    )
+                    || properties.contains(&FilterProp::SameNameAsParentTarget)
+                {
+                    ControllerRef::ParentTargetController
+                } else if ctx.relative_player_scope == Some(ControllerRef::ParentTargetOwner) {
+                    ControllerRef::ParentTargetOwner
+                } else {
+                    ControllerRef::TargetPlayer
+                }
+            }
+        };
         let (mut input, first) = parse_zone_word(input)?;
         let mut zones = vec![first];
         // Additional zones joined by " and " / ", and " / ", " (oxford comma).
@@ -3448,9 +3540,9 @@ pub(super) fn try_parse_multi_zone_player_exile(
             }
             input = after_zone;
         }
-        Ok((input, (type_filters, owner, zones)))
+        Ok((input, (type_filters, properties, owner, zones)))
     }
-    let (rem, (type_filters, owner, zones)) = run(rest_lower).ok()?;
+    let (rem, (type_filters, properties, owner, zones)) = run(rest_lower, ctx).ok()?;
     if zones.len() < 2 {
         return None;
     }
@@ -3460,7 +3552,7 @@ pub(super) fn try_parse_multi_zone_player_exile(
     if !tail.is_empty() {
         return None;
     }
-    Some((type_filters, owner, zones))
+    Some((type_filters, properties, owner, zones))
 }
 
 /// CR 406.2 + CR 404.1 + CR 108.2 + CR 608.2f: "exile all `<permanent types>` and
@@ -11926,13 +12018,17 @@ pub(super) fn parse_exile_ast(
         // orphans the trailing " and <zone>" as an unsupported child clause. The
         // zone union rides on the target filter via `InAnyZone`; `origin: None`
         // defers to it, matching the `MultiZoneSameNameExile` lowering.
-        if let Some((type_filters, owner, zones)) = try_parse_multi_zone_player_exile(rest_lower) {
+        if let Some((type_filters, properties, owner, zones)) =
+            try_parse_multi_zone_player_exile(rest_lower, ctx)
+        {
+            let mut props = vec![crate::types::ability::FilterProp::InAnyZone { zones }];
+            props.extend(properties);
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: None,
                 target: TargetFilter::Typed(TypedFilter {
                     type_filters,
                     controller: Some(owner),
-                    properties: vec![crate::types::ability::FilterProp::InAnyZone { zones }],
+                    properties: props,
                 }),
                 all: true,
                 enter_with_counters: vec![],

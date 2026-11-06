@@ -15598,6 +15598,7 @@ fn show_and_tell_each_player_may_put_is_optional_per_player() {
             &[],
         );
     let ability = parsed.abilities.first().expect("spell ability");
+    eprintln!("ability: {:#?}", ability);
     assert!(ability.optional, "Show and Tell must be optional");
     assert_eq!(ability.player_scope, Some(PlayerFilter::All));
     assert!(matches!(&*ability.effect, Effect::ChangeZone { .. }));
@@ -52875,9 +52876,11 @@ fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     // Bare "cards" form (CR 108.2): no type restriction (empty type_filters).
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
-            "cards from target player's hand and graveyard."
+            "cards from target player's hand and graveyard.",
+            &crate::parser::oracle_ir::context::ParseContext::default()
         ),
         Some((
+            vec![],
             vec![],
             ControllerRef::TargetPlayer,
             vec![Zone::Hand, Zone::Graveyard]
@@ -52887,7 +52890,8 @@ fn multi_zone_player_exile_matcher_recognizes_zone_union() {
     // AND the owner scope AND the zone union (Thought Distortion).
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
-            "noncreature, nonland cards from that player's hand and graveyard."
+            "noncreature, nonland cards from that player's hand and graveyard.",
+            &crate::parser::oracle_ir::context::ParseContext::default()
         ),
         Some((
             vec![
@@ -52895,14 +52899,29 @@ fn multi_zone_player_exile_matcher_recognizes_zone_union() {
                 TypeFilter::Non(Box::new(TypeFilter::Creature)),
                 TypeFilter::Non(Box::new(TypeFilter::Land)),
             ],
+            vec![],
             ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        ))
+    );
+    // Same-name form (CR 201.2a + CR 608.2c): carries the SameNameAsParentTarget prop (Legion's End).
+    assert_eq!(
+        super::imperative::try_parse_multi_zone_player_exile(
+            "cards with that name from their hand and graveyard.",
+            &crate::parser::oracle_ir::context::ParseContext::default()
+        ),
+        Some((
+            vec![],
+            vec![FilterProp::SameNameAsParentTarget],
+            ControllerRef::ParentTargetController,
             vec![Zone::Hand, Zone::Graveyard]
         ))
     );
     // Single zone → declined; the generic single-origin path owns it.
     assert_eq!(
         super::imperative::try_parse_multi_zone_player_exile(
-            "cards from target player's graveyard."
+            "cards from target player's graveyard.",
+            &crate::parser::oracle_ir::context::ParseContext::default()
         ),
         None
     );
@@ -97165,5 +97184,77 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
             matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
         }),
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
+}
+
+/// Issue #10692: Legion's End:
+/// "Exile target creature an opponent controls with mana value 2 or less and
+/// all other creatures that player controls with the same name as that creature.
+/// Then that player reveals their hand and exiles all cards with that name from
+/// their hand and graveyard."
+/// The second sentence must reveal the player's hand and exile all cards with
+/// that name from their hand and graveyard.
+#[test]
+fn legions_end_second_sentence_exiles_from_hand_and_graveyard() {
+    let text = "Exile target creature an opponent controls with mana value 2 or less and all other creatures that player controls with the same name as that creature. Then that player reveals their hand and exiles all cards with that name from their hand and graveyard.";
+    let parsed =
+        crate::parser::parse_oracle_text(text, "Legion's End", &[], &["Sorcery".to_string()], &[]);
+    let ability = parsed.abilities.first().expect("spell ability");
+    // root: ChangeZone (target creature)
+    assert!(matches!(
+        &*ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    // sub 1: ChangeZoneAll (same name on battlefield)
+    let sub1 = ability.sub_ability.as_ref().expect("sub1");
+    assert!(matches!(
+        &*sub1.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    // sub 2: RevealHand
+    let sub2 = sub1.sub_ability.as_ref().expect("sub2 reveal hand");
+    assert!(
+        matches!(&*sub2.effect, Effect::RevealHand { .. }),
+        "sub2 must be RevealHand, got {:?}",
+        sub2.effect
+    );
+    // sub 3: ChangeZoneAll exiling from hand and graveyard with SameNameAsParentTarget
+    let sub3 = sub2
+        .sub_ability
+        .as_ref()
+        .expect("sub3 exile from hand and graveyard");
+    let Effect::ChangeZoneAll {
+        origin,
+        destination,
+        target: TargetFilter::Typed(typed),
+        ..
+    } = &*sub3.effect
+    else {
+        panic!("sub3 must be ChangeZoneAll, got {:?}", sub3.effect);
+    };
+    assert_eq!(*origin, None);
+    assert_eq!(*destination, Zone::Exile);
+    assert_eq!(
+        typed.controller,
+        Some(ControllerRef::ParentTargetController),
+        "sub3 must bind parent target controller"
+    );
+    assert!(
+        typed
+            .properties
+            .contains(&FilterProp::SameNameAsParentTarget),
+        "sub3 must restrict to same name as parent target, got {:?}",
+        typed.properties
+    );
+    assert!(
+        typed.properties.iter().any(|p| matches!(p, FilterProp::InAnyZone { zones } if zones.contains(&Zone::Hand) && zones.contains(&Zone::Graveyard))),
+        "sub3 must exile from both hand and graveyard, got {:?}",
+        typed.properties
     );
 }
