@@ -41646,6 +41646,10 @@ pub struct ReplacementDefinition {
     /// E.g., `Some(Graveyard)` means "only replace zone changes TO the graveyard."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_zone: Option<Zone>,
+    /// CR 614.6: For Moved replacements, restricts which origin zone this replacement matches.
+    /// E.g., `Some(Battlefield)` means "only replace zone changes FROM the battlefield."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_zone: Option<Zone>,
     /// CR 113.6b: the zones this replacement functions FROM — "an ability that
     /// states which zones it functions in functions only from those zones."
     ///
@@ -42038,6 +42042,7 @@ impl ReplacementDefinition {
             description: None,
             condition: None,
             destination_zone: None,
+            origin_zone: None,
             active_zones: vec![],
             damage_modification: None,
             damage_source_filter: None,
@@ -42118,6 +42123,11 @@ impl ReplacementDefinition {
 
     pub fn destination_zone(mut self, zone: Zone) -> Self {
         self.destination_zone = Some(zone);
+        self
+    }
+
+    pub fn origin_zone(mut self, zone: Zone) -> Self {
+        self.origin_zone = Some(zone);
         self
     }
 

@@ -35344,6 +35344,52 @@ fn fixed_mana_value_parity_conjunct_reaches_every_filter_call_site() {
     }
 }
 
+#[test]
+fn personal_decoy_parses_etb_counters_ltb_exile_and_static_cant_be_attacked() {
+    let oracle = concat!(
+        "Personal Decoy enters with a number of loyalty counters on it equal to your life total. ",
+        "If it would leave the battlefield, exile it instead of putting it anywhere else. ",
+        "You can't be attacked.\n",
+        "+1: You gain 1 life.\n",
+        "\u{2212}4: Draw a card."
+    );
+    let parsed = parse_oracle_text(
+        oracle,
+        "Personal Decoy",
+        &[],
+        &["Planeswalker".to_string()],
+        &[],
+    );
+    // 1. Two replacements: ETB loyalty counters, and LTB exile redirect.
+    assert_eq!(parsed.replacements.len(), 2, "{:#?}", parsed.replacements);
+    assert_eq!(
+        parsed.replacements[0].event,
+        crate::types::ReplacementEvent::Moved
+    );
+    assert_eq!(
+        parsed.replacements[1].event,
+        crate::types::ReplacementEvent::Moved
+    );
+    // 2. One static: CantAttack defending Player.
+    assert_eq!(parsed.statics.len(), 1, "{:#?}", parsed.statics);
+    assert_eq!(
+        parsed.statics[0].mode,
+        crate::types::statics::StaticMode::CantAttack
+    );
+    assert_eq!(
+        parsed.statics[0].attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::Player)
+    );
+    // 3. Two loyalty abilities (+1, -4).
+    assert_eq!(parsed.abilities.len(), 2, "{:#?}", parsed.abilities);
+    // 4. No unimplemented gaps or warnings.
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:#?}",
+        parsed.parse_warnings
+    );
+}
+
 /// The printed Oracle text this test file asserts against, kept beside the
 /// assertions so a reader can see what is being parsed. Held here rather than
 /// read from the card-data export on purpose: the export is GENERATED and may

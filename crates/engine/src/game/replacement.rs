@@ -7461,6 +7461,16 @@ fn apply_state_level_gates(
             return false;
         }
     }
+    // CR 614.6: Zone-change replacements may be scoped to a specific origin.
+    if let Some(ref orig_zone) = repl_def.origin_zone {
+        let matches_orig = match event {
+            ProposedEvent::ZoneChange { from, .. } => from == orig_zone,
+            _ => false,
+        };
+        if !matches_orig {
+            return false;
+        }
+    }
     // CR 614.1d: Evaluate the replacement condition (e.g. EnteredFromZone).
     if let Some(ref cond) = repl_def.condition {
         if !evaluate_replacement_condition(
@@ -7914,6 +7924,16 @@ fn object_replacement_candidate_applies(
             _ => false,
         };
         if !matches_dest {
+            return false;
+        }
+    }
+    if let Some(ref orig_zone) = repl_def.origin_zone {
+        // CR 614.6: only zone-change-style events can match an origin scope.
+        let matches_orig = match event {
+            ProposedEvent::ZoneChange { from, .. } => from == orig_zone,
+            _ => false,
+        };
+        if !matches_orig {
             return false;
         }
     }

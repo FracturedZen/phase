@@ -5922,6 +5922,7 @@ fn floating_replacement_can_name_object(
         choice_authority: _,
         description: _,
         destination_zone: _,
+        origin_zone: _,
         active_zones: _,
         damage_target_filter: _,
         target_recipient_incarnation: _,

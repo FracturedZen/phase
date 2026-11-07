@@ -3733,6 +3733,7 @@ fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
 /// It is `pub` because `phase-engine`'s unearth synthesis calls it across the crate boundary.
 pub fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
+        .origin_zone(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
@@ -3752,6 +3753,36 @@ pub fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
                 enters_modified_if: None,
             },
         ))
+}
+
+/// CR 614.1a + CR 614.6: Recognize "If it/this permanent/~ would leave the battlefield, exile it instead [of putting it anywhere else]."
+/// as a printed static replacement effect.
+pub(crate) fn parse_leave_battlefield_exile_replacement_definition(
+    lower: &str,
+) -> Option<ReplacementDefinition> {
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
+        .parse(lower)
+        .ok()?;
+    let (rest, subject) = parse_leave_battlefield_rider_subject(rest).ok()?;
+    if subject.is_tracked_set_plural() {
+        return None;
+    }
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would leave the battlefield, ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile ").parse(rest).ok()?;
+    let (rest, _) = parse_leave_battlefield_rider_ref(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = opt((
+        tag::<_, _, OracleError<'_>>(" of putting "),
+        parse_leave_battlefield_rider_ref,
+        tag::<_, _, OracleError<'_>>(" anywhere else"),
+    ))
+    .parse(rest)
+    .ok()?;
+    parse_optional_period_and_end(rest)?;
+
+    Some(leave_battlefield_exile_replacement())
 }
 
 /// CR 614.1a + CR 614.6: Detect "If it would leave the battlefield, exile it

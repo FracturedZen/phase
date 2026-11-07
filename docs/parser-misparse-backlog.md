@@ -3651,7 +3651,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Patchplate Resolute
 - Penance
 - Pentagram of the Ages
-- Personal Decoy
 - Pharika's Spawn
 - Phyrexian Vindicator
 - Pilgrim of Justice

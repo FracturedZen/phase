@@ -324,6 +324,62 @@ fn parse_replacement_sentence_sequence_ir(
     Ok(replacements)
 }
 
+enum PermanentNodeIr {
+    Replacement(ReplacementIr),
+    Static(StaticIr),
+}
+
+/// CR 614.1c + CR 604.1: A single Oracle paragraph on a permanent can contain
+/// multiple independent sentences that are replacement effects (e.g. ETB counters,
+/// LTB exile redirect) and/or static abilities (e.g. "You can't be attacked." — Personal Decoy).
+/// Parse each sentence as an independent permanent node when every sentence in the line is recognized.
+fn parse_permanent_sentence_sequence_ir(
+    line: &str,
+    card_name: &str,
+) -> Result<Option<Vec<PermanentNodeIr>>, EntersWithGap> {
+    let Ok((_, sentences)) = parse_replacement_sentences(line) else {
+        return Ok(None);
+    };
+    if sentences.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut nodes = Vec::with_capacity(sentences.len());
+    for sentence in sentences {
+        let sent_lower = sentence.to_lowercase();
+        if is_replacement_pattern(&sent_lower) {
+            match parse_replacement_line_ir(sentence, card_name) {
+                Some(ir) => nodes.push(PermanentNodeIr::Replacement(ir)),
+                None if enters_with_fails_closed(sentence, card_name)
+                    == Some(EntersWithGap::Clause) =>
+                {
+                    return Err(EntersWithGap::Clause);
+                }
+                None => return Ok(None),
+            }
+        } else if is_static_pattern(&sent_lower) {
+            let static_sent = normalize_self_refs_for_static(sentence, card_name);
+            let defs = parse_static_line_with_graveyard_keyword_continuation(
+                &static_sent,
+                Some(sentence),
+                Some(card_name),
+            );
+            if defs.is_empty() {
+                return Ok(None);
+            }
+            for def in defs {
+                nodes.push(PermanentNodeIr::Static(StaticIr::from_definition(
+                    &static_sent,
+                    def,
+                )));
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(Some(nodes))
+}
+
 /// Split a replacement line into its period-terminated sentences, requiring the
 /// line to be fully consumed (a trailing unterminated fragment rejects the whole
 /// line, so the multi-sentence replacement path never sees a partial tail).
@@ -8160,17 +8216,28 @@ fn parse_normalized_oracle_ir(
             // "As [this permanent] enters ...", or "[This permanent] enters as ..."
             // are replacement effects.
             // CR 614.12: Some replacement effects modify how a permanent enters the battlefield.
-            // A single Oracle paragraph can contain multiple independent ETB
-            // replacement sentences. Parse each replacement sentence instead of
-            // letting the first successful parser drop sibling modifiers.
-            match parse_replacement_sentence_sequence_ir(&line, card_name) {
-                Ok(Some(replacement_irs)) => {
-                    for replacement_ir in replacement_irs {
-                        emitter.emit_at(
-                            item_line,
-                            OracleNodeIr::Replacement(replacement_ir),
-                            OuterRoute::Replacement,
-                        );
+            // A single Oracle paragraph on a permanent can contain multiple independent
+            // replacement sentences and/or static ability sentences (e.g. Personal Decoy).
+            // Parse each sentence instead of letting the first successful parser drop sibling modifiers.
+            match parse_permanent_sentence_sequence_ir(&line, card_name) {
+                Ok(Some(nodes)) => {
+                    for node in nodes {
+                        match node {
+                            PermanentNodeIr::Replacement(replacement_ir) => {
+                                emitter.emit_at(
+                                    item_line,
+                                    OracleNodeIr::Replacement(replacement_ir),
+                                    OuterRoute::Replacement,
+                                );
+                            }
+                            PermanentNodeIr::Static(static_ir) => {
+                                emitter.emit_at(
+                                    item_line,
+                                    OracleNodeIr::Static(static_ir),
+                                    OuterRoute::Static,
+                                );
+                            }
+                        }
                     }
                     i += 1;
                     continue;
@@ -8200,14 +8267,25 @@ fn parse_normalized_oracle_ir(
             // exactly as the unprefixed Blind Obedience / Authority of the
             // Consuls lines do.
             if let Some(effect_text) = strip_ability_word(&line) {
-                match parse_replacement_sentence_sequence_ir(&effect_text, card_name) {
-                    Ok(Some(replacement_irs)) => {
-                        for replacement_ir in replacement_irs {
-                            emitter.emit_at(
-                                item_line,
-                                OracleNodeIr::Replacement(replacement_ir),
-                                OuterRoute::Replacement,
-                            );
+                match parse_permanent_sentence_sequence_ir(&effect_text, card_name) {
+                    Ok(Some(nodes)) => {
+                        for node in nodes {
+                            match node {
+                                PermanentNodeIr::Replacement(replacement_ir) => {
+                                    emitter.emit_at(
+                                        item_line,
+                                        OracleNodeIr::Replacement(replacement_ir),
+                                        OuterRoute::Replacement,
+                                    );
+                                }
+                                PermanentNodeIr::Static(static_ir) => {
+                                    emitter.emit_at(
+                                        item_line,
+                                        OracleNodeIr::Static(static_ir),
+                                        OuterRoute::Static,
+                                    );
+                                }
+                            }
                         }
                         i += 1;
                         continue;

@@ -9861,6 +9861,7 @@ fn replacement_matchers_read_filter_population(
         description: _,
         condition,
         destination_zone: _,
+        origin_zone: _,
         active_zones: _,
         damage_modification,
         damage_source_filter,

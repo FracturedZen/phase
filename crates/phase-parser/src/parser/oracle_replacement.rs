@@ -143,6 +143,17 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
         return Some(definition);
     }
 
+    // --- "If ~ would leave the battlefield, exile it instead [of putting it anywhere else]." ---
+    // CR 614.1 + CR 614.6: Printed leaves-the-battlefield exile redirect on a permanent (Personal Decoy).
+    if let Some(mut def) =
+        crate::parser::oracle_effect::parse_leave_battlefield_exile_replacement_definition(
+            &norm_lower,
+        )
+    {
+        def.description = Some(text.to_string());
+        return Some(def);
+    }
+
     // --- Krark's Thumb: "If you would flip a coin, instead flip two coins and
     //     ignore one." (CR 705.1 + CR 614.1a) ---
     // Checked early so the generic "instead" / event-substitution handlers below

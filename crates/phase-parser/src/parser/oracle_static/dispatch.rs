@@ -2559,6 +2559,11 @@ pub(crate) fn parse_static_line_inner(
         return Some(def);
     }
 
+    // CR 508.1 / CR 508.1c: "You can't be attacked." (Personal Decoy)
+    if let Some(def) = parse_cant_be_attacked_static(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 702.122a / 702.171a / 702.184c: crew/saddle/station power-contribution
     // modifier (Reckoner Bankbuster, Giant Ox, Stoic Star-Captain).
     if let Some(def) = parse_crew_contribution_static(&text) {
@@ -4317,6 +4322,20 @@ fn parse_counters_cant_be_removed_static(
             .affected(filter)
             .description(text.to_string()),
     )
+}
+
+/// CR 508.1 / CR 508.1c: Parse "You can't be attacked." (Personal Decoy)
+/// A static restriction that prevents declaring any creature as an attacker against you (AttackTarget::Player).
+fn parse_cant_be_attacked_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    let trimmed = tp.lower.trim().trim_end_matches('.');
+    if trimmed == "you can't be attacked" {
+        return Some(
+            StaticDefinition::new(StaticMode::CantAttack)
+                .attack_defended(Some(crate::types::triggers::AttackTargetFilter::Player))
+                .description(text.to_string()),
+        );
+    }
+    None
 }
 
 /// Structural-marker site: "your opponents and/or planeswalkers they control"

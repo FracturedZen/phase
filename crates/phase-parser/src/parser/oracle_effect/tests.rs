@@ -68756,6 +68756,7 @@ fn leave_battlefield_rider_standalone_refs_unchanged_6566() {
 #[test]
 fn leave_battlefield_exile_replacement_matches_6538_shape() {
     let base = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .origin_zone(Zone::Battlefield)
         .valid_card(TargetFilter::SelfRef)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,

@@ -6909,6 +6909,7 @@ fn replacement_definition_axes(
         triggering_spell: _,
         description: _,
         destination_zone: _,
+        origin_zone: _,
         active_zones: _,
         damage_target_filter: _,
         target_recipient_incarnation: _,
