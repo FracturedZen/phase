@@ -129,6 +129,14 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     // Routes that consult `enters_with_fails_closed` record the line as the
     // `enters_with_clause` gap. An arm that reads every sentence of such a line
     // must dispatch above this gate.
+    if let Some(mut defs) =
+        parse_as_enters_may_cost_enters_with(&norm_lower, &normalized, &text, card_name)
+    {
+        if !defs.is_empty() {
+            return Some(defs.remove(0));
+        }
+    }
+
     if is_line_owned_enters_with_clause(&norm_lower) {
         return None;
     }
@@ -1412,8 +1420,156 @@ fn parse_as_enters_exile_from_graveyards(
 }
 
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
-fn replace_self_refs(text: &str, card_name: &str) -> String {
+pub(crate) fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
+}
+
+/// CR 614.1c + CR 614.12a: "As [this creature|~] enters, you may <cost>. If you do [or if you control <filter>], [this creature|it|~] enters with <counters>."
+/// Handles separate-sentence enters-with gated by an as-enters may-cost choice.
+/// Cards: Rescuer Sphinx, Devouring Hellion, Ulamog's Despoiler, Dragon's Disciple.
+pub(crate) fn parse_as_enters_may_cost_enters_with(
+    norm_lower: &str,
+    _normalized: &str,
+    text: &str,
+    _card_name: &str,
+) -> Option<Vec<ReplacementDefinition>> {
+    let units: Vec<&str> = nom_primitives::split_sentence_units(norm_lower)
+        .into_iter()
+        .map(str::trim)
+        .filter(|u| u.chars().any(char::is_alphanumeric))
+        .collect();
+    if units.len() != 2 {
+        return None;
+    }
+
+    let u0 = units[0].trim_end_matches('.');
+    let cost_text = if let Some(rest) = u0.strip_prefix("as this creature enters, you may ") {
+        rest
+    } else if let Some(rest) = u0.strip_prefix("as ~ enters, you may ") {
+        rest
+    } else if let Some(rest) = u0.strip_prefix("as this permanent enters, you may ") {
+        rest
+    } else if let Some(rest) = u0.strip_prefix("as this creature enters the battlefield, you may ")
+    {
+        rest
+    } else if let Some(rest) = u0.strip_prefix("as ~ enters the battlefield, you may ") {
+        rest
+    } else if let Some(rest) = u0.strip_prefix("as this permanent enters the battlefield, you may ")
+    {
+        rest
+    } else {
+        return None;
+    };
+
+    let cost = crate::parser::oracle_cost::parse_single_cost(cost_text.trim());
+    if matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return None;
+    }
+
+    let s1 = units[1].trim();
+    let (control_filter, enters_clause) =
+        if let Some(rest) = s1.strip_prefix("if you do or if you control ") {
+            let (filter_part, enters_part) = rest.split_once(", ")?;
+            let filter_part = filter_part
+                .trim()
+                .trim_start_matches("a ")
+                .trim_start_matches("an ");
+            let (filter, leftover) = parse_type_phrase_folding(filter_part);
+            if !leftover.trim().is_empty() || filter == TargetFilter::Any {
+                return None;
+            }
+            let filter = inject_controller(filter, ControllerRef::You);
+            (Some(filter), enters_part)
+        } else if let Some(rest) = s1.strip_prefix("if you do, ") {
+            (None, rest)
+        } else {
+            return None;
+        };
+
+    let enters_trimmed = enters_clause.trim();
+    let enters_rest = if let Some(rest) = enters_trimmed.strip_prefix("this creature enters with ")
+    {
+        rest
+    } else if let Some(rest) = enters_trimmed.strip_prefix("it enters with ") {
+        rest
+    } else if let Some(rest) = enters_trimmed.strip_prefix("~ enters with ") {
+        rest
+    } else if let Some(rest) = enters_trimmed.strip_prefix("this permanent enters with ") {
+        rest
+    } else if let Some(rest) =
+        enters_trimmed.strip_prefix("this creature enters the battlefield with ")
+    {
+        rest
+    } else if let Some(rest) = enters_trimmed.strip_prefix("it enters the battlefield with ") {
+        rest
+    } else if let Some(rest) = enters_trimmed.strip_prefix("~ enters the battlefield with ") {
+        rest
+    } else if let Some(rest) =
+        enters_trimmed.strip_prefix("this permanent enters the battlefield with ")
+    {
+        rest
+    } else {
+        return None;
+    };
+
+    let mut synth_enters = format!("~ enters with {enters_rest}");
+    if !synth_enters.ends_with('.') {
+        synth_enters.push('.');
+    }
+
+    let counter_def = enters_with_counters_outcome(&synth_enters, &synth_enters).ok()?;
+    let execute = counter_def.execute?;
+
+    if let Some(filter) = control_filter {
+        let def1 = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::Mandatory)
+            .condition(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: filter.clone(),
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(*execute.clone())
+            .description(text.to_string());
+
+        let def2 = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: None,
+            })
+            .condition(ReplacementCondition::UnlessQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(*execute)
+            .description(text.to_string());
+
+        Some(vec![def1, def2])
+    } else {
+        let def = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost,
+                decline: None,
+            })
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(*execute)
+            .description(text.to_string());
+
+        Some(vec![def])
+    }
 }
 
 /// CR 614.1a: "instead" marks the enchanted-land destruction event as replaced
@@ -5863,6 +6019,22 @@ fn extract_enters_with_leading_if_gate(text: &str) -> (&str, EntersWithGate) {
     // `parse_inner_condition` is self-delimiting (not `all_consuming`), so it
     // stops at the comma that separates the gate from the payload.
     let Ok((rest, condition)) = parse_inner_condition(condition_text) else {
+        // CR 107.3 + CR 614.1c: Fallback for "X is <N> or more" (Apocalypse Hydra).
+        if let Some((gate_text, body)) = condition_text.split_once(", ") {
+            if let Some(crate::types::ability::AbilityCondition::QuantityCheck { lhs, comparator, rhs }) =
+                crate::parser::oracle_effect::conditions::parse_paid_x_condition_text(gate_text)
+            {
+                return (
+                    body,
+                    EntersWithGate::Parsed(ReplacementCondition::OnlyIfQuantity {
+                        lhs,
+                        comparator,
+                        rhs,
+                        active_player_req: None,
+                    }),
+                );
+            }
+        }
         return (text, EntersWithGate::Unparsed);
     };
     let Ok((body, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) else {
@@ -32647,16 +32819,12 @@ mod tests {
         ));
     }
 
-    /// CR 614.1c + CR 614.12a + CR 608.2c: Rescuer Sphinx's "If you do" gate is
-    /// printed before the payload, in the sentence after the "As ~ enters" frame.
-    /// An ungated, mandatory counter with the optional return dropped is wrong
-    /// for the card. The frame's optional instruction and the
-    /// gated counter are two instructions one replacement cannot carry, so the
-    /// whole line is one `enters_with_clause` gap (an "As ~ enters, you may X. If
-    /// you do, ~ enters with …" carrier is follow-up work).
+    /// CR 614.1c + CR 614.12a + CR 608.2c: Rescuer Sphinx's "As this creature enters,
+    /// you may return a nonland permanent you control to its owner's hand. If you do,
+    /// this creature enters with a +1/+1 counter on it." parses into a single Moved
+    /// replacement with `ReplacementMode::MayCost` and accept payload `PutCounter`.
     #[test]
-    fn rescuer_sphinx_later_sentence_if_is_outside_the_enters_with_gate() {
-        const NORMALIZED_LINE: &str = "As ~ enters, you may return a nonland permanent you control to its owner's hand. If you do, ~ enters with a +1/+1 counter on it.";
+    fn test_rescuer_sphinx_parses_may_cost_enters_with() {
         let parsed = parse_oracle_text(
             "Flying\nAs this creature enters, you may return a nonland permanent you control to its owner's hand. If you do, this creature enters with a +1/+1 counter on it.",
             "Rescuer Sphinx",
@@ -32664,23 +32832,190 @@ mod tests {
             &["Creature".to_string()],
             &["Sphinx".to_string()],
         );
-        assert!(
-            parsed
-                .replacements
-                .iter()
-                .all(|r| r.event != ReplacementEvent::Moved),
-            "no ungated counter replacement, got {:?}",
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected 1 replacement, got {:#?}",
             parsed.replacements
         );
+        let repl = &parsed.replacements[0];
+        assert_eq!(repl.event, ReplacementEvent::Moved);
+        assert_eq!(repl.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(repl.valid_card, Some(TargetFilter::SelfRef));
         assert!(
-            parsed.abilities.iter().any(|a| matches!(
-                &*a.effect,
-                Effect::Unimplemented { name, description: Some(text) }
-                    if name == "enters_with_clause" && text == NORMALIZED_LINE
-            )),
-            "the whole line is one gap, got {:?}",
+            matches!(
+                &repl.mode,
+                ReplacementMode::MayCost {
+                    cost: AbilityCost::ReturnToHand { count: 1, .. },
+                    decline: None,
+                }
+            ),
+            "expected MayCost ReturnToHand, got {:?}",
+            repl.mode
+        );
+        let execute = repl.execute.as_ref().expect("execute should be present");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                }
+            ),
+            "expected PutCounter +1/+1, got {:?}",
+            execute.effect
+        );
+        assert!(
+            parsed.abilities.iter().all(|a| !matches!(&*a.effect, Effect::Unimplemented { name, .. } if name == "enters_with_clause")),
+            "enters_with_clause gap should be resolved, got {:?}",
             parsed.abilities
         );
+    }
+
+    /// CR 107.3 + CR 614.1c + CR 614.12: Apocalypse Hydra's base X counters and
+    /// separate-sentence "If X is 5 or more, it enters with an additional X +1/+1 counters on it"
+    /// parse into two Moved replacements, with the second gated by `OnlyIfQuantity` comparing `CostXPaid >= 5`.
+    #[test]
+    fn test_apocalypse_hydra_parses_enters_with_x_and_conditional_if_x_ge_5() {
+        let parsed = parse_oracle_text(
+            "This creature enters with X +1/+1 counters on it. If X is 5 or more, it enters with an additional X +1/+1 counters on it.\n{1}{R}, Remove a +1/+1 counter from this creature: It deals 1 damage to any target.",
+            "Apocalypse Hydra",
+            &[],
+            &["Creature".to_string()],
+            &["Hydra".to_string()],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            2,
+            "expected 2 replacements, got {:#?}",
+            parsed.replacements
+        );
+        let r1 = &parsed.replacements[0];
+        assert_eq!(r1.event, ReplacementEvent::Moved);
+        assert_eq!(r1.condition, None);
+        let r2 = &parsed.replacements[1];
+        assert_eq!(r2.event, ReplacementEvent::Moved);
+        assert_eq!(
+            r2.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+                active_player_req: None,
+            })
+        );
+    }
+
+    /// CR 614.1c + CR 614.12a: Devouring Hellion parses into a MayCost(Sacrifice) replacement
+    /// with twice that many +1/+1 counters.
+    #[test]
+    fn test_devouring_hellion_parses_may_cost_enters_with() {
+        let parsed = parse_oracle_text(
+            "As this creature enters, you may sacrifice any number of creatures and/or planeswalkers. If you do, it enters with twice that many +1/+1 counters on it.",
+            "Devouring Hellion",
+            &[],
+            &["Creature".to_string()],
+            &["Hellion".to_string()],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected 1 replacement, got {:#?}",
+            parsed.replacements
+        );
+        let repl = &parsed.replacements[0];
+        assert!(matches!(
+            &repl.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::Sacrifice(_),
+                decline: None
+            }
+        ));
+        let execute = repl.execute.as_ref().expect("execute should be present");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Multiply { factor: 2, .. },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// CR 614.1c + CR 614.12a: Ulamog's Despoiler parses into a MayCost(EffectCost) replacement with four counters.
+    #[test]
+    fn test_ulamog_s_despoiler_parses_may_cost_enters_with() {
+        let parsed = parse_oracle_text(
+            "As this creature enters, you may put two cards your opponents own from exile into their owners' graveyards. If you do, this creature enters with four +1/+1 counters on it.",
+            "Ulamog's Despoiler",
+            &[],
+            &["Creature".to_string()],
+            &["Eldrazi".to_string(), "Processor".to_string()],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            1,
+            "expected 1 replacement, got {:#?}",
+            parsed.replacements
+        );
+        let repl = &parsed.replacements[0];
+        assert!(matches!(
+            &repl.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::EffectCost { .. },
+                decline: None
+            }
+        ));
+        let execute = repl.execute.as_ref().expect("execute should be present");
+        assert!(matches!(
+            &*execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 4 },
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// CR 614.1c + CR 614.12: Dragon's Disciple parses into two replacements:
+    /// 1. Mandatory if you control a Dragon (ObjectCount >= 1).
+    /// 2. MayCost(Reveal) unless you control a Dragon (ObjectCount >= 1).
+    #[test]
+    fn test_dragon_s_disciple_parses_two_replacements() {
+        let parsed = parse_oracle_text(
+            "As this creature enters, you may reveal a Dragon card from your hand. If you do or if you control a Dragon, this creature enters with a +1/+1 counter on it.",
+            "Dragon's Disciple",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Cleric".to_string()],
+        );
+        assert_eq!(
+            parsed.replacements.len(),
+            2,
+            "expected 2 replacements, got {:#?}",
+            parsed.replacements
+        );
+        let r1 = &parsed.replacements[0];
+        assert_eq!(r1.mode, ReplacementMode::Mandatory);
+        assert!(matches!(
+            r1.condition,
+            Some(ReplacementCondition::OnlyIfQuantity { .. })
+        ));
+        let r2 = &parsed.replacements[1];
+        assert!(matches!(
+            &r2.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::Reveal { .. },
+                decline: None
+            }
+        ));
+        assert!(matches!(
+            r2.condition,
+            Some(ReplacementCondition::UnlessQuantity { .. })
+        ));
     }
 
     fn ability_chain_has(def: &AbilityDefinition, pred: &dyn Fn(&Effect) -> bool) -> bool {

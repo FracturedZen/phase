@@ -22,6 +22,7 @@ mod repeat_directive_gate;
 mod replacement_choice_remember;
 mod replacement_mill_double_application;
 mod repro_pilot_crew;
+mod rescuer_sphinx_enters_with_cost_9853;
 mod resolution_optional_payments;
 mod resolution_tap_x_binding;
 mod restricted_mana_face_down_and_face_up;

@@ -920,7 +920,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Dose of Dawnglow
 - Dovin's Dismissal
 - Draconic Roar
-- Dragon's Disciple
 - Dragonlord's Prerogative
 - Dreadlight Monstrosity
 - Dreampod Druid
@@ -1300,7 +1299,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Tunnel Ignus
 - Twinning Glass
 - Typhoid Mary, Fractured
-- Ulamog's Despoiler
 - Ultra Magnus, Armored Carrier
 - Ultros, Obnoxious Octopus
 - Undercellar Sweep
@@ -2024,7 +2022,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Reno and Rude
 - Repulsive Mutation
 - Requiem Monolith-draw-loselife
-- Rescuer Sphinx
 - Restoration Specialist
 - Retrieve
 - Revealing Wind

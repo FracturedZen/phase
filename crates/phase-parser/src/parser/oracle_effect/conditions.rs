@@ -5728,7 +5728,7 @@ fn parse_basic_colored_mana_symbol(
     .parse(input)
 }
 
-fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
+pub(crate) fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.to_ascii_lowercase();
     let (comparator, amount) = nom_parse_lower(&lower, |input| {
         all_consuming(|input| {

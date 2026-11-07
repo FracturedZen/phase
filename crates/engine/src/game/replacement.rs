@@ -2071,6 +2071,40 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
         }
+        // CR 614.1c + CR 614.12a: Non-self return-to-hand cost paid as the replacement is applied
+        // (Rescuer Sphinx). Follows the same pattern as Exile and Discard.
+        AbilityCost::ReturnToHand { filter, .. }
+            if !matches!(filter, Some(TargetFilter::SelfRef)) =>
+        {
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
+            let prior_waiting_for = state.waiting_for.clone();
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => {
+                    if state.waiting_for != prior_waiting_for
+                        && matches!(
+                            state.waiting_for,
+                            WaitingFor::EffectZoneChoice {
+                                library_position: None,
+                                is_cost_payment: true,
+                                destination: Some(Zone::Hand),
+                                ..
+                            }
+                        )
+                    {
+                        return MayCostOutcome::PausedForChoice {
+                            remaining_cost: None,
+                        };
+                    }
+                    true
+                }
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
+            }
+        }
         // A replacement's may-cost is paid while applying the replacement; it
         // is not an activation of `source_id`. Use the dedicated resolution
         // payment authority so it neither invents an ability index nor applies

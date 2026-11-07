@@ -2654,6 +2654,84 @@ fn pay_ability_cost_inner(
                 return Ok(outcome);
             }
         }
+        // CR 614.1c + CR 614.12a + CR 118.12: Non-self return-to-hand cost at resolution/entry time
+        // (Rescuer Sphinx).
+        AbilityCost::ReturnToHand {
+            count,
+            filter,
+            from_zone,
+        } if !matches!(filter, Some(TargetFilter::SelfRef))
+            && matches!(scope, PaymentScope::Resolution { .. }) =>
+        {
+            let count = *count as usize;
+            let effective_zone = from_zone.unwrap_or(Zone::Battlefield);
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                player,
+                source_id,
+                None,
+                filter.as_ref(),
+            );
+            if eligible.len() < count {
+                return Ok(payment_failed("not enough permanents to return to hand"));
+            }
+            if count == 0 {
+                state.last_effect_count = Some(0);
+                return Ok(PaymentOutcome::Paid);
+            }
+            // Forced-choice fast path: when the eligible set exactly
+            // fills the requirement there is no choice to surface, so the
+            // return executes immediately.
+            if eligible.len() == count
+                && matches!(
+                    scope,
+                    PaymentScope::Resolution {
+                        cost_move_root: ResolutionCostMoveRoot::ReplacementMayCost,
+                        ..
+                    }
+                )
+            {
+                for &card_id in &eligible {
+                    let _ = zone_pipeline::move_object(
+                        state,
+                        ZoneMoveRequest::cost(card_id, Zone::Hand, source_id),
+                        events,
+                    );
+                }
+                state.last_effect_count = Some(count as i32);
+            } else {
+                state.waiting_for = WaitingFor::EffectZoneChoice {
+                    player,
+                    cards: eligible,
+                    count,
+                    min_count: 0,
+                    up_to: false,
+                    source_id,
+                    effect_kind: crate::types::ability::EffectKind::PayCost,
+                    zone: effective_zone,
+                    destination: Some(Zone::Hand),
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enter_transformed: false,
+                    enters_under_player: None,
+                    enters_attacking: false,
+                    owner_library: false,
+                    track_exiled_by_source: false,
+                    face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                    face_down_profile: None,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    count_param: 0,
+                    library_position: None,
+                    mass_library_order: None,
+                    is_cost_payment: true,
+                    enters_modified_if: None,
+                    duration: None,
+                };
+                return Ok(PaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
+            }
+        }
         // CR 702.37e + CR 118.1: Turn-face-up return-to-hand cost (e.g. Fathom Seer).
         AbilityCost::ReturnToHand {
             count,
@@ -3546,6 +3624,22 @@ fn can_pay_resolution(
                 ability.source_id,
                 ability.context.granting_object,
                 effective_zone,
+                filter.as_ref(),
+            );
+            eligible.len() >= count
+        }
+        // CR 614.1c + CR 614.12a: Non-self return-to-hand cost at resolution/entry time (Rescuer Sphinx).
+        AbilityCost::ReturnToHand {
+            count,
+            filter,
+            ..
+        } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
+            let count = *count as usize;
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                payer,
+                ability.source_id,
+                None,
                 filter.as_ref(),
             );
             eligible.len() >= count

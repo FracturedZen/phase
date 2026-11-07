@@ -19184,6 +19184,10 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         // "exile two creature cards from graveyards"). The interactive choice is
         // surfaced via WaitingFor::PayCost before this resume runs.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
+        // CR 614.1c + CR 614.12a: Non-self return-to-hand cost at resolution/entry time
+        // (e.g., Rescuer Sphinx's "return a nonland permanent you control to its owner's hand").
+        AbilityCost::ReturnToHand { filter, .. }
+            if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
         // CR 118.3: The shared effect-cost predicate admits only deterministic
         // payment effects that the authority resolves directly.
         AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,

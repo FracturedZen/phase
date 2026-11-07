@@ -123,10 +123,11 @@ use super::oracle_replacement::{
     as_long_as_gate_is_unparsed, damage_prevention_fails_closed, enters_with_fails_closed,
     find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
-    parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
-    parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
-    parse_whenever_you_cast_enters_with_outcome, parse_windowed_graveyard_redirect_install,
-    CastEntersWithOutcome, EntersWithGap,
+    parse_as_enters_may_cost_enters_with, parse_as_enters_one_shot_replacement,
+    parse_bidirectional_damage_prevention, parse_oneshot_damage_replacement,
+    parse_replacement_line, parse_replacement_line_ir, parse_whenever_you_cast_enters_with_outcome,
+    parse_windowed_graveyard_redirect_install, replace_self_refs, CastEntersWithOutcome,
+    EntersWithGap,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -8150,6 +8151,23 @@ fn parse_normalized_oracle_ir(
             // so this was a latent gap (review-impl finding on PR #7615), not
             // an active misparse.
             if let Some(definitions) = parse_bidirectional_damage_prevention(&lower, &line) {
+                for definition in definitions {
+                    emitter.replacement_ir_at(
+                        item_line,
+                        ReplacementIr::from_definition(&line, definition),
+                    );
+                }
+                i += 1;
+                continue;
+            }
+            // CR 614.1c + CR 614.12a: "As ~ enters, you may <cost>. If you do [or if you control <filter>],
+            // ~ enters with <counters>." Multi-sentence as-enters may-cost enters-with replacement
+            // (Rescuer Sphinx, Devouring Hellion, Ulamog's Despoiler, Dragon's Disciple).
+            let normalized = replace_self_refs(&line, card_name);
+            let norm_lower = normalized.to_lowercase();
+            if let Some(definitions) =
+                parse_as_enters_may_cost_enters_with(&norm_lower, &normalized, &line, card_name)
+            {
                 for definition in definitions {
                     emitter.replacement_ir_at(
                         item_line,
