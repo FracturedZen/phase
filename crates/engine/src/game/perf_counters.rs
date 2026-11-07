@@ -78,6 +78,27 @@ pub struct HomogeneousTargetWalkCacheCounters {
     pub advances: u64,
 }
 
+/// Test-only counters for the targeted-cast offer witness
+/// (`ai_support::payment_continuation::witness_targeted_cast_offer`, consulted
+/// by the legal-action filter). Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets below: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetedOfferWitnessCounters {
+    /// Witness runs started by the offer filter.
+    pub calls: u64,
+    /// Runs that certified a completion.
+    pub completed: u64,
+    /// Reducer applications spent across all runs.
+    pub reducer_attempts: u64,
+    /// Phase-owned legality clones made inside the runs.
+    pub phase_owned_state_clones: u64,
+    /// Auto-payment wrapper calls made inside the runs (also counted in
+    /// [PerfCounterSnapshot::auto_payment_borrowed_wrapper_calls]).
+    pub auto_payment_wrapper_calls: u64,
+}
+
 /// Test-only counters for the prior-target-binding seams (cross-slot
 /// object-relative target binding, e.g. Puca's Mischief / Spawnbroker /
 /// Daring Thief). Kept out of [`PerfCounterSnapshot`] for the same reason the
@@ -138,6 +159,20 @@ pub struct ExileReturnLatchCounters {
     pub trigger_origin_lookups: u64,
 }
 
+/// Test-only work counters for the CR 603.10a co-departure arm of trigger
+/// collection (`triggers::CoDepartureObserverIndex`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoDepartureObserverCounters {
+    /// Per-pass index builds (one per pass that sees a co-departure group).
+    pub index_builds: u64,
+    /// (departure, co-departed observer) pairs whose observer source context
+    /// was resolved because the observer left with a trigger.
+    pub observer_resolutions: u64,
+}
+
 /// Test-only counters for the stack's bulk token executor
 /// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
 /// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
@@ -160,6 +195,18 @@ pub struct StackBulkCounters {
 pub struct TriggerIndexCounters {
     /// Calls to `TriggerIndex::rebuild_from_battlefield`.
     pub full_rebuilds: u64,
+}
+
+/// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
+/// an ability: the calls that reach `resolution_board`, which copies the board
+/// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets above: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackReachCounters {
+    /// Calls to `stack_entry_node_reach` past its no-ability return.
+    pub entry_reaches: u64,
 }
 
 /// Test-only counters for the CR 508.1d attack-declaration solver
@@ -262,6 +309,8 @@ pub struct PlayTraceCounters {
     pub legality_read_copies: u64,
     pub confirm_asks: u64,
     pub confirm_drives: u64,
+    /// Replays `mandatory_period_holds` ran.
+    pub mandatory_replays: u64,
     /// Entries appended to carried spans.
     pub carry_appends: u64,
     /// Old-window nodes looked up in the carrying index at a step's end.
@@ -293,6 +342,7 @@ impl PlayTraceCounters {
             legality_read_copies: self.legality_read_copies - earlier.legality_read_copies,
             confirm_asks: self.confirm_asks - earlier.confirm_asks,
             confirm_drives: self.confirm_drives - earlier.confirm_drives,
+            mandatory_replays: self.mandatory_replays - earlier.mandatory_replays,
             carry_appends: self.carry_appends - earlier.carry_appends,
             step_end_lookups: self.step_end_lookups - earlier.step_end_lookups,
             engine_b_rebuilds: self.engine_b_rebuilds - earlier.engine_b_rebuilds,
@@ -466,6 +516,16 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static TARGETED_OFFER_WITNESS_COUNTERS: Cell<TargetedOfferWitnessCounters> = const {
+        Cell::new(TargetedOfferWitnessCounters {
+            calls: 0,
+            completed: 0,
+            reducer_attempts: 0,
+            phase_owned_state_clones: 0,
+            auto_payment_wrapper_calls: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static PRIOR_TARGET_BINDING_COUNTERS: Cell<PriorTargetBindingCounters> = const {
         Cell::new(PriorTargetBindingCounters {
             static_union_enumerations: 0,
@@ -531,6 +591,7 @@ thread_local! {
             legality_read_copies: 0,
             confirm_asks: 0,
             confirm_drives: 0,
+            mandatory_replays: 0,
             carry_appends: 0,
             step_end_lookups: 0,
             engine_b_rebuilds: 0,
@@ -544,6 +605,13 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static CO_DEPARTURE_OBSERVER_COUNTERS: Cell<CoDepartureObserverCounters> = const {
+        Cell::new(CoDepartureObserverCounters {
+            index_builds: 0,
+            observer_resolutions: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static STACK_BULK_COUNTERS: Cell<StackBulkCounters> = const {
         Cell::new(StackBulkCounters {
             bulk_entries: 0,
@@ -553,6 +621,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
         Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
+        Cell::new(StackReachCounters { entry_reaches: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -574,6 +646,9 @@ pub(crate) enum LegalityClonePhase {
     RawValidation,
     GroupedManaReadiness,
     PostApplyCore,
+    /// Inside a targeted-cast offer witness run (counted by
+    /// [`TargetedOfferWitnessCounters`], not by [`PerfCounterSnapshot`]).
+    TargetedOfferWitness,
 }
 
 pub(crate) struct LegalityClonePhaseGuard {
@@ -660,6 +735,14 @@ fn record_phase_owned_state_clone_for(
         Some(LegalityClonePhase::PostApplyCore) => {
             snapshot.post_apply_auto_payment_core_state_clones += 1;
         }
+        Some(LegalityClonePhase::TargetedOfferWitness) => {
+            #[cfg(feature = "test-support")]
+            TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                let mut counters = cell.get();
+                counters.phase_owned_state_clones += 1;
+                cell.set(counters);
+            });
+        }
         None => {}
     }
 }
@@ -697,6 +780,14 @@ pub(crate) fn record_auto_payment_borrowed_wrapper() {
                 | LegalityClonePhase::PostApplyCore,
             )
             | None => {}
+            Some(LegalityClonePhase::TargetedOfferWitness) => {
+                #[cfg(feature = "test-support")]
+                TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                    let mut counters = cell.get();
+                    counters.auto_payment_wrapper_calls += 1;
+                    cell.set(counters);
+                });
+            }
         }
     });
     record_phase_owned_state_clone();
@@ -895,6 +986,33 @@ pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
 }
 
+/// One targeted-cast offer witness run: its spend, and whether it certified.
+#[cfg(feature = "test-support")]
+pub fn record_targeted_offer_witness(witness: &crate::ai_support::TargetedCastWitness) {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.calls += 1;
+        match witness.verdict {
+            crate::ai_support::TargetedCastVerdict::Completed => counters.completed += 1,
+            crate::ai_support::TargetedCastVerdict::NotFound
+            | crate::ai_support::TargetedCastVerdict::Indeterminate => {}
+        }
+        counters.reducer_attempts += witness.reducer_attempts as u64;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn targeted_offer_witness_snapshot() -> TargetedOfferWitnessCounters {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_targeted_offer_witness_counters() {
+    TARGETED_OFFER_WITNESS_COUNTERS
+        .with(|counters| counters.set(TargetedOfferWitnessCounters::default()));
+}
+
 /// CR 508.1d: one solver target-table build.
 #[cfg(feature = "test-support")]
 pub fn record_attack_solver_target_table_build() {
@@ -1034,6 +1152,31 @@ pub fn record_exile_return_trigger_origin_lookup() {
 #[cfg(feature = "test-support")]
 pub fn exile_return_latch_snapshot() -> ExileReturnLatchCounters {
     EXILE_RETURN_LATCH_COUNTERS.with(Cell::get)
+}
+
+/// CR 603.10a: one co-departure observer index build.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_index_build() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.index_builds += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 603.10a: one co-departed observer whose source context was resolved.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_observer_resolution() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.observer_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
@@ -1190,9 +1333,14 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
     #[cfg(feature = "test-support")]
+    CO_DEPARTURE_OBSERVER_COUNTERS
+        .with(|counters| counters.set(CoDepartureObserverCounters::default()));
+    #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]
     TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
+    #[cfg(feature = "test-support")]
+    STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
     #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
@@ -1235,6 +1383,21 @@ pub fn record_trigger_index_rebuild() {
 #[cfg(feature = "test-support")]
 pub fn trigger_index_snapshot() -> TriggerIndexCounters {
     TRIGGER_INDEX_COUNTERS.with(Cell::get)
+}
+
+/// One `stack_reach::stack_entry_node_reach` call for an entry with an ability.
+#[cfg(feature = "test-support")]
+pub fn record_stack_entry_reach() {
+    STACK_REACH_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.entry_reaches += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn stack_reach_snapshot() -> StackReachCounters {
+    STACK_REACH_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
