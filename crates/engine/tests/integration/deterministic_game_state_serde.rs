@@ -222,6 +222,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "creatures_blocked_this_turn",
         "creature_blocked_attackers_this_turn",
         "players_who_created_token_this_turn",
+        "players_who_flipped_coins_this_turn",
         "players_who_discarded_card_this_turn",
         "players_who_sacrificed_artifact_this_turn",
         "assassin_or_commander_dealt_combat_damage_this_turn",
@@ -324,7 +325,6 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         "last_effect_counts_by_player",
         "stack_trigger_event_batches",
         "stack_trigger_firings",
-        "lki_copiable_values",
         "linked_exile_lki",
         "ring_level",
         "ring_bearer",
@@ -412,6 +412,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
     for field in [
         "attribution",
         "lki_cache",
+        "lki_copiable_values",
         "tracked_object_sets",
         "departed_activated_abilities",
     ] {
@@ -469,7 +470,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ),
         (
             "activated_abilities_this_game",
-            "HashMap",
+            "im::HashMap",
             "with=\"tuple_key_map\"",
         ),
         (
@@ -646,6 +647,13 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ("PendingDrawDelivery", None, "applied", "HashSet", HASH_SET),
         ("DrawSequenceFrame", None, "applied", "HashSet", HASH_SET),
         ("DrawDealerSeat", None, "applied", "HashSet", HASH_SET),
+        (
+            "PendingHordeReveal",
+            Some("TokenCreation"),
+            "before",
+            "HashSet",
+            HASH_SET,
+        ),
     ] {
         add_spec(
             &mut specs,
@@ -1205,6 +1213,34 @@ fn discovered_manifest() -> BTreeMap<String, DiscoveredOwner> {
         (
             "src/game/effects/choose_one_of.rs",
             include_str!("../../src/game/effects/choose_one_of.rs"),
+        ),
+        (
+            "../phase-ast/src/types/ability.rs",
+            include_str!("../../../phase-ast/src/types/ability.rs"),
+        ),
+        (
+            "../phase-ast/src/types/player.rs",
+            include_str!("../../../phase-ast/src/types/player.rs"),
+        ),
+        (
+            "../phase-ast/src/types/game_state_kinds.rs",
+            include_str!("../../../phase-ast/src/types/game_state_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/event_kinds.rs",
+            include_str!("../../../phase-ast/src/types/event_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/object_data.rs",
+            include_str!("../../../phase-ast/src/types/object_data.rs"),
+        ),
+        (
+            "../phase-ast/src/types/attack_target.rs",
+            include_str!("../../../phase-ast/src/types/attack_target.rs"),
+        ),
+        (
+            "../phase-ast/src/types/token_spec.rs",
+            include_str!("../../../phase-ast/src/types/token_spec.rs"),
         ),
     ] {
         discover_file(&mut discovered, file, source);
@@ -2041,7 +2077,7 @@ fn build_all_direct_numeric_maps_state() -> GameState {
             }]),
         ),
     ]));
-    state.lki_copiable_values = HashMap::from([
+    state.lki_copiable_values = im::HashMap::from_iter([
         (ObjectId(1), intrinsic_copiable_values(&first)),
         (ObjectId(2), intrinsic_copiable_values(&second)),
     ]);
