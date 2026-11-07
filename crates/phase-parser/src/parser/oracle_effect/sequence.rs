@@ -7161,13 +7161,19 @@ pub(super) fn is_mass_put_all(
 ///
 /// - The mass put-all route places the remainder through the uniform bottom
 ///   route and threads no split (`resolve_mass_put_all`).
-/// - A kept-to-library reorder ("put that card on top of your library and the
-///   rest on the bottom", Fertile Thicket) has already named both positions;
-///   the resolver deliberately does not consult a split on that branch.
 /// - A "random order" remainder is shuffled and then parked for the owner's
 ///   own arrangement (`split_rest_pile_or_park`). CR 401.4 gives the owner that
 ///   arrangement, but the card's "in a random order" overrides it (CR 101.1),
 ///   so no arrangement may be offered.
+/// - CR 401.4 + CR 701.20e: A kept-to-library reorder ("put that card on top of
+///   your library and the rest on the bottom", Fertile Thicket) names both
+///   positions upfront; an instruction that also tries to split the remainder
+///   to the top is an unexecutable collision ("put that card on top ... and the
+///   rest on top") that must fail closed.
+///   Exception: Ransack / Inzerva ("put any number of them on the bottom of that
+///   library in any order and the rest on top of the library in any order")
+///   puts the kept cards on the library bottom (`keep_count == Some(u32::MAX) && up_to`)
+///   and the remainder on top; opposite ends of the library do not collide.
 pub(super) fn unsupported_rest_split(
     has_split: bool,
     order: DigRestOrder,
@@ -7175,9 +7181,11 @@ pub(super) fn unsupported_rest_split(
     up_to: bool,
     kept_destination: Option<Zone>,
 ) -> bool {
+    let is_ransack_shape =
+        kept_destination == Some(Zone::Library) && keep_count == Some(u32::MAX) && up_to;
     has_split
         && (order == DigRestOrder::Random
-            || kept_destination == Some(Zone::Library)
+            || (kept_destination == Some(Zone::Library) && !is_ransack_shape)
             || is_mass_put_all(keep_count, up_to, kept_destination))
 }
 
@@ -7585,7 +7593,14 @@ pub(super) fn parse_dig_from_among(
     // Experiment): "reveal up to N <filter> cards from among them, then put the
     // rest on the bottom" — the kept cards are NOT auto-routed; subsequent
     // sub_abilities route them by type via `TargetFilter::TrackedSetFiltered`.
-    let (destination, enter_tapped, enters_attacking) = parse_dig_kept_destination(lower);
+    // CR 608.2c: Isolate the kept clause from any trailing "and the rest..." phrase
+    // so the rest destination never leaks into the kept-card destination.
+    let (kept_dest_clause, _) = lower
+        .split_once(" and the rest")
+        .or_else(|| lower.split_once(" and the other"))
+        .unwrap_or((lower, ""));
+    let (destination, enter_tapped, enters_attacking) =
+        parse_dig_kept_destination(kept_dest_clause);
 
     // CR 701.17c + CR 608.2c: "return a card milled this way to your hand"
     // is the same tracked-set continuation as "from among the milled cards",
@@ -7915,14 +7930,29 @@ fn parse_dig_kept_destination(lower: &str) -> (Option<Zone>, bool, bool) {
         return parsed;
     }
 
-    let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
+    let destination = if nom_primitives::scan_contains(lower, "onto the battlefield")
+        || nom_primitives::scan_contains(lower, "to the battlefield")
+    {
         Some(Zone::Battlefield)
-    } else if nom_primitives::scan_contains(lower, "into your hand")
+    } else if contains_possessive(lower, "into", "hand")
+        || contains_possessive(lower, "to", "hand")
+        || nom_primitives::scan_contains(lower, "into your hand")
         || nom_primitives::scan_contains(lower, "into their hand")
         || nom_primitives::scan_contains(lower, "to your hand")
         || nom_primitives::scan_contains(lower, "to their hand")
     {
         Some(Zone::Hand)
+    } else if contains_possessive(lower, "into", "graveyard")
+        || contains_possessive(lower, "to", "graveyard")
+    {
+        Some(Zone::Graveyard)
+    } else if nom_primitives::scan_contains(lower, "on the bottom")
+        || nom_primitives::scan_contains(lower, "on top")
+        || contains_possessive(lower, "into", "library")
+    {
+        Some(Zone::Library)
+    } else if nom_primitives::scan_contains(lower, "into exile") {
+        Some(Zone::Exile)
     } else {
         None
     };
@@ -7993,16 +8023,28 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)>
         return Some((Some(Zone::Battlefield), tapped, attacking));
     }
 
-    if alt((
-        tag::<_, _, OracleError<'_>>("into your hand"),
-        tag("into their hand"),
-        tag("to your hand"),
-        tag("to their hand"),
-    ))
-    .parse(input)
-    .is_ok()
+    if contains_possessive(input, "into", "hand")
+        || contains_possessive(input, "to", "hand")
+        || alt((
+            tag::<_, _, OracleError<'_>>("into your hand"),
+            tag("into their hand"),
+            tag("to your hand"),
+            tag("to their hand"),
+        ))
+        .parse(input)
+        .is_ok()
     {
         return Some((Some(Zone::Hand), false, false));
+    }
+
+    if contains_possessive(input, "into", "graveyard")
+        || contains_possessive(input, "to", "graveyard")
+    {
+        return Some((Some(Zone::Graveyard), false, false));
+    }
+
+    if nom_primitives::scan_contains(input, "on the bottom") {
+        return Some((Some(Zone::Library), false, false));
     }
 
     // CR 401.4: cards put at a specific library position (top) are arranged by
@@ -8013,6 +8055,8 @@ fn parse_dig_destination_tail(input: &str) -> Option<(Option<Zone>, bool, bool)>
     if alt((
         tag::<_, _, OracleError<'_>>("on top of your library"),
         tag("on top of their library"),
+        tag("on top of that library"),
+        tag("on top of its owner's library"),
         tag("on top"),
     ))
     .parse(input)
@@ -9841,18 +9885,26 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // continuation which, in `apply_clause_continuation`, pushes a
         // `TrackedSetFiltered`-targeted sub-ability when the source is a `Mill`.
         Effect::Dig { .. } | Effect::Mill { .. }
-            if (nom_primitives::scan_contains(&lower, "from among them")
-                || nom_primitives::scan_contains(&lower, "from among those cards")
-                || nom_primitives::scan_contains(&lower, "from among the milled cards")
-                || nom_primitives::scan_contains(&lower, "milled this way")
-                || nom_primitives::scan_contains(&lower, "of them")
-                || nom_primitives::scan_contains(&lower, "of those cards")
-                || nom_primitives::scan_contains(&lower, "of those"))
+            if (!lower.starts_with("if you don't") && !lower.starts_with("if you dont"))
+                && (nom_primitives::scan_contains(&lower, "from among them")
+                    || nom_primitives::scan_contains(&lower, "from among those cards")
+                    || nom_primitives::scan_contains(&lower, "from among the milled cards")
+                    || nom_primitives::scan_contains(&lower, "milled this way")
+                    || nom_primitives::scan_contains(&lower, "of them")
+                    || nom_primitives::scan_contains(&lower, "of those cards")
+                    || nom_primitives::scan_contains(&lower, "of those"))
                 && (nom_primitives::scan_contains(&lower, "onto the battlefield")
-                    || nom_primitives::scan_contains(&lower, "into your hand")
-                    || nom_primitives::scan_contains(&lower, "into their hand")
-                    || nom_primitives::scan_contains(&lower, "to your hand")
-                    || nom_primitives::scan_contains(&lower, "to their hand")) =>
+                    || nom_primitives::scan_contains(&lower, "to the battlefield")
+                    || contains_possessive(&lower, "into", "hand")
+                    || contains_possessive(&lower, "to", "hand")
+                    || ((contains_possessive(&lower, "into", "graveyard")
+                        || contains_possessive(&lower, "to", "graveyard")
+                        || nom_primitives::scan_contains(&lower, "on the bottom")
+                        || nom_primitives::scan_contains(&lower, "on top")
+                        || contains_possessive(&lower, "into", "library")
+                        || nom_primitives::scan_contains(&lower, "into exile"))
+                        && (nom_primitives::scan_contains(&lower, "and the rest")
+                            || nom_primitives::scan_contains(&lower, "and the other")))) =>
         {
             parse_dig_from_among(&lower, text, ctx)
         }

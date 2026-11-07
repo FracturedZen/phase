@@ -370,8 +370,10 @@ expression: "&ir"
                       "id": 0
                     },
                     "count": {
-                      "type": "Fixed",
-                      "value": 1
+                      "type": "Ref",
+                      "qty": {
+                        "type": "TrackedSetSize"
+                      }
                     },
                     "position": {
                       "type": "Bottom"

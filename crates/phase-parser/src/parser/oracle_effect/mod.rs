@@ -21117,15 +21117,18 @@ fn placement_tail_orders_in_any_order(rest: &str) -> bool {
 
 /// CR 608.2c: does a placement's noun phrase (the text before its positional
 /// terminator, with any cardinality already peeled) name a PLURAL set anaphor —
-/// "those cards" / "these cards" / "them" — with nothing after it? Such a phrase
+/// "those cards" / "these cards" / "them" / "the rest" / "the other cards" — with nothing after it? Such a phrase
 /// moves every card of the set it refers to (Stomping Slabs: "reveal the top
-/// seven cards …, then put those cards on the bottom"), not the lowering
-/// default of one card.
+/// seven cards …, then put those cards on the bottom"; Bamboozle / Psychic Surgery:
+/// "... put the rest on top ..."), not the lowering default of one card.
 fn placement_names_plural_set_anaphor(noun_phrase: &str) -> bool {
     all_consuming(alt((
         tag::<_, _, OracleError<'_>>("those cards"),
         tag("these cards"),
         tag("them"),
+        tag("the rest"),
+        tag("the other cards"),
+        tag("the others"),
     )))
     .parse(noun_phrase.trim_end())
     .is_ok()

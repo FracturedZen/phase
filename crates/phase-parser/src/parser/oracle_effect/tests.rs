@@ -76872,13 +76872,14 @@ fn target_opponent_puts_up_to_three_target_cards_keeps_inner_target_set() {
     );
 }
 
-/// B-5 — Ransack's "put any number of THEM on the bottom" is a pronoun
-/// partition of the Dig continuation: its recipient is the deterministic
-/// anaphor `ParentTarget`, not a population, so the untargeted any-number arm
-/// must leave its base shape alone.
-///
-/// GREEN AT BASE. Its pairing is mutation MP-GUARD (the arm's guard forced to
-/// `true`), which must turn it red.
+/// CR 701.20e + CR 608.2c (issue #10695): Ransack's follow-up instruction
+/// ("Put any number of them on the bottom of that library in any order and the rest on top of the library in any order.")
+/// is the selection and remainder continuation of the preceding "Look at the top five cards" Dig instruction.
+/// The previous test expected Ransack to emit a standalone `PutAtLibraryPosition { position: Top, count: Fixed(1) }`
+/// which erroneously dropped the bottom-of-library destination for the chosen cards and moved only 1 card to the top.
+/// Under CR 701.20e, CR 401.4, and CR 608.2c, Ransack lowers cleanly to `Effect::Dig` with kept cards routed to the library
+/// bottom (`keep_count: u32::MAX, up_to: true, destination: Some(Zone::Library)`) and the unkept remainder routed to
+/// the top via `rest_split_top_count`.
 #[test]
 fn ransack_pronoun_partition_placement_keeps_base_shape() {
     let parsed = parse_oracle_text(
@@ -76889,13 +76890,30 @@ fn ransack_pronoun_partition_placement_keeps_base_shape() {
         &["Sorcery".to_string()],
         &[],
     );
-    let nodes = collect_library_placement_nodes(&parsed.abilities);
     assert_eq!(
-        nodes.len(),
+        parsed.abilities.len(),
         1,
-        "reach guard: Ransack lowers to exactly one placement node, got {nodes:?}"
+        "Ransack parses to one unified spell ability"
     );
-    assert_pronoun_partition_keeps_base_shape(nodes[0], LibraryPosition::Top);
+    let Effect::Dig {
+        destination,
+        keep_count,
+        up_to,
+        rest_destination,
+        rest_split_top_count,
+        ..
+    } = parsed.abilities[0].effect.as_ref()
+    else {
+        panic!("expected Dig, got {:?}", parsed.abilities[0].effect);
+    };
+    assert_eq!(*destination, Some(Zone::Library));
+    assert_eq!(*keep_count, Some(u32::MAX));
+    assert!(*up_to);
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(
+        *rest_split_top_count,
+        Some(QuantityExpr::Fixed { value: 5 })
+    );
 }
 
 /// B-5 — Inzerva, Master of Insights's −2 "put any number of THEM on the bottom"
@@ -97165,5 +97183,84 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
             matches!(effect, Effect::Unimplemented { name, .. } if name == "look_exile_tail")
         }),
         "the public chain must retain the honest gap, not fall back to Dig: {unsupported:?}"
+    );
+}
+
+#[test]
+fn cruel_fate_parses_to_dig_with_graveyard_and_library_rest() {
+    let text = "Look at the top five cards of target opponent's library. Put one of those cards into that player's graveyard and the rest on top of their library in any order.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::Dig {
+        destination,
+        keep_count,
+        up_to,
+        rest_destination,
+        rest_split_top_count,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected Dig effect, got {def:?}");
+    };
+    assert_eq!(*destination, Some(Zone::Graveyard));
+    assert_eq!(*keep_count, Some(1));
+    assert!(!up_to);
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(
+        *rest_split_top_count,
+        Some(QuantityExpr::Fixed { value: 5 })
+    );
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    assert!(def.sub_ability.is_none());
+}
+
+#[test]
+fn ransack_parses_to_dig_with_library_bottom_and_library_top_rest() {
+    let text = "Look at the top five cards of target player's library. Put any number of them on the bottom of that library in any order and the rest on top of the library in any order.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::Dig {
+        destination,
+        keep_count,
+        up_to,
+        rest_destination,
+        rest_split_top_count,
+        rest_order,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected Dig effect, got {def:?}");
+    };
+    assert_eq!(*destination, Some(Zone::Library));
+    assert_eq!(*keep_count, Some(u32::MAX));
+    assert!(up_to);
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(
+        *rest_split_top_count,
+        Some(QuantityExpr::Fixed { value: 5 })
+    );
+    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    assert!(def.sub_ability.is_none());
+}
+
+#[test]
+fn bamboozle_and_psychic_surgery_put_the_rest_uses_tracked_set_size() {
+    let text = "Target player reveals the top four cards of their library. You choose two of those cards and put them into that player's graveyard. Put the rest on top of their library in any order.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let put_on_top = collect_chain_effects(&def)
+        .into_iter()
+        .find(|eff| matches!(eff, Effect::PutAtLibraryPosition { .. }))
+        .expect("expected PutAtLibraryPosition in chain");
+    let Effect::PutAtLibraryPosition {
+        count, position, ..
+    } = put_on_top
+    else {
+        unreachable!()
+    };
+    assert_eq!(*position, LibraryPosition::Top);
+    assert_eq!(
+        *count,
+        QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize
+        }
     );
 }

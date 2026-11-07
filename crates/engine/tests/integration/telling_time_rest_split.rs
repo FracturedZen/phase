@@ -2408,3 +2408,187 @@ fn a_bare_on_top_remainder_is_an_all_top_split() {
         "\"on top\" must carry the all-top split, not bottom the pile"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cruel Fate and Ransack regression fixtures (issue #10695)
+// ---------------------------------------------------------------------------
+
+const CRUEL_FATE_ORACLE: &str = "Look at the top five cards of target opponent's library. \
+Put one of those cards into that player's graveyard and the rest on top of their library in any order.";
+
+#[test]
+fn cruel_fate_puts_one_in_graveyard_and_remainder_on_top_in_chosen_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Cruel Fate", false, CRUEL_FATE_ORACLE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 4,
+    });
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    // Give P1 five looked-at cards, then two suffix cards.
+    for index in 0..5 {
+        add_library_card_for(&mut runner, P1, &format!("P1_Lib{index}"));
+    }
+    let suffix = [
+        add_library_card_for(&mut runner, P1, "Suffix0"),
+        add_library_card_for(&mut runner, P1, "Suffix1"),
+    ];
+    add_mana(&mut runner, ManaType::Blue, 5);
+
+    let outcome = runner.cast(spell_id).target_player(P1).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice {
+            cards,
+            keep_count,
+            kept_destination,
+            ..
+        } => {
+            assert_eq!(cards.len(), 5, "the dig looks at the top five");
+            assert_eq!(*keep_count, 1, "keep exactly one");
+            assert_eq!(
+                *kept_destination,
+                Some(Zone::Graveyard),
+                "kept goes to graveyard"
+            );
+            cards.clone()
+        }
+        other => panic!("expected the keep prompt first, got {other:?}"),
+    };
+
+    let to_graveyard = looked_at[0];
+
+    // P0 chooses which card goes to graveyard
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![to_graveyard],
+        })
+        .expect("keeping one card to graveyard must be accepted");
+
+    // CR 401.4: "the owner of those cards may arrange them in any order"
+    // P1 arranges their remaining 4 cards on top of their library.
+    let (pile, top_count) = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            player,
+            library_owner,
+            cards,
+            top_count,
+            ..
+        } => {
+            assert_eq!(
+                *player, P1,
+                "owner arranges the cards on top of their library"
+            );
+            assert_eq!(*library_owner, P1);
+            (cards.clone(), *top_count)
+        }
+        other => panic!("expected the all-top remainder prompt, got {other:?}"),
+    };
+    assert_eq!(pile.len(), 4, "4 cards remain");
+    assert_eq!(top_count, 4, "all 4 go on top");
+
+    let arrangement: Vec<ObjectId> = pile.iter().rev().copied().collect();
+    runner
+        .act(GameAction::SelectCards {
+            cards: arrangement.clone(),
+        })
+        .expect("a full four-card arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    // Verify:
+    // 1. to_graveyard is in P1's graveyard
+    assert!(
+        runner.state().players[1].graveyard.contains(&to_graveyard),
+        "kept card must be in P1's graveyard"
+    );
+    // 2. The four remainder cards are on top of P1's library in the submitted order
+    let p1_library: Vec<ObjectId> = runner.state().players[1].library.iter().copied().collect();
+    assert_eq!(
+        p1_library.len(),
+        6,
+        "1 went to graveyard, 4 on top, 2 suffix"
+    );
+    assert_eq!(
+        &p1_library[..4],
+        arrangement.as_slice(),
+        "the 4 remainder cards land on top in chosen order"
+    );
+    assert_eq!(p1_library[4], suffix[0]);
+    assert_eq!(p1_library[5], suffix[1]);
+}
+
+const RANSACK_ORACLE: &str = "Look at the top five cards of target player's library. \
+Put any number of them on the bottom of that library in any order and the rest on top of the library in any order.";
+
+#[test]
+fn ransack_puts_chosen_on_bottom_and_remainder_on_top() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, "Ransack", false, RANSACK_ORACLE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 3,
+    });
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    for index in 0..5 {
+        add_library_card(&mut runner, &format!("Lib{index}"));
+    }
+    let suffix = [
+        add_library_card(&mut runner, "Suffix0"),
+        add_library_card(&mut runner, "Suffix1"),
+    ];
+    add_mana(&mut runner, ManaType::Blue, 4);
+
+    let outcome = runner.cast(spell_id).target_player(P0).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice {
+            cards,
+            keep_count,
+            up_to,
+            kept_destination,
+            ..
+        } => {
+            assert_eq!(cards.len(), 5, "look at top 5");
+            assert_eq!(*keep_count, 5, "up to 5 cards can be put on bottom");
+            assert!(*up_to);
+            assert_eq!(*kept_destination, Some(Zone::Library));
+            cards.clone()
+        }
+        other => panic!("expected DigChoice, got {other:?}"),
+    };
+
+    // Choose 2 cards to put on bottom in specific order: looked_at[3], looked_at[1]
+    let to_bottom = vec![looked_at[3], looked_at[1]];
+    runner
+        .act(GameAction::SelectCards {
+            cards: to_bottom.clone(),
+        })
+        .expect("selecting cards to put on bottom must succeed");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(
+        library.len(),
+        7,
+        "all 7 cards remain in library (5 looked at + 2 suffix)"
+    );
+    // The 3 unkept cards are on top (indices 0..3)
+    let expected_on_top = [looked_at[0], looked_at[2], looked_at[4]];
+    for id in &expected_on_top {
+        assert!(
+            library[..3].contains(id),
+            "unkept cards must be on top of library"
+        );
+    }
+    // Suffix is in the middle (indices 3..5)
+    assert_eq!(library[3], suffix[0]);
+    assert_eq!(library[4], suffix[1]);
+    // The 2 kept cards are on the bottom in the submitted order (indices 5..7)
+    assert_eq!(library[5], to_bottom[0], "bottom card 0");
+    assert_eq!(library[6], to_bottom[1], "bottom card 1");
+}

@@ -4947,38 +4947,54 @@ pub(super) fn handle_resolution_choice(
                             !kept.contains(id)
                         }
                     });
-                    for (index, &card_id) in kept.iter().enumerate() {
-                        // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                        player_state.library.insert(index, card_id);
-                    }
-                    // CR 401.2: `rest_split_top_count` is deliberately not
-                    // consulted on this branch. It only exists for a remainder
-                    // whose position within the library is still open, and
-                    // this branch is the reorder form (`kept_destination ==
-                    // Some(Library)`) whose text has ALREADY named both
-                    // positions — the kept cards go on top and the remainder
-                    // to the bottom in the same instruction, leaving nothing
-                    // to split. The parser never emits both together.
-                    match rest_destination {
-                        Some(Zone::Library) => {
-                            if rest_order == DigRestOrder::Random {
-                                // CR 400.5 + CR 608.2c: Randomize exactly the
-                                // unchosen pile immediately before bottom placement.
-                                unkept.shuffle(state.rng.draw(RandomDraw::Placement));
-                            }
-                            for &obj_id in &unkept {
-                                // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                                player_state.library.push_back(obj_id);
-                            }
-                            None
+                    if rest_split_top_count.is_some() {
+                        // CR 401.4 + CR 701.20e: Ransack shape —
+                        // "put any number of them on the bottom ... and the rest on top".
+                        // Kept cards go on the bottom in the submitted order; unkept cards go on top.
+                        for &obj_id in &kept {
+                            // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
+                            player_state.library.push_back(obj_id);
                         }
-                        Some(zone) => Some(zone),
-                        // CR 701.20e: a silent remainder is never moved, so the
-                        // graveyard default does not apply to it. The unchosen
-                        // cards were never lifted out of the library above, so
-                        // they are already back in the positions they had.
-                        None if !rest_remainder.is_route() => None,
-                        None => Some(Zone::Graveyard),
+                        match rest_destination {
+                            Some(Zone::Library) => {
+                                if rest_order == DigRestOrder::Random {
+                                    // CR 400.5 + CR 608.2c: Randomize exactly the
+                                    // unchosen pile immediately before top placement.
+                                    unkept.shuffle(state.rng.draw(RandomDraw::Placement));
+                                }
+                                for (index, &obj_id) in unkept.iter().enumerate() {
+                                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
+                                    player_state.library.insert(index, obj_id);
+                                }
+                                None
+                            }
+                            Some(zone) => Some(zone),
+                            None if !rest_remainder.is_route() => None,
+                            None => Some(Zone::Graveyard),
+                        }
+                    } else {
+                        // Fertile Thicket shape — kept cards on top, remainder to the bottom.
+                        for (index, &card_id) in kept.iter().enumerate() {
+                            // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
+                            player_state.library.insert(index, card_id);
+                        }
+                        match rest_destination {
+                            Some(Zone::Library) => {
+                                if rest_order == DigRestOrder::Random {
+                                    // CR 400.5 + CR 608.2c: Randomize exactly the
+                                    // unchosen pile immediately before bottom placement.
+                                    unkept.shuffle(state.rng.draw(RandomDraw::Placement));
+                                }
+                                for &obj_id in &unkept {
+                                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
+                                    player_state.library.push_back(obj_id);
+                                }
+                                None
+                            }
+                            Some(zone) => Some(zone),
+                            None if !rest_remainder.is_route() => None,
+                            None => Some(Zone::Graveyard),
+                        }
                     }
                 };
                 // CR 701.20d: This direct library reorder has the same
