@@ -273,7 +273,13 @@ pub fn resolve(
             // CR 701.20a: "reveal all [filter] cards from among them" — every
             // matching card is the chosen set, so it is the one revealed.
             if is_reveal_chosen {
-                reveal_chosen_cards(state, ability.controller, &selectable_cards, events);
+                reveal_chosen_cards(
+                    state,
+                    ability.controller,
+                    &selectable_cards,
+                    dest == Zone::Library,
+                    events,
+                );
             }
             resolve_mass_put_all(
                 state,
@@ -335,13 +341,47 @@ pub(crate) fn reveal_chosen_cards(
     state: &mut GameState,
     controller: crate::types::player::PlayerId,
     chosen: &[crate::types::identifiers::ObjectId],
+    stays_in_library: bool,
     events: &mut Vec<GameEvent>,
 ) {
     if chosen.is_empty() {
         return;
     }
-    for &card_id in chosen {
-        state.revealed_cards.insert(card_id);
+    if !stays_in_library {
+        for &card_id in chosen {
+            state.revealed_cards.insert(card_id);
+        }
+    } else {
+        // CR 701.20a + CR 701.20d + CR 401.2: a chosen card that is put back
+        // into the library (Fertile Thicket: "reveal ... then put that card on
+        // top") is revealed at the choice and stops being revealed when the same
+        // instruction reorders it. Publish these exact library occurrences now,
+        // before the reorder advances the library knowledge epoch, and mark them
+        // as published by this resolver (the controller-scoped reveal) so the
+        // action-boundary publisher does not re-publish them after the reorder
+        // as durable knowledge of the new library order. Same idiom as
+        // `reveal_until`. The controller-scoped command itself sets the
+        // `revealed_cards` marker, so it must not be pre-inserted (an already
+        // active reveal is skipped and never journaled).
+        use crate::types::resolved_commands::{
+            ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+        };
+        state
+            .resolve_and_apply_information(
+                chosen,
+                ResolvedInformationAudience::Controller(controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("chosen dig reveal occurrences must be live and distinct");
+        state
+            .resolve_and_apply_information(
+                chosen,
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("chosen dig reveal occurrences must be live and distinct");
     }
     state.last_revealed_ids = chosen.to_vec();
     let card_names = chosen

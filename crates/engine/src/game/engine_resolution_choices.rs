@@ -4927,7 +4927,13 @@ pub(super) fn handle_resolution_choice(
             // reveals only the chosen cards, at the moment they are chosen; the
             // unchosen looked-at cards stay private to the looking player.
             if reveal_chosen {
-                effects::dig::reveal_chosen_cards(state, player, &kept, events);
+                effects::dig::reveal_chosen_cards(
+                    state,
+                    player,
+                    &kept,
+                    kept_destination == Some(Zone::Library),
+                    events,
+                );
             }
 
             let mut unkept: Vec<_> = cards
