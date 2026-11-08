@@ -373,8 +373,7 @@ fn is_bare_opponent_choose_count_clause(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("an opponent chooses "),
         tag("target opponent chooses "),
     ))
-    .parse(lower.trim())
-    else {
+    .parse(lower.trim()) else {
         return false;
     };
     all_consuming((
@@ -9974,6 +9973,33 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 Chooser::Controller
             };
             Some(ContinuationAst::ChooseFromExile { count, chooser })
+        }
+        // CR 701.20a + CR 608.2c + CR 608.2d (issue #7460, Thran Tome): "Reveal
+        // the top N cards of your library. Target opponent chooses one of those
+        // cards." — the reveal-top head now lowers to a selection-less public
+        // `Dig` (`reveal: true`, no keep count, no destination), so the revealed
+        // cards are the candidate pool exactly as after `RevealTop`. Only the
+        // opponent-chooser form is claimed here: the instruction names the
+        // opponent as the player who makes the choice, and the imperative
+        // fallback would otherwise hand it to the controller. Controller-chosen
+        // forms keep their existing `Dig` handling.
+        Effect::Dig {
+            reveal: true,
+            keep_count: None,
+            destination: None,
+            ..
+        } if is_choose_from_pool_continuation(&lower)
+            && alt((
+                tag::<_, _, OracleError<'_>>("an opponent chooses "),
+                tag("target opponent chooses "),
+            ))
+            .parse(lower.as_str())
+            .is_ok() =>
+        {
+            Some(ContinuationAst::ChooseFromExile {
+                count: parse_choose_count_from_text(&lower),
+                chooser: Chooser::Opponent,
+            })
         }
         Effect::ChangeZone {
             origin: Some(Zone::Library),

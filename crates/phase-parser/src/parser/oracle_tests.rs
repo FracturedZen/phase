@@ -17034,7 +17034,6 @@ fn modal_target_opponent_chooses_one_emdash_is_not_pool_choose() {
     }
 }
 
-
 #[test]
 fn thran_tome_reveal_then_target_opponent_chooses_of_those() {
     use crate::parser::oracle_effect::parse_effect_chain;
@@ -17054,13 +17053,21 @@ fn thran_tome_reveal_then_target_opponent_chooses_of_those() {
         }
         n = d.sub_ability.as_deref();
     }
-    assert!(found, "expected ChooseFromZone, chain head {:?}", chain.effect);
+    assert!(
+        found,
+        "expected ChooseFromZone, chain head {:?}",
+        chain.effect
+    );
 }
 
 #[test]
-fn gifts_given_that_player_chooses_two_of_those_is_opponent() {
+fn gifts_given_that_player_chooses_two_of_those_is_declared_target_opponent() {
+    // CR 608.2c + CR 115.1: "That player" names the opponent already announced
+    // as the search's target, so the chooser binds to that declared player
+    // (engine coverage: integration `gifts_given_opponent_partition`), not to
+    // an arbitrary `Opponent`.
     use crate::parser::oracle_effect::parse_effect_chain;
-    use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
+    use crate::types::ability::{AbilityKind, ChosenGroupId, ZoneChoiceChooser};
     let chain = parse_effect_chain(
         "Search target opponent\'s library for four cards with different names and reveal them. That player chooses two of those cards. Put the chosen cards into the player\'s graveyard and the rest into your hand. Then that player shuffles their library.",
         AbilityKind::Spell,
@@ -17071,11 +17078,11 @@ fn gifts_given_that_player_chooses_two_of_those_is_opponent() {
             &*choose.effect,
             Effect::ChooseFromZone {
                 count: 2,
-                chooser: ZoneChoiceChooser::Opponent,
+                chooser: ZoneChoiceChooser::DeclaredPlayer { group },
                 ..
-            }
+            } if *group == ChosenGroupId::declared_player(0)
         ),
-        "That player chooses two of those → Opponent, got {:?}",
+        "That player chooses two of those → DeclaredPlayer(target opponent), got {:?}",
         choose.effect
     );
 }
