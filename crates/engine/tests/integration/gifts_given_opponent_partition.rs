@@ -345,3 +345,20 @@ fn threats_undetected_chosen_cards_stay_in_the_library_through_one_shuffle() {
     assert_eq!(zone_changes_of(&events, &chosen).count(), 0, "{events:?}");
     assert_eq!(shuffled_players(&events), vec![P0]);
 }
+
+#[test]
+fn gifts_ungiven_binds_non_default_opponent_and_partitions_the_pool() {
+    let p2 = PlayerId(2);
+    let r = cast_and_choose(
+        GameScenario::new_n_player(4, 42),
+        "Gifts Ungiven",
+        GIFTS_UNGIVEN,
+        P0,
+        p2,
+        p2,
+        (0, 2),
+    );
+    assert_in_zone(&r.runner, &r.chosen, P0, Zone::Graveyard);
+    assert_in_zone(&r.runner, &r.rest, P0, Zone::Hand);
+    assert_eq!(r.shuffled, vec![P0]);
+}

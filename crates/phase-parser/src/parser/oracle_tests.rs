@@ -16881,18 +16881,21 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
             "Search your library for up to four cards with different names and reveal them. Target opponent chooses two of those cards. Put the chosen cards into your graveyard and the rest into your hand. Then shuffle.",
             AbilityKind::Spell,
         );
-    let choose = chain
+    let head = chain
         .sub_ability
         .as_ref()
-        .expect("search should chain directly to ChooseFromZone");
+        .expect("search chains to the targeted chooser declaration");
+    assert!(matches!(&*head.effect, Effect::TargetOnly { .. }));
+    let declared = head.declares_chosen_group.expect("declared player group");
+    let choose = head.sub_ability.as_ref().expect("declared player's choice");
     assert!(
         matches!(
             &*choose.effect,
             Effect::ChooseFromZone {
                 count: 2,
-                chooser: ZoneChoiceChooser::Opponent,
+                chooser: ZoneChoiceChooser::DeclaredPlayer { group },
                 ..
-            }
+            } if *group == declared
         ),
         "{:?}",
         choose.effect
@@ -16926,7 +16929,7 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
 // ── Issue #7460: bare "Target opponent chooses one." (Intuition class) ──
 
 #[test]
-fn bare_target_opponent_chooses_one_after_search_is_choose_from_zone() {
+fn bare_target_opponent_chooses_one_after_search_binds_declared_target() {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
 
@@ -16935,20 +16938,34 @@ fn bare_target_opponent_chooses_one_after_search_is_choose_from_zone() {
         "Search your library for three cards and reveal them. Target opponent chooses one. Put that card into your hand and the rest into your graveyard. Then shuffle.",
         AbilityKind::Spell,
     );
-    let choose = chain
+    // CR 115.1 + CR 601.2c + CR 608.2c: the chooser is announced as a target,
+    // so a `TargetOnly` root declares it and the choice reads that player.
+    let head = chain
         .sub_ability
         .as_ref()
-        .expect("search must chain to ChooseFromZone");
+        .expect("search must chain to the targeted-chooser declaration");
+    assert!(
+        matches!(&*head.effect, Effect::TargetOnly { .. }),
+        "Target opponent must be declared as a target, got {:?}",
+        head.effect
+    );
+    let group = head
+        .declares_chosen_group
+        .expect("the TargetOnly root declares the chooser group");
+    let choose = head
+        .sub_ability
+        .as_ref()
+        .expect("declaration must chain to ChooseFromZone");
     assert!(
         matches!(
             &*choose.effect,
             Effect::ChooseFromZone {
                 count: 1,
-                chooser: ZoneChoiceChooser::Opponent,
+                chooser: ZoneChoiceChooser::DeclaredPlayer { group: g },
                 ..
-            }
+            } if *g == group
         ),
-        "bare Target opponent chooses one. must be ChooseFromZone{{Opponent,1}}, got {:?}",
+        "bare Target opponent chooses one. must be ChooseFromZone{{DeclaredPlayer(target),1}}, got {:?}",
         choose.effect
     );
     let chosen_move = choose
@@ -17035,19 +17052,31 @@ fn modal_target_opponent_chooses_one_emdash_is_not_pool_choose() {
 }
 
 #[test]
-fn thran_tome_reveal_then_target_opponent_chooses_of_those() {
+fn thran_tome_reveal_then_target_opponent_chooses_of_those_binds_target() {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{AbilityKind, ZoneChoiceChooser};
     let chain = parse_effect_chain(
         "Reveal the top three cards of your library. Target opponent chooses one of those cards. Put that card into your graveyard, then draw two cards.",
         AbilityKind::Activated,
     );
+    // CR 115.1 + CR 608.2c: the choice reads the opponent a `TargetOnly`
+    // ancestor announced, not an unbound `Opponent`.
     let mut n = Some(&chain);
+    let mut declared = None;
     let mut found = false;
     while let Some(d) = n {
+        if matches!(&*d.effect, Effect::TargetOnly { .. }) {
+            declared = d.declares_chosen_group;
+        }
         if let Effect::ChooseFromZone { count, chooser, .. } = &*d.effect {
             assert_eq!(*count, 1);
-            assert_eq!(*chooser, ZoneChoiceChooser::Opponent, "got {:?}", chooser);
+            let group = declared.expect("a TargetOnly root declares the chooser");
+            assert_eq!(
+                *chooser,
+                ZoneChoiceChooser::DeclaredPlayer { group },
+                "got {:?}",
+                chooser
+            );
             found = true;
             break;
         }

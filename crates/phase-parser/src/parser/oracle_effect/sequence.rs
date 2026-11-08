@@ -334,6 +334,35 @@ fn has_choice_partition_destinations(lower: &str) -> bool {
     .is_some()
 }
 
+/// CR 115.1 + CR 608.2c: a "Target opponent chooses …" clause lowers to a
+/// `TargetOnly` root announcing the chooser with the `ChooseFromZone` as its
+/// child. Continuations that dispose of the choice ("Put that card into your
+/// hand and the rest into your graveyard") patch that child, not the root.
+fn targeted_chooser_choice_anchor(def: &mut AbilityDefinition) -> &mut AbilityDefinition {
+    let nested = matches!(&*def.effect, Effect::TargetOnly { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| matches!(&*sub.effect, Effect::ChooseFromZone { .. }));
+    if nested {
+        def.sub_ability.as_deref_mut().expect("checked above")
+    } else {
+        def
+    }
+}
+
+/// CR 115.1 + CR 601.2c + CR 608.2c: "Target opponent chooses …" announces
+/// its chooser as a target of the spell or ability. It is not "an opponent"
+/// picked at resolution (`Chooser::Opponent`), so the pool continuation
+/// declines it: the clause lowers through the subject layer, which declares
+/// the targeted opponent and binds the zone choice's chooser to that
+/// announced player (`ZoneChoiceChooser::DeclaredPlayer`).
+fn is_targeted_opponent_choose_clause(lower: &str) -> bool {
+    tag::<_, _, OracleError<'_>>("target opponent chooses ")
+        .parse(lower)
+        .is_ok()
+}
+
 /// CR 608.2d + issue #7460: whether `lower` is a choose-from-revealed/searched
 /// pool continuation — either the classic "… of them/those" form, or the bare
 /// Intuition-class "Target/An opponent chooses N." (no "of them/those").
@@ -6534,7 +6563,7 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::PutChoiceRemainderOnBottom => {
-            let Some(previous) = defs.last_mut() else {
+            let Some(previous) = defs.last_mut().map(targeted_chooser_choice_anchor) else {
                 return;
             };
             let bottom_def = AbilityDefinition::new(
@@ -6573,7 +6602,7 @@ pub(super) fn apply_clause_continuation(
             chosen_destination,
             rest_destination,
         } => {
-            let Some(previous) = defs.last_mut() else {
+            let Some(previous) = defs.last_mut().map(targeted_chooser_choice_anchor) else {
                 return;
             };
             if matches!(&*previous.effect, Effect::ChooseFromZone { .. }) {
@@ -9958,7 +9987,8 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         | Effect::RevealTop { .. }
         | Effect::RevealHand { .. }
         | Effect::SearchLibrary { .. }
-            if is_choose_from_pool_continuation(&lower) =>
+            if is_choose_from_pool_continuation(&lower)
+                && !is_targeted_opponent_choose_clause(&lower) =>
         {
             let count = parse_choose_count_from_text(&lower);
             let chooser = if alt((
@@ -9974,27 +10004,20 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             };
             Some(ContinuationAst::ChooseFromExile { count, chooser })
         }
-        // CR 701.20a + CR 608.2c + CR 608.2d (issue #7460, Thran Tome): "Reveal
-        // the top N cards of your library. Target opponent chooses one of those
-        // cards." — the reveal-top head now lowers to a selection-less public
-        // `Dig` (`reveal: true`, no keep count, no destination), so the revealed
-        // cards are the candidate pool exactly as after `RevealTop`. Only the
-        // opponent-chooser form is claimed here: the instruction names the
-        // opponent as the player who makes the choice, and the imperative
-        // fallback would otherwise hand it to the controller. Controller-chosen
-        // forms keep their existing `Dig` handling.
+        // CR 701.20a + CR 608.2c + CR 608.2d: reveal-top heads can be
+        // selection-less public Digs. "An opponent chooses" consumes that pool
+        // without announcing a target. "Target opponent chooses" must instead
+        // take the subject layer's TargetOnly + DeclaredPlayer path, just as
+        // after SearchLibrary/RevealTop above.
         Effect::Dig {
             reveal: true,
             keep_count: None,
             destination: None,
             ..
         } if is_choose_from_pool_continuation(&lower)
-            && alt((
-                tag::<_, _, OracleError<'_>>("an opponent chooses "),
-                tag("target opponent chooses "),
-            ))
-            .parse(lower.as_str())
-            .is_ok() =>
+            && tag::<_, _, OracleError<'_>>("an opponent chooses ")
+                .parse(lower.as_str())
+                .is_ok() =>
         {
             Some(ContinuationAst::ChooseFromExile {
                 count: parse_choose_count_from_text(&lower),

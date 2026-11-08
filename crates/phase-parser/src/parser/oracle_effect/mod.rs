@@ -30689,16 +30689,46 @@ fn lower_subject_predicate_ast_body(
             // typed or property-carrying subjects fall through to the honesty
             // gate below.
             //
-            // The targeted form ("target opponent chooses …" — Forgotten Lore,
-            // Shrouded Lore) is deliberately NOT rebound: `parse_target` lowers
-            // "target opponent" to the same bare opponent filter, but the
-            // subject then carries `target: Some(_)` — the chooser is bound to
-            // a chosen target slot, not "an opponent of the controller's
-            // choice", and `Chooser::Opponent` cannot represent that binding.
-            // Gating on `subject.target.is_none()` keeps those cards on the
-            // honesty gate below — the same fall-through the exiled-this-way
-            // anaphor keeps for its targeted form (imperative.rs
-            // `try_parse_choose_exiled_anaphor`).
+            // Filtered targeted choices (Forgotten Lore, Shrouded Lore) still
+            // fall through to the honesty gate. The unfiltered pool choice
+            // below has explicit declaration and chooser-binding authority.
+            // CR 115.1 + CR 601.2c + CR 608.2c (issue #7460): "Target opponent
+            // chooses N [of those cards]" (Intuition, Gifts Ungiven, Thran Tome).
+            // The printed chooser is a TARGET: the opponent is announced when
+            // the spell or ability is put on the stack, and that announced
+            // opponent — not "an opponent" picked at resolution — makes the
+            // choice. Declare the subject on a `TargetOnly` root (the same shape
+            // the subject-exile production uses) and bind the zone choice's
+            // chooser to that declared player, mirroring main's Gifts Given
+            // "That player chooses" `DeclaredPlayer` binding.
+            if let Some(target) = subject.target.clone() {
+                if matches!(
+                    &clause.effect,
+                    Effect::ChooseFromZone {
+                        chooser: ZoneChoiceChooser::Controller,
+                        filter: None,
+                        ..
+                    }
+                ) && matches!(
+                    &affected,
+                    TargetFilter::Typed(tf)
+                        if tf.controller == Some(ControllerRef::Opponent)
+                            && tf.type_filters.is_empty()
+                            && tf.properties.is_empty()
+                ) {
+                    let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+                    ctx.next_declared_player_group += 1;
+                    ctx.clause_declared_group = Some(group);
+                    if let Effect::ChooseFromZone { chooser, .. } = &mut clause.effect {
+                        *chooser = ZoneChoiceChooser::DeclaredPlayer { group };
+                    }
+                    let mut choose = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+                    choose.sub_ability = clause.sub_ability.take();
+                    let mut head = parsed_clause(Effect::TargetOnly { target });
+                    head.sub_ability = Some(Box::new(choose));
+                    return head;
+                }
+            }
             if let Effect::ChooseFromZone { chooser, .. } = &mut clause.effect {
                 if subject.target.is_none()
                     && matches!(affected, TargetFilter::ParentTargetController)
