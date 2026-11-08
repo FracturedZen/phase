@@ -230,6 +230,7 @@ mod game_state_stack_high_water;
 mod gandalf_flash_artifact_spells;
 mod gather_the_townsfolk_fateful_hour;
 mod gatta_and_luzzu_regression;
+mod gbp_alacrian_10285;
 mod gemstone_caverns_begin_game;
 mod gemstone_mine_depletion_sacrifice_6507;
 mod generated_target_slot_ownership;
