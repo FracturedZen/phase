@@ -60,6 +60,10 @@ fn alacrian_armory_vehicle_conjunct_binds_parent_target_until_eot() {
         dbg.contains("BecomeSaddled"),
         "the Mount conjunct must lower to BecomeSaddled; parsed execute:\n{dbg}"
     );
+    assert!(
+        dbg.contains("ReplicatedOrBranch"),
+        "the Vehicle conjunct must be an independent type-membership branch so a failed Mount gate does not skip it (CR 608.2c); parsed execute:\n{dbg}"
+    );
 }
 
 /// Gameplay repro: targeting a Vehicle must make THAT permanent an artifact

@@ -2157,6 +2157,52 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2c: a suffix gate that inspects the chosen object (`if it's a Mount`,
+/// `if it's a Vehicle`) — including the optional-target wrapper
+/// `And { [HasObjectTarget, TargetMatchesFilter] }` that CR 115.6 adds so a
+/// declined "up to one" target suppresses the rider.
+fn is_target_matches_filter_gate(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::TargetMatchesFilter { .. } => true,
+        AbilityCondition::And { conditions } => {
+            let membership: Vec<_> = conditions
+                .iter()
+                .filter(|inner| !matches!(inner, AbilityCondition::HasObjectTarget))
+                .collect();
+            !membership.is_empty()
+                && membership
+                    .iter()
+                    .all(|inner| matches!(inner, AbilityCondition::TargetMatchesFilter { .. }))
+        }
+        AbilityCondition::Not { condition } => is_target_matches_filter_gate(condition),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: instructions are followed in the order written, each with its own
+/// gate. A clause gated on whether the chosen object matches a filter
+/// ("becomes saddled if it's a Mount and becomes an artifact creature if it's a
+/// Vehicle" — Alacrian Armory #10285) that directly follows another such clause
+/// with a DIFFERENT filter is an independent instruction: its gate reads the
+/// chosen object's characteristics, never the previous clause's effect or gate.
+/// Stamp it `SequentialSibling` + `ReplicatedOrBranch` so it is still evaluated
+/// when the previous clause's gate is false.
+///
+/// Only a gate that DIFFERS from the previous gated clause's is independent. A
+/// clause repeating the same filter is the continuation of one gated instruction
+/// and keeps its existing link.
+fn mark_independent_target_matches_filter_gates(defs: &mut [AbilityDefinition]) {
+    let mut previous_gate: Option<AbilityCondition> = None;
+    for def in defs {
+        let gate = def.condition.clone().filter(is_target_matches_filter_gate);
+        if gate.is_some() && previous_gate.is_some() && gate != previous_gate {
+            def.sub_link = SubAbilityLink::SequentialSibling;
+            def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        }
+        previous_gate = gate;
+    }
+}
+
 /// CR 701.20e + CR 608.2c: In "Look at the top N cards of your library. You
 /// may put those cards on the bottom of your library in any order" (Petals of
 /// Insight / Lim-Dûl's Vault class), "those cards" names the set the look
@@ -4485,6 +4531,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     thread_chosen_damage_source_into_oneshot_effects(&mut defs);
 
     mark_independent_mana_spent_gates(&mut defs);
+    mark_independent_target_matches_filter_gates(&mut defs);
 
     // Chain: last has no sub_ability, each earlier one chains to next.
     // When a def already has a sub_ability (e.g., TargetOnly with attached Explore),
@@ -6284,6 +6331,51 @@ mod arena_tests {
                 "{name}: the second color's gate is independent"
             );
         }
+    }
+
+    /// CR 608.2c (#10285): "becomes saddled if it's a Mount and becomes an
+    /// artifact creature if it's a Vehicle" — the later type-membership gate
+    /// must still run when the earlier one is false.
+    #[test]
+    fn distinct_target_matches_filter_gates_are_stamped_independent() {
+        let text = "At the beginning of combat on your turn, choose up to one target Mount or Vehicle you control. Until end of turn, that permanent becomes saddled if it's a Mount and becomes an artifact creature if it's a Vehicle.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Alacrian Armory",
+            &[],
+            &["Artifact".to_string()],
+            &[],
+        );
+        let root = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.execute.as_deref())
+            .expect("Alacrian Armory begin-combat trigger");
+        let mut stamps = Vec::new();
+        let mut node = Some(root);
+        while let Some(def) = node {
+            if def
+                .condition
+                .as_ref()
+                .is_some_and(is_target_matches_filter_gate)
+            {
+                stamps.push((def.sub_link, def.sibling_condition));
+            }
+            node = def.sub_ability.as_deref();
+        }
+        assert_eq!(
+            stamps.len(),
+            2,
+            "Mount and Vehicle conjuncts must each carry a type-membership gate: {stamps:?}"
+        );
+        assert_eq!(
+            stamps[1],
+            (
+                SubAbilityLink::SequentialSibling,
+                SiblingCondition::ReplicatedOrBranch
+            ),
+            "the Vehicle conjunct must be an independent instruction: {stamps:?}"
+        );
     }
 
     /// CR 608.2c: a clause repeating the SAME gate is the "then" continuation of

@@ -29626,8 +29626,7 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
             // ("choose … Mount or Vehicle") is still an announced object target.
             Some(t @ (TargetFilter::Or { .. } | TargetFilter::And { .. }))
                 if !t.is_player_scope()
-                    && triggers::extract_target_filter_from_effect(&prev.parsed.effect)
-                        .is_some()
+                    && extract_target_filter_from_effect(&prev.parsed.effect).is_some()
                     && subject::declared_object_target_is_object(t) =>
             {
                 return Some((index, t));
