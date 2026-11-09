@@ -3633,6 +3633,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // Trailing space mirrors other transitive keyword actions (`create `,
     // `sacrifice `): amass always takes a subtype + count.
     .or(value((), tag("amass ")))
+    // CR 701.60a (#8106): "suspect" is a keyword action that takes an object
+    // ("suspect it"), so "create a … token and suspect it" (Case of the Stashed
+    // Skeleton) is two instructions. Split the conjunct so it reaches the
+    // SuspectLastCreated continuation instead of being swallowed by the Token
+    // clause. The trailing space keeps "suspected" (a designation) from matching.
+    .or(value((), tag("suspect ")))
     // CR 701.20a (issue #516): "reveal " as an imperative clause starter so
     // chains like "choose land or nonland and reveal cards from the top of
     // your library ..." split at the bare " and " and each half reaches its
