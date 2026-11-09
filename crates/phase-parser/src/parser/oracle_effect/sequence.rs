@@ -12135,15 +12135,10 @@ mod tests {
         // Skeleton creature token and suspect it". Without "suspect " as a clause
         // starter the conjunct stays glued to the Token clause and is dropped;
         // with the split, SuspectLastCreated chains onto LastCreated.
-        let chunks = clause_texts(
-            "create a 2/1 black Skeleton creature token and suspect it",
-        );
+        let chunks = clause_texts("create a 2/1 black Skeleton creature token and suspect it");
         assert_eq!(
             chunks,
-            vec![
-                "create a 2/1 black Skeleton creature token",
-                "suspect it"
-            ]
+            vec!["create a 2/1 black Skeleton creature token", "suspect it"]
         );
     }
 
