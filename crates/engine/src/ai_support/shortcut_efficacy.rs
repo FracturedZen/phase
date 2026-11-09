@@ -2285,6 +2285,8 @@ mod tests {
                     related_token_ids: _,
                     // Image/catalog identifiers.
                     source_printing_ids: _,
+                    // Coverage classification, not printed game rules; never on GameObject.
+                    confirmed_misparse: _,
                     // CR 202.3d + CR 709.4b: a split card's combined off-stack mana value,
                     // read by deck-construction checks. A cost, not what resolving does.
                     off_stack_mana_value_override: _,
@@ -3399,7 +3401,7 @@ mod tests {
         // card pipeline uses.
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/types/triggers.rs"
+            "/../phase-ast/src/types/triggers.rs"
         ))
         .expect("the enum's own source file is readable");
         let body = source
