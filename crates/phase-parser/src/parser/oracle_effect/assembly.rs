@@ -4879,7 +4879,6 @@ pub(super) fn bind_repeat_directives(root: &mut AbilityDefinition) -> bool {
     }
 }
 
-
 /// CR 608.2c: kicked "instead create …" after an "It has …" LastCreated grant.
 ///
 /// Call Up Emrakul to Help (#10227) lowers to
