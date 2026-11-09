@@ -10903,9 +10903,7 @@ fn parse_that_player_controls_more_comparison(input: &str) -> OracleResult<'_, S
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCount {
-                    filter: lhs_filter,
-                },
+                qty: QuantityRef::ObjectCount { filter: lhs_filter },
             },
             comparator,
             rhs: QuantityExpr::Ref {
@@ -12863,16 +12861,18 @@ mod tests {
             let StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(lhs),
-                        },
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(lhs),
+                            },
                     },
                 comparator: got_cmp,
                 rhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCount {
-                            filter: TargetFilter::Typed(rhs),
-                        },
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(rhs),
+                            },
                     },
             } = condition
             else {
@@ -12882,11 +12882,15 @@ mod tests {
             assert_eq!(lhs.controller, Some(controller), "{text:?}");
             assert_eq!(rhs.controller, Some(ControllerRef::You), "{text:?}");
             assert!(
-                lhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)),
+                lhs.type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Land)),
                 "{text:?}: {lhs:?}"
             );
             assert!(
-                rhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)),
+                rhs.type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Land)),
                 "{text:?}: {rhs:?}"
             );
         }
@@ -20158,7 +20162,10 @@ mod tests {
             } => {
                 assert_eq!(lhs.controller, Some(ControllerRef::ScopedPlayer));
                 assert_eq!(rhs.controller, Some(ControllerRef::You));
-                assert!(lhs.type_filters.iter().any(|f| matches!(f, TypeFilter::Land)));
+                assert!(lhs
+                    .type_filters
+                    .iter()
+                    .any(|f| matches!(f, TypeFilter::Land)));
             }
             other => panic!("expected fewer-lands comparison, got {other:?}"),
         }

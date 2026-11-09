@@ -14389,9 +14389,7 @@ fn create_tokens_equal_to_fewer_lands_difference() {
             comparator: Comparator::LT,
             rhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::land().controller(ControllerRef::You)
-                    ),
+                    filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
                 },
             },
         }),
@@ -14449,16 +14447,18 @@ fn target_opponent_controls_more_lands_gates_effect() {
             comparator: Comparator::GT,
             rhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
-                    filter: TargetFilter::Typed(
-                        TypedFilter::land().controller(ControllerRef::You)
-                    ),
+                    filter: TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
                 },
             },
         }),
         "got {:?}",
         def.condition
     );
-    assert!(matches!(*def.effect, Effect::Draw { .. }), "{:?}", def.effect);
+    assert!(
+        matches!(*def.effect, Effect::Draw { .. }),
+        "{:?}",
+        def.effect
+    );
 }
 
 #[test]
