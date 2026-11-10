@@ -1,5 +1,6 @@
 ---
 source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 2732
 expression: "&lowered"
 ---
 {
@@ -137,7 +138,27 @@ expression: "&lowered"
           "enters_attacking": false
         },
         "cost": null,
-        "sub_ability": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Suspect",
+            "target": {
+              "type": "LastCreated"
+            },
+            "scope": {
+              "type": "Single"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
         "duration": null,
         "description": null,
         "target_prompt": null,
