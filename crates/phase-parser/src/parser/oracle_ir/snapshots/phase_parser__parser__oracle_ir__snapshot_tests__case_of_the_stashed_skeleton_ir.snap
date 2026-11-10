@@ -1,5 +1,6 @@
 ---
 source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 2731
 expression: "&ir"
 ---
 {
@@ -61,11 +62,11 @@ expression: "&ir"
                         "first_line": 0,
                         "last_line": 0,
                         "start_byte": 0,
-                        "end_byte": 57,
+                        "end_byte": 42,
                         "precision": "ChainRelative",
                         "ordinal_within_span": 0
                       },
-                      "fragment": "create a 2/1 black Skeleton creature token and suspect it"
+                      "fragment": "create a 2/1 black Skeleton creature token"
                     },
                     "disposition": {
                       "Emit": {
@@ -102,6 +103,59 @@ expression: "&ir"
                           "type": "Controller"
                         },
                         "enters_attacking": false
+                      },
+                      "duration": null,
+                      "sub_ability": null,
+                      "distribute": null,
+                      "multi_target": null,
+                      "condition": null,
+                      "optional": false,
+                      "unless_pay": null
+                    },
+                    "boundary": "Comma",
+                    "condition": null,
+                    "is_optional": false,
+                    "opponent_may_scope": null,
+                    "repeat_for": null,
+                    "player_scope": null,
+                    "starting_with": null,
+                    "delayed_condition": null,
+                    "prefix_delayed_condition": null,
+                    "multi_target": null,
+                    "where_x_expression": null,
+                    "unless_pay": null
+                  },
+                  {
+                    "id": 1,
+                    "source": {
+                      "id": {
+                        "item": 0,
+                        "ordinal": 2
+                      },
+                      "span": {
+                        "first_line": 0,
+                        "last_line": 0,
+                        "start_byte": 47,
+                        "end_byte": 57,
+                        "precision": "ChainRelative",
+                        "ordinal_within_span": 1
+                      },
+                      "fragment": "suspect it"
+                    },
+                    "disposition": {
+                      "Continue": {
+                        "continuation": "SuspectLastCreated"
+                      }
+                    },
+                    "parsed": {
+                      "effect": {
+                        "type": "Suspect",
+                        "target": {
+                          "type": "ParentTarget"
+                        },
+                        "scope": {
+                          "type": "Single"
+                        }
                       },
                       "duration": null,
                       "sub_ability": null,
