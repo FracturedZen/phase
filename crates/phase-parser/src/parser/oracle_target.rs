@@ -12013,9 +12013,9 @@ mod tests {
             tf.type_filters
         );
         assert!(
-            tf.type_filters
-                .iter()
-                .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))),
+            tf.type_filters.iter().any(
+                |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))
+            ),
             "expected Non(Land), got {:?}",
             tf.type_filters
         );
@@ -12036,8 +12036,7 @@ mod tests {
         );
 
         // Bare exclusion with no mass conjunct — fully consumed.
-        let (filter, rest) =
-            parse_type_phrase_folding("creature not named ebondeath, dracolich");
+        let (filter, rest) = parse_type_phrase_folding("creature not named ebondeath, dracolich");
         let tf = typed_leg(&filter).expect("typed filter");
         assert!(
             tf.properties.contains(&FilterProp::Not {

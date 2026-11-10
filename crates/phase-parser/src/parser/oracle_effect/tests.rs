@@ -52889,14 +52889,8 @@ fn detention_sphere_not_named_and_same_name_mass_exile() {
         &["Enchantment".to_string()],
         &[],
     );
-    let trigger = parsed
-        .triggers
-        .first()
-        .expect("enters trigger");
-    let root = trigger
-        .execute
-        .as_ref()
-        .expect("enters execute");
+    let trigger = parsed.triggers.first().expect("enters trigger");
+    let root = trigger.execute.as_ref().expect("enters execute");
     assert!(root.optional, "you may exile …");
     let Effect::ChangeZone {
         destination: Zone::Exile,
@@ -52932,7 +52926,8 @@ fn detention_sphere_not_named_and_same_name_mass_exile() {
         panic!("expected ChangeZoneAll(Exile, Typed), got {:?}", sub.effect);
     };
     assert!(
-        mass.properties.contains(&FilterProp::SameNameAsParentTarget),
+        mass.properties
+            .contains(&FilterProp::SameNameAsParentTarget),
         "mass exile must restrict to the parent target's name, got {:?}",
         mass.properties
     );

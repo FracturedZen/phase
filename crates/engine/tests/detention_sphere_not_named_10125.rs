@@ -55,7 +55,8 @@ fn detention_sphere_not_named_and_same_name_mass_exile() {
         panic!("expected ChangeZoneAll(Exile, Typed), got {:?}", sub.effect);
     };
     assert!(
-        mass.properties.contains(&FilterProp::SameNameAsParentTarget),
+        mass.properties
+            .contains(&FilterProp::SameNameAsParentTarget),
         "mass exile must restrict to the parent target's name, got {:?}",
         mass.properties
     );
