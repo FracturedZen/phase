@@ -8411,6 +8411,20 @@ fn parse_filtered_creature_died_this_turn(input: &str) -> OracleResult<'_, Stati
     ))
 }
 
+/// True when any `Typed` leg of `filter` carries a `Not(Named)` name exclusion.
+fn filter_has_name_exclusion(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(
+            |p| matches!(p, FilterProp::Not { prop } if matches!(**prop, FilterProp::Named { .. })),
+        ),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_has_name_exclusion)
+        }
+        TargetFilter::Not { filter } => filter_has_name_exclusion(filter),
+        _ => false,
+    }
+}
+
 /// CR 700.4 + CR 201.2: the subject of a "<subject> died [under …] this turn"
 /// gate, shared by the plain and under-control arms. A fully consumed type
 /// phrase keeps today's filter. A trailing "not named <name>" is folded in as
@@ -8431,6 +8445,13 @@ fn parse_died_subject_filter(type_text: &str) -> Option<TargetFilter> {
     }
     let leftover = leftover.trim();
     if leftover.is_empty() {
+        // The type-phrase folder can now fold "not named <name>" itself
+        // (issue #10125), distributing it across an `Or`/`And` subject. A name
+        // exclusion over a disjunctive subject isn't modelled for this gate, so
+        // keep failing closed exactly as when the suffix was left over.
+        if !matches!(filter, TargetFilter::Typed(_)) && filter_has_name_exclusion(&filter) {
+            return None;
+        }
         return Some(filter);
     }
     let TargetFilter::Typed(mut typed) = filter else {
