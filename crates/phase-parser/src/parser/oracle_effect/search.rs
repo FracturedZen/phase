@@ -4357,20 +4357,14 @@ mod tests {
         assert!(filter.type_filters.iter().any(
             |type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Dragon")
         ));
-        assert!(filter.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::SharesQuality {
-                quality: SharedQuality::Name,
-                reference: Some(reference),
-                relation: SharedQualityRelation::DoesNotShare,
-            } if matches!(
-                reference.as_ref(),
-                TargetFilter::Typed(TypedFilter {
-                    properties,
-                    ..
-                }) if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name == "tiamat"))
-            )
-        )));
+        // CR 201.2 + CR 201.2a: the type-phrase fold owns "not named X" as the
+        // shared `Not(Named)` exclusion (same authority as
+        // `oracle_nom::filter::parse_not_named_suffix`; issue #10125).
+        assert!(
+            has_not_named(&filter, "tiamat"),
+            "expected Not(Named{{tiamat}}), got {:?}",
+            filter.properties
+        );
     }
 
     #[test]
@@ -6127,6 +6121,17 @@ mod tests {
         }
     }
 
+    /// CR 201.2 + CR 201.2a: "not named <name>" lowers to `Not(Named)`.
+    fn has_not_named(filter: &TypedFilter, expected: &str) -> bool {
+        filter.properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::Not { prop }
+                    if matches!(prop.as_ref(), FilterProp::Named { name } if name == expected)
+            )
+        })
+    }
+
     fn has_supertype(filter: &TypedFilter, supertype: Supertype) -> bool {
         filter.properties.iter().any(
             |property| matches!(property, FilterProp::HasSupertype { value } if *value == supertype),
@@ -6144,18 +6149,12 @@ mod tests {
         let TargetFilter::Typed(filter) = &details.filter else {
             panic!("expected Typed filter, got {:?}", details.filter);
         };
-        assert!(filter.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::SharesQuality {
-                quality: SharedQuality::Name,
-                reference: Some(reference),
-                relation: SharedQualityRelation::DoesNotShare,
-            } if matches!(
-                reference.as_ref(),
-                TargetFilter::Typed(TypedFilter { properties, .. })
-                    if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name == "burning-rune demon"))
-            )
-        )));
+        // CR 201.2 + CR 201.2a: shared `Not(Named)` exclusion (issue #10125).
+        assert!(
+            has_not_named(filter, "burning-rune demon"),
+            "expected Not(Named{{burning-rune demon}}), got {:?}",
+            filter.properties
+        );
         assert_eq!(
             details.selection_constraint,
             SearchSelectionConstraint::SharesQualities {
