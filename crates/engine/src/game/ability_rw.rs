@@ -10789,7 +10789,7 @@ mod attacked_referent_classification_tests {
         assert_eq!(
             target_recipient(&f),
             (true, false),
-            "DeclaredPlayer must classify as player-only, matching TriggeringPlayer              / ParentTargetController / DefendingPlayer"
+            "DeclaredPlayer must classify as player-only, matching TriggeringPlayer / ParentTargetController / DefendingPlayer"
         );
         assert_eq!(
             target_recipient(&TargetFilter::TriggeringPlayer),
@@ -10811,5 +10811,4 @@ mod attacked_referent_classification_tests {
             "a bare DeclaredPlayer is not an object recipient"
         );
     }
-
 }
