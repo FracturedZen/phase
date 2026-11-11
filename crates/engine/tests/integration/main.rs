@@ -316,6 +316,7 @@ mod through_the_forest_gate;
 
 mod resolution_progress_contract;
 
+mod goblin_archaeologist_coin_win_compound_10346;
 mod ignite_memories_random_reveal;
 mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;

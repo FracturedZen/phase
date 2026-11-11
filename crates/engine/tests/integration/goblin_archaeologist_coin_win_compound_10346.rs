@@ -8,7 +8,7 @@
 
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, Effect, TargetFilter, TapStateChange};
+use engine::types::ability::{AbilityKind, Effect, TapStateChange, TargetFilter};
 
 const GOBLIN_ARCHAEOLOGIST: &str = "{R}, {T}: Flip a coin. If you win the flip, \
 destroy target artifact and untap this creature. If you lose the flip, sacrifice \
@@ -85,7 +85,8 @@ fn goblin_archaeologist_one_flip_owns_win_compound_and_lose() {
 /// second FlipCoins.
 #[test]
 fn goblin_archaeologist_effect_chain_compound_win() {
-    let text = "Flip a coin. If you win the flip, destroy target artifact and untap this creature. \
+    let text =
+        "Flip a coin. If you win the flip, destroy target artifact and untap this creature. \
         If you lose the flip, sacrifice this creature.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
     let Effect::FlipCoins {
@@ -95,7 +96,10 @@ fn goblin_archaeologist_effect_chain_compound_win() {
         ..
     } = &*def.effect
     else {
-        panic!("expected one FlipCoins with both branches, got {:?}", def.effect);
+        panic!(
+            "expected one FlipCoins with both branches, got {:?}",
+            def.effect
+        );
     };
     assert!(flips.is_single_flip());
     assert!(matches!(&*win.effect, Effect::Destroy { .. }));
