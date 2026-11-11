@@ -160,27 +160,20 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
         .is_some_and(|host| targets.contains(&host))
 }
 
-/// CR 702.26 + issue #10266: true when the PhaseOut/PhaseIn filter names
-/// players as the phasing subject (not permanents controlled by a player).
+/// CR 702.26 + issue #10266: false only when the PhaseOut/PhaseIn filter is
+/// object-typed (a `Typed` filter naming card types such as Creature or
+/// Permanent), i.e. the phasing subject is permanents, not players.
 ///
 /// `collect_player_targets` returns every `TargetRef::Player` in
 /// `ability.targets` as soon as any exist, without consulting the filter's
-/// type. That is correct for "you phase out" / "target player phases out",
-/// but wrong for "each creature target player controls phases out" — the
-/// player slot is only a controller anchor for the creature population.
+/// type. That is correct for "you phase out" / "target player phases out" /
+/// player anaphors (`DeclaredPlayer`, `ParentTargetSlot`, which already
+/// resolve only to players), but wrong for "each creature target player
+/// controls phases out" — the player slot is only a controller anchor for the
+/// creature population. Every non-object-typed filter keeps its existing
+/// player routing.
 fn phase_filter_is_player_typed(target: &TargetFilter) -> bool {
-    match target {
-        TargetFilter::Controller
-        | TargetFilter::Player
-        | TargetFilter::AllPlayers
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::DeclaredPlayer { .. } => true,
-        // Bare player Typed: empty type_filters (and typically empty
-        // properties). A Typed with Creature/Permanent/… is object-typed
-        // even when its controller is TargetPlayer / TargetOpponent.
-        TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
-        _ => false,
-    }
+    !matches!(target, TargetFilter::Typed(tf) if !tf.type_filters.is_empty())
 }
 
 /// Resolve the target object set for a `PhaseOut` effect. Explicit
