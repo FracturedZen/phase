@@ -160,7 +160,6 @@ fn attachment_host_in_set(state: &GameState, oid: ObjectId, targets: &HashSet<Ob
         .is_some_and(|host| targets.contains(&host))
 }
 
-
 /// CR 702.26 + issue #10266: true when the PhaseOut/PhaseIn filter names
 /// players as the phasing subject (not permanents controlled by a player).
 ///
@@ -312,9 +311,8 @@ mod tests {
         let theirs_b = add_creature(&mut state, PlayerId(1), "Opp B");
         let mine = add_creature(&mut state, PlayerId(0), "Mine");
 
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature().controller(ControllerRef::TargetPlayer),
-        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
         let ability = ResolvedAbility::new(
             Effect::PhaseOut { target: filter },
             vec![TargetRef::Player(PlayerId(1))],
