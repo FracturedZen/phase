@@ -7084,9 +7084,7 @@ fn parse_object_pt_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         ))
         .parse(after_the)
         {
-            if let Ok((after_of, _)) =
-                tag::<_, _, OracleError<'_>>(" of ").parse(after_prop)
-            {
+            if let Ok((after_of, _)) = tag::<_, _, OracleError<'_>>(" of ").parse(after_prop) {
                 if let Ok((rest, scope)) = parse_object_prepositional_scope(after_of) {
                     return Ok((
                         rest,
