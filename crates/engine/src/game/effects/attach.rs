@@ -2,6 +2,7 @@ use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds}
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
@@ -212,7 +213,7 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
-    } else if crate::game::ability_utils::attach_attachment_claims_announcement_slot(
+    } else if crate::types::ability::attach_attachment_claims_announcement_slot(
         attachment_filter,
         &attach_selection(ability),
     ) {
@@ -744,7 +745,7 @@ fn prompt_resolution_attachment_choice(
             Ok(AttachPromptOutcome::Execute)
         };
     }
-    if !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(attachment_filter) {
+    if !crate::types::ability::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
     // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
@@ -1267,7 +1268,7 @@ fn parked_attach_choice_selects_host(operation: &ResolvedAbility) -> bool {
             Effect::Attach { attachment, .. } => {
                 !operation.attach_attachment_candidates().is_empty()
                     || (attachment.is_context_ref()
-                        && !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(
+                        && !crate::types::ability::attach_attachment_filter_needs_target_slot(
                             attachment,
                         ))
             }
@@ -3071,6 +3072,7 @@ mod tests {
         );
         ResolvedAbility::new(
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
