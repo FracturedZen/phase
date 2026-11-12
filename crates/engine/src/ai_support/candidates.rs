@@ -1022,8 +1022,22 @@ pub fn candidate_actions_broad_with_probe(
         } => mana_payment_actions(state, *player, *convoke_mode),
         // CR 605.3a + CR 733.1: activate a mana ability toward the pending one's
         // mana cost, or withdraw the pending activation.
-        WaitingFor::ManaAbilityManaPayment { player, .. } => {
+        WaitingFor::ManaAbilityManaPayment {
+            player,
+            pending_mana_ability,
+        } => {
             let mut actions = mana_tap_actions(state, *player);
+            // CR 601.2h via CR 602.2b: a manual payment is confirmed by passing,
+            // as `mana_payment_actions` does for a spell. Pins are never offered.
+            if crate::game::casting::payment_mode_pays_mana_manually(
+                pending_mana_ability.payment_mode,
+            ) {
+                actions.push(candidate(
+                    GameAction::PassPriority,
+                    TacticalClass::Pass,
+                    Some(*player),
+                ));
+            }
             actions.push(candidate(
                 GameAction::CancelCast,
                 TacticalClass::Pass,
@@ -2243,6 +2257,23 @@ pub fn candidate_actions_broad_with_probe(
                 }
             }
             actions
+        }
+        // Turtle Team-Up hero-choice: the same SelectCards combinations as a
+        // discard (all valid sizes when up_to). No unless-filter shape.
+        WaitingFor::HeroEventChoice {
+            player,
+            count,
+            cards,
+            up_to,
+            min,
+            ..
+        } => {
+            let sizes = if *up_to {
+                (*min..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            bounded_select_card_candidates(*player, cards, sizes)
         }
         WaitingFor::OptionalCostChoice { player, .. } => vec![
             candidate(
@@ -10597,6 +10628,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
