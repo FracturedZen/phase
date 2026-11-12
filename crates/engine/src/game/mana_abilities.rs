@@ -1,19 +1,24 @@
+use crate::game::cost_payability::AbilityCostLegPayability;
+use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::functioning_abilities::static_kind_present;
+use crate::game::game_object::ObjectIncarnationRefExt;
+pub use crate::types::ability::is_mana_ability;
 use crate::types::ability::{
-    chain_moves_card_to_or_from_library, cost_has_component, cost_moves_card_to_or_from_library,
-    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
-    CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
-    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
+    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
+    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
 use crate::types::game_state::{
     CostResume, GameState, ManaAbilityCostCursor, ManaAbilityCostParent,
-    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume, ManaChoice,
-    ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume, ManaTriggerFixedPointResume,
-    PausedCounterCostRemoval, PayCostKind, PayableResource, PendingCostMoveResume,
-    PendingCounterRemoval, PendingManaAbility, ProductionOverride, WaitingFor,
+    ManaAbilityCostParentLifecycle, ManaAbilityCostResolutionMode, ManaAbilityResume,
+    ManaAmountComposition, ManaChoice, ManaChoiceContext, ManaChoicePrompt, ManaColorChoiceResume,
+    ManaTriggerFixedPointResume, PausedCounterCostRemoval, PayCostKind, PayableResource,
+    PendingCostMoveResume, PendingCounterRemoval, PendingManaAbility, ProductionOverride,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{ManaColor, ManaCost, ManaPool, ManaType, PaymentContext};
@@ -60,105 +65,6 @@ pub(crate) enum ManaPayabilityMode {
     Current,
     /// Planning mode: mana sub-costs are deferred; other costs checked now.
     Planning,
-}
-
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
-/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
-/// fourth criterion ("its cost and effect don't move any card to or from a
-/// library"), which is why this is NOT the mana-ability test and must never be
-/// used for activation routing — use [`is_mana_ability`] for that.
-///
-/// This exists because [`is_renewable_mana_ability`] asks a different question:
-/// "is this permanent part of a standing manabase?" A Millikin
-/// ("{T}, Mill a card: Add {C}") stops being a rules mana ability under the
-/// library clause but does not stop being a manabase permanent. Composing the
-/// development predicate on the rules predicate would delete Millikin, Deranged
-/// Assistant, and Codie from `phase-ai`'s `is_intrinsic_mana_source` ->
-/// `card_value::mana_role` -> mulligan `keep_tier`, for a reason unrelated to
-/// manabase development.
-///
-/// CR 605.3b: Mana abilities produce mana and resolve immediately without using
-/// the stack.
-/// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
-/// `ManaTargetRole` naming its recipient and/or count-source player targets;
-/// any declared role means the ability targets and must use the stack. The
-/// `multi_target` mechanism is checked alongside it.
-fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
-    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
-    // declared filters: ANY declared role — recipient or count source — means
-    // the ability names a target and therefore uses the stack (Jeska's Will
-    // mode 1: "Add {R} for each card in target opponent's hand").
-    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
-    // makes this not-a-mana-ability under today's behavior, and this change
-    // must not widen mana-ability status for any shipping card.
-    let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
-        _ => return false,
-    };
-    // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // Reject both the explicit `multi_target` mechanism and the embedded
-    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
-    // card in target opponent's hand" — the spell targets, so it must use the
-    // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
-        return false;
-    }
-    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
-    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
-    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
-    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
-    // off the instant-speed mana-ability path.
-    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
-    if cost_has_component(&ability_def.cost, |c| {
-        matches!(c, AbilityCost::Loyalty { .. })
-    }) {
-        return false;
-    }
-    true
-}
-
-/// CR 605.1a: the single authority for "is this activated ability a mana
-/// ability?" — all four criteria.
-///
-/// CR 605.1a (final sentence): "Do not take into account replacement effects
-/// that may apply, other than self-replacement effects, when evaluating these
-/// criteria." This function is a pure function of the printed
-/// `AbilityDefinition` AST — it takes no `&GameState` and therefore CANNOT
-/// observe a replacement effect. That purity IS the implementation of the
-/// clause, not an accident of the signature: do NOT add a `&GameState`
-/// parameter or consult the replacement registry here. Self-replacement effects
-/// (CR 614.15), which the rule DOES admit, are printed on the ability itself and
-/// so are already in the AST this function reads — see the
-/// `Effect::Counter { countered_spell_zone }` arm of
-/// `Effect::moves_card_to_or_from_library`, which counts Memory Lapse's
-/// "instead" precisely because it is a self-replacement effect.
-///
-/// CR 605.2 is the second reason the signature must stay pure: "A mana ability
-/// remains a mana ability even if the game state doesn't allow it to produce
-/// mana." A classification that could read game state would invite exactly the
-/// state-dependent answer CR 605.2 forbids. (This is also why `Effect::Dig` is
-/// unconditionally true: its only non-moving configuration is state-dependent.)
-pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    produces_mana_on_activation(ability_def)
-        // CR 605.1a: "...and its cost and effect don't move any card to or from
-        // a library." Chromatic Sphere ("{1}, {T}, Sacrifice this artifact: Add
-        // one mana of any color. Draw a card.") is the canonical effect case;
-        // Millikin ("{T}, Mill a card: Add {C}") is the cost-side case.
-        //
-        // The cost axis runs off its OWN walk, not the root cost alone: CR
-        // 602.1a scopes "its cost" to the activation cost, but CR 118.12a ->
-        // CR 118.12 makes an `unless [player] pays` action a cost paid AT
-        // RESOLUTION, which CR 608.2c places under "its effect" — as are the
-        // costs on chain links.
-        //
-        // NOT reclassified, and each for a different CR reason:
-        //  - Chromatic Star  — the draw is a separate ChangesZone trigger.
-        //  - Barbed Sextant  — CR 603.7a, a delayed triggered ability.
-        //  - Shaun & Rebecca — CR 603.12, a reflexive triggered ability.
-        //  - Gilanra         — CR 603.3, a TriggerOnSpend mana-spend grant.
-        //  - The Secret Lair — CR 701.22a, Scry reorders WITHIN a library.
-        && !cost_moves_card_to_or_from_library(ability_def)
-        && !chain_moves_card_to_or_from_library(ability_def)
 }
 
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
@@ -438,44 +344,18 @@ fn sole_produced_color(produced: &[ManaType]) -> Option<ManaColor> {
     Some(first)
 }
 
-/// Visit every reachable link of `ability` — head + `sub_ability` chain +
-/// `else_ability` branches at each link — and return `true` iff `pred` holds
-/// for all of them. Mirrors `chain_is_all_mana` / `chain_has_any_targets`'s
-/// single traversal shape so the two walkers stay structurally identical.
+/// Visit every live link, including coin outcomes, and require `pred` for all.
 fn visit_links_all(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if !pred(ability) {
-        return false;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if !visit_links_all(sub, pred) {
-            return false;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if !visit_links_all(else_branch, pred) {
-            return false;
-        }
-    }
-    true
+    pred(ability)
+        && ability
+            .child_links()
+            .all(|(_, child)| visit_links_all(child, pred))
 }
 
 /// Dual of [`visit_links_all`]: returns `true` iff `pred` holds for any
 /// reachable link.
 fn visit_links_any(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) -> bool) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if visit_links_any(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if visit_links_any(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    super::triggers::any_reachable_link(ability, pred)
 }
 
 /// CR 605.4a: Resolve a triggered mana ability inline (stack-skipped).
@@ -1831,7 +1711,7 @@ fn deferred_spell_sacrifice_reserved(state: &GameState, object_id: ObjectId) -> 
         pending
             .deferred_sacrificed_permanents
             .iter()
-            .any(|selection| selection.object_id == object_id)
+            .any(|selection| selection.selected_object() == Some(object_id))
     })
 }
 
@@ -2130,6 +2010,7 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
                     source_id,
                     Some(ability_index),
                     super::cost_payability::ObjectLegPayment::Unguided,
+                    super::cost_payability::CostSourceRole::AbilitySource,
                 ) {
                     return false;
                 }
@@ -2372,9 +2253,12 @@ fn mana_ability_x_announcement(
                 PayableResource::Speed,
                 super::speed::effective_speed(state, pending.player) as u32,
             ),
+            // CR 107.3a + CR 602.2b: a mana ability's `{X}` leg announces X
+            // for that cost, so the chosen amount concretizes X.
             Some(AnnouncedXLeg::Mana(mana_leg)) => (
-                PayableResource::ManaGeneric {
+                PayableResource::Mana {
                     base_cost: mana_leg.clone(),
+                    composition: ManaAmountComposition::ConcretizeX,
                 },
                 mana_leg_x_cap(state, pending, mana_leg),
             ),
@@ -2602,6 +2486,7 @@ pub(super) fn advance_mana_ability_activation(
                 if !super::effects::collect_evidence::can_collect_evidence(
                     state,
                     pending.player,
+                    None,
                     amount,
                 ) {
                     return Err(EngineError::ActionNotAllowed(
@@ -4594,7 +4479,7 @@ fn run_inline_mana_subresolution(state: &mut GameState, run: impl FnOnce(&mut Ga
     state.named_color_this_resolution = outer_named_color;
 }
 
-fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
+pub(super) fn contains_duplicate_object_id(ids: &[ObjectId]) -> bool {
     ids.iter()
         .enumerate()
         .any(|(index, id)| ids[index + 1..].contains(id))
@@ -5836,9 +5721,12 @@ fn discard_cost_choice(
         .filter(|pending| pending.ability.controller == player)
         .and_then(|pending| {
             pending
-                .deferred_random_discard_cost
+                .deferred_hand_discard_cost
                 .as_ref()
-                .map(|cost| (pending.object_id, cost.count))
+                .and_then(|cost| {
+                    cost.reserved_count()
+                        .map(|count| (pending.object_id, count))
+                })
         })
     {
         eligible.retain(|&id| id != pending_spell);
@@ -5940,7 +5828,11 @@ fn sacrifice_cost_choice(
     source_id: ObjectId,
     ability: &AbilityDefinition,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = super::casting::find_non_self_sacrifice_cost(ability.cost.as_ref()?)?;
+    let sacrifice = super::casting::find_non_self_sacrifice_cost(ability.cost.as_ref()?)?;
+    let crate::types::ability::SacrificeRequirement::Count { count } = sacrifice.requirement else {
+        return None;
+    };
+    let filter = &sacrifice.target;
     let granter = ability.granting_object;
     // CR 118.10: a permanent committed to a pending spell sacrifice can't also
     // pay this cost.
@@ -7724,6 +7616,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,
@@ -7734,6 +7627,7 @@ mod tests {
         }
         fn change_zone(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin,
                 destination,
                 target,
@@ -10275,7 +10169,7 @@ mod tests {
     /// reserved source flips to `true` with 0 clones.
     #[test]
     fn self_sacrifice_reserved_for_pending_cast_still_simulates() {
-        use crate::types::game_state::{DeferredSacrificeSelection, PendingCast};
+        use crate::types::game_state::{DeferredSpellSacrifice, PendingCast};
 
         let mut state = GameState::new_two_player(42);
         let reserved =
@@ -10305,7 +10199,7 @@ mod tests {
         // must be pushed explicitly or the test passes vacuously.
         pending
             .deferred_sacrificed_permanents
-            .push(DeferredSacrificeSelection {
+            .push(DeferredSpellSacrifice::Selected {
                 object_id: reserved,
                 filter: TargetFilter::Typed(TypedFilter::permanent()),
             });
@@ -11724,6 +11618,7 @@ mod tests {
         // `state.exile_links` (see `change_zone::execute_zone_move`).
         let etb = ResolvedAbility::new(
             Ef::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
