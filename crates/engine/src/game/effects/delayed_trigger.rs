@@ -1523,7 +1523,6 @@ fn parent_targets_filter(parent_targets: &[TargetRef]) -> TargetFilter {
     }
 }
 
-
 /// CR 603.7a + CR 608.2c (issue #10248): true when a delayed leave/dies/enters
 /// condition filter still carries a `ParentTarget` anaphor (including nested
 /// under And/Or/Not). Used to keep Lucius-class self-return payloads from
