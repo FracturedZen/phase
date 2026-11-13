@@ -3419,7 +3419,7 @@ fn resolve_commandeer(
         control_changed |= result.events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::ControllerChanged { object_id, old_controller, new_controller }
+                GameEvent::ControllerChanged { object_id, old_controller, new_controller, .. }
                     if *object_id == spell && *old_controller == from && *new_controller == thief
             )
         });

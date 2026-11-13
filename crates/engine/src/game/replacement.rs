@@ -38,8 +38,8 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
     BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenAttackRequest,
-    TokenBatch,
+    EnterWithGrant, EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition,
+    TokenAttackRequest, TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -70,6 +70,12 @@ const COMPLEATED_LOYALTY_INDEX: usize = usize::MAX - 3;
 /// `source` `ObjectId`). It is armed by `GameState::combat_phase_skip_next_turn`
 /// being `Active` for the active player on a combat phase.
 const TURN_SCOPED_COMBAT_SKIP_INDEX: usize = usize::MAX - 4;
+/// CR 614.1b + CR 614.10a: Pending one-shot "skips their next combat phase"
+/// (Revenant Patriarch, Moment of Silence). The skip leaves no battlefield object,
+/// so it is a virtual BeginPhase replacement keyed on its position in
+/// `GameState::pending_combat_phase_skips` (encoded into the sentinel `source`
+/// `ObjectId`), which applying it uses up.
+const PENDING_COMBAT_PHASE_SKIP_INDEX: usize = usize::MAX - 10;
 /// CR 122.1h: Finality-counter redirect — a virtual `ZoneChange{BF→GY}`
 /// replacement keyed on the dying permanent. Intrinsic to the counter (persists
 /// past cleanup, like shield counters), so a reserved candidate id lets the
@@ -215,6 +221,24 @@ fn turn_scoped_combat_skip_replacement_id(player: PlayerId) -> ReplacementId {
 
 fn is_turn_scoped_combat_skip_replacement(rid: ReplacementId) -> bool {
     rid.index == TURN_SCOPED_COMBAT_SKIP_INDEX
+}
+
+/// CR 614.1b + CR 614.10a: virtual replacement id for the pending skip at
+/// `position` in `GameState::pending_combat_phase_skips`.
+fn pending_combat_phase_skip_replacement_id(position: usize) -> ReplacementId {
+    ReplacementId {
+        source: ObjectId(position as u64),
+        index: PENDING_COMBAT_PHASE_SKIP_INDEX,
+    }
+}
+
+fn is_pending_combat_phase_skip_replacement(rid: ReplacementId) -> bool {
+    rid.index == PENDING_COMBAT_PHASE_SKIP_INDEX
+}
+
+/// The position of the pending skip `rid` names.
+fn pending_combat_phase_skip_position(rid: ReplacementId) -> usize {
+    rid.source.0 as usize
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -935,6 +959,10 @@ pub enum ApplyResult {
 /// keeps an un-dispatchable drain from pinning `has_ready()` true forever. That they
 /// are stashed at all is the real defect (issue #5676). See [`ResidentDrainPolicy`]
 /// for the measured census.
+///
+/// Battlefield-entry "and with …" grants are NOT stashed here anymore: the
+/// apply path lifts them onto the event (`enter_with_grants`) and delivery
+/// installs every one, so same-entry riders never collide on this slot.
 fn stash_post_replacement_continuation(
     state: &mut GameState,
     continuation: PostReplacementContinuation,
@@ -1011,6 +1039,90 @@ pub(super) fn ability_tree_copies_tokens(def: &AbilityDefinition) -> bool {
             .else_ability
             .as_deref()
             .is_some_and(ability_tree_copies_tokens)
+}
+
+/// CR 614.1c + CR 611.2a: is this chain link a strippable "and with …" entry
+/// grant — the exact shape `compose_enters_with_entry_grants` emits? A
+/// `GenericEffect` carrying only `static_abilities` with
+/// `Duration::UntilHostLeavesPlay` for `SelfRef`, no `else_ability` of its
+/// own (the chain tail is classified separately), every granted static
+/// unconditional and self-affecting. Anything else — a conditioned grant, a
+/// non-self target, an end cost — stays post-replacement work, exactly as
+/// before; the predicate only ever narrows what the entry fold owns.
+fn is_entry_grant_link(link: &AbilityDefinition) -> bool {
+    if link.else_ability.is_some() {
+        return false;
+    }
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        end_cost,
+    } = &*link.effect
+    else {
+        return false;
+    };
+    if static_abilities.is_empty()
+        || *duration != Some(Duration::UntilHostLeavesPlay)
+        || *target != Some(TargetFilter::SelfRef)
+        || end_cost.is_some()
+    {
+        return false;
+    }
+    static_abilities.iter().all(|static_def| {
+        static_def.affected == Some(TargetFilter::SelfRef) && static_def.condition.is_none()
+    })
+}
+
+/// CR 614.1c + CR 616.1: split a battlefield-entry execute chain into the
+/// chain the event fold classifies plus the entry grants that ride the event.
+/// Grant links are lifted out (cloned without their chain tail, which the
+/// fold classifies on its own); every other link is kept in order. `None`
+/// when the chain holds no grant link — the fast path, with zero behavior
+/// change and zero allocation. The filtered chain is `None` when nothing but
+/// grants remains, in which case the fold finds no residual work and no
+/// continuation is stashed: the grants install at delivery instead.
+fn strip_entry_grant_links(
+    ability: Option<&AbilityDefinition>,
+) -> Option<(Option<AbilityDefinition>, Vec<AbilityDefinition>)> {
+    // Fast path FIRST: walk the chain by reference to learn whether it holds
+    // a grant link before collecting or cloning anything, so ordinary
+    // no-grant entry stays allocation-free. The grant case walks twice; the
+    // common case allocates nothing.
+    let mut probe = ability;
+    let mut has_grant = false;
+    while let Some(link) = probe {
+        if is_entry_grant_link(link) {
+            has_grant = true;
+            break;
+        }
+        probe = link.sub_ability.as_deref();
+    }
+    if !has_grant {
+        return None;
+    }
+    let mut links: Vec<&AbilityDefinition> = Vec::new();
+    let mut current = ability;
+    while let Some(link) = current {
+        links.push(link);
+        current = link.sub_ability.as_deref();
+    }
+    let mut grants = Vec::new();
+    let mut filtered_tail: Option<AbilityDefinition> = None;
+    for link in links.into_iter().rev() {
+        if is_entry_grant_link(link) {
+            let mut grant = link.clone();
+            grant.sub_ability = None;
+            // else_ability is None by the predicate.
+            grants.push(grant);
+        } else {
+            let mut kept = link.clone();
+            kept.sub_ability = filtered_tail.map(Box::new);
+            filtered_tail = Some(kept);
+        }
+    }
+    grants.reverse();
+    Some((filtered_tail, grants))
 }
 
 // CR 614.12a + issue #4886 (review #6): must classify the WHOLE ability tree,
@@ -1431,6 +1543,7 @@ fn optional_replacement_choice_labels(
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
+        AbilityCost::SayPhrase { phrase } => format!("Say \"{phrase}\""),
         AbilityCost::Mana { cost } => match cost {
             crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
             crate::types::mana::ManaCost::Cost { shards, generic } => {
@@ -1463,6 +1576,9 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                 value,
             } => {
                 format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
+            }
+            crate::types::ability::SacrificeRequirement::All => {
+                "Sacrifice all permanents".to_string()
             }
         },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
@@ -1657,6 +1773,12 @@ fn replacement_choice_definition(
 /// `source_object: None`, and falls back to `rid.source` — reproducing today's
 /// behavior (empty name) exactly, rather than naming some unrelated object.
 fn replacement_choice_display_source(state: &GameState, rid: ReplacementId) -> ObjectId {
+    // CR 614.10: a combat skip has no host, and its `rid.source` encodes a player
+    // or a list position, which must not name whichever object has that id.
+    if is_turn_scoped_combat_skip_replacement(rid) || is_pending_combat_phase_skip_replacement(rid)
+    {
+        return ObjectId(0);
+    }
     replacement_choice_definition(state, rid)
         .map(|def| replacement_source_host(rid, def))
         .unwrap_or(rid.source)
@@ -1679,9 +1801,21 @@ fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> St
     if is_finality_counter_replacement(rid) {
         return "Exile it instead".to_string();
     }
+    // CR 616.1: these name what each skip is, because which one is used up is the
+    // affected player's choice.
     if is_turn_scoped_combat_skip_replacement(rid) {
-        // CR 614.10: mandatory skip — static label, never offered as a choice.
-        return "Skip combat phase".to_string();
+        return "Skip all combat phases this turn".to_string();
+    }
+    if is_pending_combat_phase_skip_replacement(rid) {
+        let limited = state
+            .pending_combat_phase_skips
+            .get(pending_combat_phase_skip_position(rid))
+            .is_some_and(|skip| skip.duration.is_some());
+        return if limited {
+            "Skip your next combat phase this turn".to_string()
+        } else {
+            "Skip your next combat phase".to_string()
+        };
     }
     if is_umbra_armor_replacement(rid) {
         return state
@@ -1892,7 +2026,9 @@ fn pay_replacement_may_cost(
         );
         return MayCostOutcome::Unpaid;
     }
-    if !cost.is_payable(state, player, source_id) {
+    // CR 614.1c: an "as this enters, you may pay" cost is offered by a
+    // replacement effect, not a cast, so its source isn't a spell being cast.
+    if !cost.is_payable_for_replacement(state, player, source_id) {
         return MayCostOutcome::Unpaid;
     }
     let paid = match cost {
@@ -2134,6 +2270,7 @@ fn discard_applier(
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
@@ -3954,17 +4091,13 @@ fn stamp_explore_chain(
     applied: &HashSet<AppliedReplacementKey>,
 ) {
     ability.replacement_applied = applied.clone();
-    if !matches!(&ability.effect, Effect::Scry { .. }) {
+    if !matches!(&ability.effect, Effect::Scry { .. })
+        && !super::ability_utils::node_has_stack_target_declaration(ability)
+    {
         ability.set_unpinned_targets(vec![TargetRef::Object(explorer)]);
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        stamp_explore_chain(sub, explorer, applied);
-    }
-    // Mirror `build_resolved_from_def`, which also populates `else_ability`, so a
-    // branching execute chain leaves no explore link with a stale target or an
-    // unseeded applied set.
-    if let Some(else_branch) = ability.else_ability.as_deref_mut() {
-        stamp_explore_chain(else_branch, explorer, applied);
+    for (_, child) in ability.child_links_mut() {
+        stamp_explore_chain(child, explorer, applied);
     }
 }
 
@@ -5962,6 +6095,7 @@ fn bind_search_found_definition(
         conditional_enter_with_counters,
         face_down_profile,
         enters_modified_if,
+        library_shuffle: _,
     } = execute.effect.as_ref()
     else {
         return None;
@@ -7948,7 +8082,13 @@ fn object_replacement_candidate_applies(
     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
         && is_prevention_disabled(state, event)
     {
-        // CR 615.12: effects that disable prevention suppress prevention replacements.
+        // CR 615.12: unpreventable damage is still subject to applicable prevention
+        // effects — they prevent nothing, but "any additional effects they have will
+        // take place". strict-failure: skipping the shield here also drops its rider
+        // (Ironscale Hydra / Nine Lives / Gloom Surgeon / Polukranos rulings); the
+        // rules-correct path needs a typed "that many" vs "prevented this way" rider
+        // amount and is tracked as Command Zone #86. Shield counters already follow
+        // CR 615.12 (`apply_shield_counter_replacement`).
         return false;
     }
     if let Some(ref scope) = repl_def.token_owner_scope {
@@ -8986,6 +9126,28 @@ pub fn find_applicable_replacements(
                 candidates.push(rid);
             }
         }
+
+        // CR 614.10 + CR 614.10a: each pending "skips their next combat phase" of
+        // the active player's team (CR 805.8) applies to a combat phase that would
+        // begin. Decided only at its first step, so a combat in progress can't be
+        // skipped. Skips with the same duration are interchangeable, so one of them
+        // stands for all and CR 616.1 has no choice to offer between them. CR 800.4j:
+        // a turn without an active player has no one to choose among these, and it
+        // runs out through `turns::skip_eliminated_active_turn`.
+        if *phase == crate::types::phase::Phase::BeginCombat
+            && super::players::is_alive(state, *player_id)
+        {
+            let team = super::topology::normalize_shared_turn_recipient(state, *player_id);
+            let mut durations = Vec::new();
+            for (position, skip) in state.pending_combat_phase_skips.iter().enumerate() {
+                if super::topology::normalize_shared_turn_recipient(state, skip.player) == team
+                    && !durations.contains(&&skip.duration)
+                {
+                    durations.push(&skip.duration);
+                    candidates.push(pending_combat_phase_skip_replacement_id(position));
+                }
+            }
+        }
     }
 
     candidates.extend(object_replacement_candidates(state, event, registry));
@@ -9126,6 +9288,14 @@ pub fn find_applicable_replacements(
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
                     {
+                        // CR 615.12: unpreventable damage is still subject to applicable
+                        // prevention effects — they prevent nothing, but "any additional
+                        // effects they have will take place". strict-failure: skipping the
+                        // shield here also drops its rider (Ironscale Hydra / Nine Lives /
+                        // Gloom Surgeon / Polukranos rulings); the rules-correct path needs a
+                        // typed "that many" vs "prevented this way" rider amount and is
+                        // tracked as Command Zone #86. Shield counters already follow
+                        // CR 615.12 (`apply_shield_counter_replacement`).
                         continue;
                     }
                     if let Some(ref cond) = repl_def.condition {
@@ -10153,6 +10323,15 @@ fn apply_single_replacement(
         return Err(ApplyResult::Prevented);
     }
 
+    // CR 614.10a: a one-shot skip is satisfied by the combat phase it replaces;
+    // only the chosen skip is used up, and any other stays for a later occurrence.
+    if is_pending_combat_phase_skip_replacement(rid) {
+        state
+            .pending_combat_phase_skips
+            .remove(pending_combat_phase_skip_position(rid));
+        return Err(ApplyResult::Prevented);
+    }
+
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
@@ -10184,7 +10363,7 @@ fn apply_single_replacement(
     // the same resolution step, right after the ZoneChange completes. Without this,
     // the chooser would never be prompted. Optional replacements set
     // `post_replacement_continuation` in `continue_replacement` when the player accepts.
-    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy) =
+    let (event_key, modifiers, mandatory_post_effect, consume_on_apply, entry_copy, entry_grants) =
         match repl_def_ref {
             Some(repl_def) => {
                 let replacement_controller = replacement_ability_controller(state, rid, repl_def);
@@ -10213,6 +10392,27 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.execute.as_deref(),
                     ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
                 };
+                // CR 614.1c + CR 616.1: on a mandatory battlefield-entry
+                // execute, lift "and with …" grant links out of the
+                // classified chain — they ride the event and install at
+                // delivery, so every same-entry rider survives instead of
+                // only the first stashed continuation. Decline branches,
+                // optional accepts (stashed whole downstream), and non-entry
+                // events keep today's behavior exactly.
+                let stripped_entry_grants = (branch == ReplacementBranch::Execute
+                    && matches!(repl_def.mode, ReplacementMode::Mandatory)
+                    && matches!(
+                        proposed,
+                        ProposedEvent::ZoneChange {
+                            to: Zone::Battlefield,
+                            ..
+                        }
+                    ))
+                .then(|| strip_entry_grant_links(ability))
+                .flatten();
+                let ability = stripped_entry_grants
+                    .as_ref()
+                    .map_or(ability, |(filtered, _)| filtered.as_ref());
                 // CR 510.2 + CR 615.5: All-damage and one-shot prevention shields
                 // created by resolving spells capture a `runtime_execute` rider
                 // and fire it once post-batch against the
@@ -10274,7 +10474,13 @@ fn apply_single_replacement(
                         if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
                             Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
-                            repl_def.execute.as_deref().and_then(|def| {
+                            // `ability` (not `repl_def.execute`): on a gated
+                            // battlefield entry this is the grant-stripped
+                            // chain, so a pure grants-plus-modifiers execute
+                            // finds no residual work and stashes nothing. It
+                            // is identical to `repl_def.execute` everywhere
+                            // the gate does not apply.
+                            ability.and_then(|def| {
                                 // CR 608.2c + CR 121.6b: the applier replaces the
                                 // current individual event with count zero. Run the
                                 // full Draw-plus-rider ability as a nested child so
@@ -10598,12 +10804,28 @@ fn apply_single_replacement(
                     ReplacementBranch::Execute => repl_def.enters_under.clone(),
                     ReplacementBranch::Decline => None,
                 };
+                // CR 614.1c + CR 611.2a: package stripped entry grants with
+                // the granting replacement's controller (CR 109.5) for the
+                // event ride; delivery resolves each through the same chain
+                // authority the post-entry drain uses.
+                let entry_grants: Vec<EnterWithGrant> = stripped_entry_grants
+                    .map(|(_, grants)| {
+                        grants
+                            .into_iter()
+                            .map(|grant| EnterWithGrant {
+                                grant,
+                                controller: replacement_controller,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 (
                     repl_def.event.clone(),
                     modifiers,
                     post_effect,
                     repl_def.consume_on_apply,
                     entry_copy,
+                    entry_grants,
                 )
             }
             None => return Ok(proposed),
@@ -10807,6 +11029,20 @@ fn apply_single_replacement(
                             .enter_with_counters
                             .extend(modifiers.etb_counters.iter().cloned()),
                         _ => {}
+                    }
+                }
+                // CR 614.1c + CR 611.2a: stripped entry grants ride the
+                // battlefield entry in application (CR 616.1) order, like
+                // counters — every same-entry rider survives, not just the
+                // first stashed continuation. Delivery installs them after
+                // CR 400.7's reset (and drops them with the counters when
+                // the entry never reaches the battlefield).
+                if !entry_grants.is_empty() {
+                    if let ProposedEvent::ZoneChange {
+                        enter_with_grants, ..
+                    } = &mut new_event
+                    {
+                        enter_with_grants.extend(entry_grants.iter().cloned());
                     }
                 }
                 // CR 614.5 + CR 609.7b: a `Modified` result that left the
@@ -11465,9 +11701,11 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     }
 
-    // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
-    // so it is unconditional like the umbra-armor / shield-counter destroy.
-    if is_turn_scoped_combat_skip_replacement(rid) {
+    // CR 614.10: a combat skip fully prevents the BeginPhase event, so it is
+    // unconditional like the umbra-armor / shield-counter destroy. Which one
+    // applies decides which is left, so competing skips are the CR 616.1e choice.
+    if is_turn_scoped_combat_skip_replacement(rid) || is_pending_combat_phase_skip_replacement(rid)
+    {
         return CandidateMateriality::Unconditional;
     }
 
@@ -11962,6 +12200,7 @@ pub(crate) fn as_enters_choice_type(def: &ReplacementDefinition) -> Option<&Choi
     }
     match &*execute.effect {
         Effect::Choose {
+            chooser: _,
             choice_type,
             persist: true,
             selection,
@@ -12867,13 +13106,13 @@ fn replay_pending_replacement(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    // CR 616.1: choosing an optional effect's turn is separate from its may
-    // decision. Discard ordering automation before looking up that saved decision.
-    if state
+    let optional = state
         .pending_replacement
         .as_ref()
-        .is_some_and(|pending| pending.is_optional)
-    {
+        .is_some_and(|pending| pending.is_optional);
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if optional {
         state.replacement_auto_choice_tail = None;
     }
     let had_tail = state.replacement_auto_choice_tail.is_some();
@@ -12945,6 +13184,13 @@ fn replay_pending_replacement(
         }
         return ReplacementResult::NeedsChoice(player);
     };
+    // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
+    // whether to apply an optional effect, or which effect applies next.
+    state.record_loop_decision(if optional {
+        crate::game::play_trace::AnswerOptionality::Optional
+    } else {
+        crate::game::play_trace::AnswerOptionality::Mandatory
+    });
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;
@@ -14334,6 +14580,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::ParentTarget,
@@ -14452,6 +14699,7 @@ mod tests {
         let choose = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: crate::types::ability::ChoiceType::creature_type(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -14586,6 +14834,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination,
                     target: TargetFilter::SelfRef,
@@ -15784,6 +16033,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -15813,6 +16063,7 @@ mod tests {
         ReplacementDefinition::new(ReplacementEvent::Moved).execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: None,
                 destination,
                 target: TargetFilter::SelfRef,
@@ -16705,6 +16956,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: crate::types::ability::ControllerRef::You,
                     choice_type: crate::types::ability::ChoiceType::color_excluding(vec![
                         crate::types::mana::ManaColor::Green,
                     ]),
@@ -18085,6 +18337,7 @@ mod tests {
         let return_to_hand = AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Hand,
                 target: TargetFilter::SelfRef,
@@ -19838,6 +20091,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -20161,6 +20415,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::Any,
@@ -21313,6 +21568,7 @@ mod tests {
             enter_tapped: EtbTapState::Tapped,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -24722,6 +24978,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -24774,6 +25031,7 @@ mod tests {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
+            enter_with_grants: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             enter_as_copy: None,
@@ -26817,6 +27075,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -26849,6 +27108,7 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,

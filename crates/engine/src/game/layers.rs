@@ -29,16 +29,16 @@ use crate::game::printed_cards::{
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient,
-    quantity_expr_characteristic_reads_at, quantity_expr_uses_recipient, QuantityContext,
+    quantity_expr_characteristic_reads_at, QuantityContext,
 };
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachmentReferent,
-    AttackedYouScope, BasicLandType, CardTypeSetSource, CastingPermission, ChosenSubtypeKind,
-    CommanderOwnership, ContinuousModification, CopiableValues, Designation, Duration, Effect,
-    FilterProp, ManaContribution, ManaProduction, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerGrantProducerKey,
-    TriggerProducerOrigin, TypedFilter,
+    quantity_expr_uses_recipient, AbilityCost, AbilityDefinition, AbilityKind,
+    ActivationRestriction, AttachmentReferent, AttackedYouScope, BasicLandType, CardTypeSetSource,
+    CastingPermission, ChosenSubtypeKind, CommanderOwnership, ContinuousModification,
+    CopiableValues, Designation, Duration, Effect, FilterProp, ManaContribution, ManaProduction,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerGrantProducerKey, TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
     each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
@@ -301,7 +301,9 @@ fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
         | CoreType::Plane
         | CoreType::Phenomenon
         | CoreType::Scheme
-        | CoreType::Conspiracy => None,
+        | CoreType::Conspiracy
+        | CoreType::Boss
+        | CoreType::Event => None,
     }
 }
 
@@ -4499,10 +4501,19 @@ fn characteristic_source_reads_life_total(source: &CardTypeSetSource) -> bool {
                 CardTypeSetSource::TurnJournal { filter, .. } => {
                     filter.as_ref().is_some_and(target_filter_reads_life_total)
                 }
+                CardTypeSetSource::TrackedSet { filter, .. } => {
+                    filter.as_ref().is_some_and(target_filter_reads_life_total)
+                }
+                // CR 608.2c + CR 115.1: a targeted-objects population reads a
+                // life total exactly when its canonical slot filter does — via
+                // the single `targeted_objects_filter` authority, never a
+                // hardcoded constant.
                 CardTypeSetSource::Zone { .. }
                 | CardTypeSetSource::ExiledBySource
-                | CardTypeSetSource::TrackedSet { .. }
                 | CardTypeSetSource::AnyOf { .. } => false,
+                CardTypeSetSource::TargetedObjects { slot } => target_filter_reads_life_total(
+                    &CardTypeSetSource::targeted_objects_filter(slot),
+                ),
             };
         });
     // A truncated walk claims the read: one redundant recompute beats a stale
@@ -4553,7 +4564,7 @@ fn player_filter_reads_zone(filter: &PlayerFilter, zone: Zone) -> bool {
             .as_deref()
             .is_some_and(|f| target_filter_reads_zone(f, zone)),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_zone(exclude, zone),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_zone(exclude, zone),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => {
             filters.iter().any(|f| player_filter_reads_zone(f, zone))
@@ -4613,6 +4624,9 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // Direct graveyard card count (CR 404). `player` scope is irrelevant to
         // the zone identity — any player's graveyard is still the graveyard.
         QuantityRef::GraveyardSize { .. } => zone == Zone::Graveyard,
+        // Turtle Team-Up: the deployed-Boss census reads the command-zone
+        // pile — a membership change there (deploy/clear) perturbs it.
+        QuantityRef::DeployedBossCount => zone == Zone::Command,
         // Zone-parameterized card counts.
         QuantityRef::ZoneCardCount {
             zone: zone_ref,
@@ -4711,8 +4725,11 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::AdditionalCostPaymentCount
         | QuantityRef::AdditionalCostPaymentCountFor { .. }
@@ -4764,6 +4781,57 @@ fn static_definition_reads_zone_membership(def: &StaticDefinition, zone: Zone) -
                 continuous_modification_dynamic_quantity(modification)
                     .is_some_and(|quantity| quantity_expr_reads_zone(quantity, zone))
             }))
+}
+
+/// CR 113.6 + CR 113.6b + CR 604.3 + CR 611.3a: Does the moved object's own
+/// declared zone-of-function cross `from`→`to`?
+///
+/// `active_zones` IS the CR 113.6b declaration that
+/// `functioning_abilities::static_functions_in_zone` consumes, so a definition
+/// that names either side of the transition either starts or stops functioning.
+/// Two of that authority's answers are invariant here and are deliberately not
+/// matched:
+///   * a CDA functions in every zone (CR 604.3), so no move changes whether it
+///     functions (the destination-zone application is still mark-driven, like
+///     any off-battlefield static);
+///   * an empty `active_zones` is the CR 113.6 battlefield default, and the zone
+///     pipeline already marks both battlefield entry (`mark_layers_entered`) and
+///     battlefield exit (`mark_layers_full`).
+///
+/// `mode != Continuous` definitions produce no layer effect at all
+/// (`active_continuous_effects_from_static_definitions` skips them), and the
+/// command-zone arm of `static_functions_in_zone` reads the same `active_zones`
+/// list (`static_opts_in_to_command_zone`), so a plane's declaration is covered
+/// by the identical term.
+fn static_definition_zone_of_function_crosses(
+    def: &StaticDefinition,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    def.mode == StaticMode::Continuous
+        && !def.characteristic_defining
+        && (def.active_zones.contains(&from) || def.active_zones.contains(&to))
+}
+
+/// CR 113.6b + CR 400.7 + CR 611.3a: Do the MOVED object's own statics start or
+/// stop functioning because it entered or left a zone its definition declares?
+///
+/// Per-object by construction: only the moved object's declarations can change
+/// in this transition, so a resolved Anger in a graveyard does not make every
+/// later graveyard move re-evaluate the board. Read live off `state.objects`
+/// (never a snapshot); both the pre- and post-move checks call this, and either
+/// answer ORs into the transition's dirty mark.
+pub(crate) fn moved_source_zone_of_function_crosses_transition(
+    state: &GameState,
+    moved: ObjectId,
+    from: Zone,
+    to: Zone,
+) -> bool {
+    state.objects.get(&moved).is_some_and(|obj| {
+        obj.static_definitions
+            .iter_all()
+            .any(|def| static_definition_zone_of_function_crosses(def, from, to))
+    })
 }
 
 /// CR 611.3a: Is any functioning continuous static dependent on membership of
@@ -5029,6 +5097,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -5043,8 +5112,11 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -5085,7 +5157,7 @@ fn player_filter_reads_life(pf: &PlayerFilter) -> bool {
             .as_deref()
             .is_some_and(target_filter_reads_life_total),
         // CR 608.2c: self-composing exclusion anchor — recurse on the exclude.
-        PlayerFilter::AllExcept { exclude } => player_filter_reads_life(exclude),
+        PlayerFilter::AllExcept { exclude, .. } => player_filter_reads_life(exclude),
         // CR 102.1 + CR 608.2c: the union reads what any member reads.
         PlayerFilter::AnyOf { filters } => filters.iter().any(player_filter_reads_life),
         // CR 109.4 + CR 109.5: controls-count routes its object `filter` and its
@@ -5330,6 +5402,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -5338,6 +5411,9 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — resolved per affected
+        // member at install, never via layer re-derivation here.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -5504,12 +5580,29 @@ pub(crate) fn mark_layers_full_if_life_reading_static_live(state: &mut GameState
 /// of a move. A source or recipient can become visible only after the move, so a
 /// pre-move scan alone is insufficient; the post-move scan runs before trigger
 /// collection, ensuring spell-cast triggers see derived spell characteristics.
+///
+/// Two distinct questions are answered here, and both must be:
+///   * the board-wide terms (`any_active_static_reads_zone_membership`) answer
+///     "does ANOTHER object's static read this zone" through its recipient
+///     filter, enabling condition, or dynamic quantity;
+///   * the per-object term
+///     (`moved_source_zone_of_function_crosses_transition`) answers "did the
+///     moved object's OWN zone-of-function cross the transition" (CR 113.6b +
+///     CR 400.7) — a move that starts or stops a static the board-wide scan
+///     cannot see, because that scan only inspects other objects' zone reads.
+///
+/// `moved` being passed to both calls is deliberate: the pre-move call protects
+/// trigger collection and the post-move call is the face-change safety net for
+/// the board-wide terms, while the per-object term reads the same live
+/// declarations on both sides (only its zone changes, via `from`/`to`).
 pub(crate) fn static_layer_dependency_for_zone_transition(
     state: &GameState,
+    moved: ObjectId,
     from: Zone,
     to: Zone,
 ) -> bool {
-    any_active_static_reads_zone_membership(state, from)
+    moved_source_zone_of_function_crosses_transition(state, moved, from, to)
+        || any_active_static_reads_zone_membership(state, from)
         || any_active_static_reads_zone_membership(state, to)
 }
 
@@ -9615,20 +9708,7 @@ fn retire_ended_effects(
         return false;
     }
     match retirement_owner {
-        StateDurationRetirementOwner::LayerSettlement => {
-            let command =
-                crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
-                    effects: ended,
-                    cause: state.current_or_begin_rules_execution_node(),
-                };
-            state
-                .retire_exact_continuous_effects(&command.effects)
-                .expect("the settled selection must match its stored continuous effects");
-            state
-                .resolved_rules_journal
-                .record_continuous_effect_retirement(command)
-                .expect("state-duration retirement must have a live journal cause");
-        }
+        StateDurationRetirementOwner::LayerSettlement => retire_and_journal(state, ended),
         StateDurationRetirementOwner::AttachmentCommand => {
             state
                 .retire_exact_continuous_effects(&ended)
@@ -9636,6 +9716,39 @@ fn retire_ended_effects(
         }
     }
     true
+}
+
+/// Remove the exact stored records and journal that removal under the current
+/// execution node, so command replay removes them verbatim.
+fn retire_and_journal(state: &mut GameState, effects: Vec<TransientContinuousEffect>) {
+    let command = crate::types::resolved_commands::ResolvedContinuousEffectRetirementCommand {
+        effects,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    state
+        .retire_exact_continuous_effects(&command.effects)
+        .expect("the retired selection must match its stored continuous effects");
+    state
+        .resolved_rules_journal
+        .record_continuous_effect_retirement(command)
+        .expect("continuous-effect retirement must have a live journal cause");
+}
+
+/// End the resolution-created effect `effect_id` whose single cast permission
+/// (CR 601.3) has just been used: its Oracle wording authorizes one cast ("you
+/// may cast a creature spell from your graveyard this turn"). Its stated duration
+/// has not run out — the cast it allowed ends it — so it is removed here, and
+/// journaled as the `prune_*` passes journal the effects whose durations end.
+pub(crate) fn retire_used_single_cast_grant(state: &mut GameState, effect_id: u64) {
+    let used: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| effect.id == effect_id)
+        .cloned()
+        .collect();
+    if !used.is_empty() {
+        retire_and_journal(state, used);
+    }
 }
 
 /// CR 611.2b: end every duration the settled board shows has ended, one family
@@ -10812,7 +10925,7 @@ fn static_mode_carries_directing_source(mode: &crate::types::statics::StaticMode
 /// CR 109.5: True when a `TargetFilter` constrains the controller of matched
 /// objects via a `ControllerRef` slot (any variant qualifies — none is a
 /// concrete-player anchor). Recurses through `And`/`Or`/`Not`, modeled on
-/// `ability_utils::filter_references_target_player`.
+/// `types::ability::filter_references_target_player`.
 fn target_filter_controller_is_relative(filter: &TargetFilter) -> bool {
     use crate::types::ability::TypedFilter;
     match filter {
@@ -11871,7 +11984,7 @@ fn apply_continuous_effect_filtered(
         .map(|o| o.controller)
         .unwrap_or(PlayerId(0));
     let dynamic_uses_recipient =
-        dynamic_pt_expr.is_some_and(crate::game::quantity::quantity_expr_uses_recipient);
+        dynamic_pt_expr.is_some_and(crate::types::ability::quantity_expr_uses_recipient);
     // CR 201.5a: the effect's static names its granter when it was granted.
     let quantity_ctx = QuantityContext {
         granting_object: effect.granter,
@@ -13262,6 +13375,67 @@ mod tests {
             unreachable!()
         };
         assert_eq!(replacement.granting_object, Some(granter));
+    }
+
+    /// F2: a granted body whose direct-head quantity carries a sole
+    /// unbound granting-object symbol in its member filter names its
+    /// granter, so the layers gate stamps it; an unfiltered — or an
+    /// already-bound — head names nothing.
+    #[test]
+    fn direct_head_member_filter_decides_the_granter_stamp() {
+        use crate::types::ability::{SubtypeExclusion, TrackedAnaphorSource};
+
+        let granter = ObjectIncarnationRef::of(ObjectId(5), 1);
+        let tracked = |filter: Option<TargetFilter>| CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        };
+        let heads = |source: CardTypeSetSource| {
+            [
+                QuantityRef::DistinctCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::SharedCardTypes {
+                    source: source.clone(),
+                },
+                QuantityRef::DistinctSubtypes {
+                    source: source.clone(),
+                    exclude: SubtypeExclusion::None,
+                    restrict: None,
+                },
+                QuantityRef::DistinctColorsAmong { source },
+            ]
+        };
+        let body = |qty: QuantityRef| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref { qty },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        for qty in heads(tracked(Some(TargetFilter::GrantingObject { bound: None }))) {
+            assert!(
+                references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "a sole unbound symbol must trip the stamp gate"
+            );
+        }
+        for qty in heads(tracked(None)) {
+            assert!(
+                !references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "an unfiltered head names no granter"
+            );
+        }
+        for qty in heads(tracked(Some(TargetFilter::GrantingObject {
+            bound: Some(granter),
+        }))) {
+            assert!(
+                !references_granting_object(DefinitionNode::Ability(&body(qty))),
+                "an already-bound head has nothing left to stamp"
+            );
+        }
     }
 
     /// CR 514.2 + CR 109.4: `prune_until_next_turn_effects` arms an
@@ -26978,6 +27152,160 @@ mod tests {
         );
     }
 
+    /// CR 113.6 + CR 113.6b + CR 113.6c + CR 604.3 + CR 613.1: the per-object
+    /// zone-of-function predicate answers "does THIS definition's declared zone
+    /// set cross `from`→`to`", at the `active_zones` axis
+    /// `functioning_abilities::static_functions_in_zone` consumes.
+    ///
+    /// Table-driven so the declaration — not one card — is verified: the
+    /// hand-built Anger shape, the deeper causes that must NOT match (a CDA,
+    /// the empty-`active_zones` battlefield default, a non-Continuous mode), a
+    /// Grist-shaped CR 113.6c all-zone list, and the printed `Bant`-shaped
+    /// unconditional command-zone member.
+    #[test]
+    fn static_definition_zone_of_function_crosses_matches_declared_zones() {
+        let anger_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                ))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }])
+                .active_zones(vec![Zone::Graveyard])
+        };
+        let anger_pairs = [
+            (Zone::Library, Zone::Graveyard, true),
+            (Zone::Graveyard, Zone::Library, true),
+            (Zone::Graveyard, Zone::Exile, true),
+            (Zone::Graveyard, Zone::Battlefield, true),
+            (Zone::Library, Zone::Exile, false),
+            (Zone::Library, Zone::Hand, false),
+        ];
+        for (from, to, expected) in anger_pairs {
+            assert_eq!(
+                static_definition_zone_of_function_crosses(&anger_shaped(), from, to),
+                expected,
+                "Anger-shaped declaration ([Graveyard]) {from:?}→{to:?}"
+            );
+        }
+
+        // CR 604.3: a CDA functions in every zone, so no move changes it.
+        let mut cda = anger_shaped();
+        cda.characteristic_defining = true;
+        for (from, to, _) in anger_pairs {
+            assert!(
+                !static_definition_zone_of_function_crosses(&cda, from, to),
+                "a CDA must never be classified as a zone-of-function crossing ({from:?}→{to:?})"
+            );
+        }
+
+        // CR 113.6: an empty `active_zones` is the battlefield default, which the
+        // zone pipeline already marks on both entry and exit — it must not be
+        // swallowed into this arm.
+        let battlefield_default = StaticDefinition::continuous()
+            .modifications(vec![ContinuousModification::AddPower { value: 1 }]);
+        for (from, to) in [
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Hand, Zone::Battlefield),
+        ] {
+            assert!(
+                !static_definition_zone_of_function_crosses(&battlefield_default, from, to),
+                "the empty-`active_zones` battlefield default must not match ({from:?}→{to:?})"
+            );
+        }
+
+        // The mode gate: a non-Continuous mode produces no layer effect, so it
+        // cannot be a layer-invalidation cause even with a matching declaration.
+        let cast_with_keyword = StaticDefinition::new(StaticMode::CastWithKeyword {
+            keyword: Keyword::Flash,
+        })
+        .active_zones(vec![Zone::Battlefield]);
+        assert!(
+            !static_definition_zone_of_function_crosses(
+                &cast_with_keyword,
+                Zone::Hand,
+                Zone::Battlefield
+            ),
+            "a CastWithKeyword declaration must not invalidate layers"
+        );
+
+        // CR 113.6c: Grist's negation parses to the conservative six-zone list.
+        let grist_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::SetPower { value: 1 }])
+                .active_zones(vec![
+                    Zone::Library,
+                    Zone::Hand,
+                    Zone::Graveyard,
+                    Zone::Stack,
+                    Zone::Exile,
+                    Zone::Command,
+                ])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &grist_shaped(),
+            Zone::Library,
+            Zone::Graveyard
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &grist_shaped(),
+            Zone::Battlefield,
+            Zone::Graveyard
+        ));
+
+        // A printed Command-zone declaration (planes, conspiracies, emblems).
+        let command_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(vec![ContinuousModification::AddPower { value: 2 }])
+                .active_zones(vec![Zone::Command])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Battlefield,
+            Zone::Command
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Command,
+            Zone::Exile
+        ));
+        assert!(!static_definition_zone_of_function_crosses(
+            &command_shaped(),
+            Zone::Graveyard,
+            Zone::Exile
+        ));
+
+        // The UNCONDITIONAL branch as printed data: Bant — "All creatures have
+        // exalted." — `active_zones = [Command]`, `condition: null`.
+        let bant_shaped = || {
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(TypedFilter::creature()))
+                .modifications(vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Exalted,
+                }])
+                .description("All creatures have exalted.".to_string())
+                .active_zones(vec![Zone::Command])
+        };
+        assert!(static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Command,
+            Zone::Exile
+        ));
+        assert!(static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Hand,
+            Zone::Command
+        ));
+        assert!(!static_definition_zone_of_function_crosses(
+            &bant_shaped(),
+            Zone::Graveyard,
+            Zone::Library
+        ));
+    }
+
     /// CR 113.6a + CR 604.3: a characteristic-defining ability functions in
     /// every zone.
     /// This exercises the shared layer-source gather directly: a Hand source
@@ -31734,6 +32062,7 @@ mod tests {
         // CR 608.2c: exclusion anchor recurses.
         assert!(player_filter_reads_life(&PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::OpponentGainedLife),
+            relation: crate::types::ability::PlayerRelation::All,
         }));
         // CR 109.4 + CR 109.5: controls-count routes its object filter.
         assert!(player_filter_reads_life(&PlayerFilter::ControlsCount {
@@ -35986,5 +36315,107 @@ mod object_sweep_sharing_tests {
         state.layers_dirty.mark_full();
         evaluate_layers(&mut state);
         assert_eq!(active(&state), 0);
+    }
+}
+
+/// Tests relocated from `parser::oracle_static`'s test module (`oracle_static/tests.rs`).
+#[cfg(test)]
+mod parser_oracle_static_tests {
+    use crate::parser::oracle_static::parse_static_line;
+    use crate::parser::oracle_static::test_helpers::P3_SEG;
+    use crate::types::ability::AttackedYouScope;
+    use crate::types::statics::StaticMode;
+    use crate::types::StaticCondition;
+
+    /// ROW 5: an unrecognized interposed class is
+    /// PERMANENTLY INERT at runtime AND leaves the card RED in coverage.
+    ///
+    /// Two fixtures differing ONLY in the interposed segment. `unenforceable_gate_marker`
+    /// yields `Not(Unrecognized{..})`: `layers::evaluate_condition_inner` reads a BARE
+    /// `Unrecognized` as TRUE, so the `Not` wrapper is what makes the
+    /// gate evaluate FALSE forever — a bare `Unrecognized` here would grant the
+    /// PERMISSION against EVERY defender — the fail-OPEN outcome this row forbids —
+    /// while `contains_unrecognized` still reports the gap either way.
+    ///
+    /// BASE-SHAPE RECORD: before this change the same line parsed to a
+    /// `Continuous`/`AddKeyword(Defender)` grant whose `card_face_gaps` was `[]` —
+    /// dishonestly GREEN. This row therefore measures a real supported -> unsupported
+    /// FLIP, and its value must not be mistaken for "it was always red".
+    #[test]
+    fn unrecognized_interposed_class_is_permanently_inert_and_leaves_the_card_red() {
+        let ok = format!("This creature can attack {P3_SEG} as though it didn't have defender.");
+        const BAD: &str =
+            "This creature can attack players who wear a hat as though it didn't have defender.";
+
+        // (i) REACH-GUARD / PAIRED POSITIVE CONTROL: the widened scan consumed THIS
+        // line shape. Without it, BAD's inert marker could be produced for a line the
+        // scan never saw — a shadowed fixture is inert and red for the WRONG reason.
+        assert_eq!(
+            parse_static_line(&ok)
+                .expect("reach-guard: the recognized class must be consumed")
+                .condition,
+            Some(StaticCondition::AnyPlayerAttackedYouLastTurn {
+                scope: AttackedYouScope::AttackedPlayer,
+            })
+        );
+
+        // (ii) the inert marker, POSITIVE shape.
+        let bad = parse_static_line(BAD).expect(
+            "the line shape is still consumed — the production must OWN the line rather \
+         than decline it back to the AddKeyword(Defender) fallback",
+        );
+        assert_eq!(bad.mode, StaticMode::CanAttackWithDefender);
+        assert_eq!(
+            bad.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: "players who wear a hat".to_string(),
+                }),
+            })
+        );
+
+        // (iii) INERT AT RUNTIME — the half a parse-shape assertion cannot buy.
+        let state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::standard(),
+            2,
+            42,
+        );
+        assert!(
+            !crate::game::layers::evaluate_condition_for_test(
+                &state,
+                bad.condition.as_ref().unwrap(),
+                crate::types::player::PlayerId(0),
+                crate::types::identifiers::ObjectId(1),
+            ),
+            "a Not(Unrecognized) gate must evaluate FALSE (a bare Unrecognized is TRUE)"
+        );
+
+        // (iv) RED IN COVERAGE — the half the fallback's NAME does not guarantee:
+        // being permanently inert at runtime does not by itself make the card red.
+        let bad_face = crate::types::card::CardFace {
+            static_abilities: vec![bad.clone()],
+            ..Default::default()
+        };
+        let gaps = crate::game::coverage::card_face_gaps(&bad_face);
+        assert!(
+            gaps.iter()
+                .any(|g| g.contains("Static:Unrecognized(players who wear a hat)")),
+            "the unparsed class must leave the card RED; got {gaps:?}"
+        );
+
+        // SECOND CONTROL, SAME FIXTURE: the recognized class is GREEN, proving the gap
+        // signal comes from the MARKER and not from `CanAttackWithDefender` being
+        // unsupported in the coverage registry.
+        let ok_face = crate::types::card::CardFace {
+            static_abilities: vec![parse_static_line(&ok).unwrap()],
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::game::coverage::card_face_gaps(&ok_face),
+            Vec::<String>::new(),
+            "a RECOGNIZED anchored class must report NO coverage gap — the gap signal \
+         comes from the unenforceable marker, not from `CanAttackWithDefender` \
+         being unsupported in the registry"
+        );
     }
 }
