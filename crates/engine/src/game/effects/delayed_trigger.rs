@@ -4902,6 +4902,7 @@ mod tests {
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
                 enters_modified_if: None,
+                library_shuffle: Default::default(),
             },
         );
         let ability = ResolvedAbility::new(
