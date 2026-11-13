@@ -355,6 +355,40 @@ pub struct DeclaredSlotEntry {
     pub filter: TargetFilter,
 }
 
+/// CR 608.2c: how the immediately preceding instruction produced the chain's
+/// pending tracked set, and the zone it left those cards in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingTrackedSet {
+    pub zone: Zone,
+    pub producer: TrackedSetProducer,
+}
+
+/// CR 608.2c: the instruction kind that published a pending tracked set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackedSetProducer {
+    /// "Choose card(s) in <zone>": the chosen cards are a referent that a later
+    /// bare "it" / "they" can name.
+    Chosen,
+    /// A bare reveal (CR 701.20b) chooses nothing, so its cards are named only
+    /// by "those cards" / "the cards revealed this way", never by a bare
+    /// pronoun.
+    Revealed,
+}
+
+impl ParseContext {
+    /// CR 608.2c: whether the preceding instruction chose cards that a bare
+    /// "it" / "they" can refer back to.
+    pub fn chosen_tracked_set_pending(&self) -> bool {
+        matches!(
+            self.pending_tracked_set,
+            Some(PendingTrackedSet {
+                producer: TrackedSetProducer::Chosen,
+                ..
+            })
+        )
+    }
+}
+
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -362,6 +396,32 @@ pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
+}
+
+/// CR 608.2c: whether the effect chain about to be parsed is proven to resolve
+/// as its ability's root node. The engine evaluates a root's gate on the root
+/// itself; a sub-ability's gate is evaluated first in its parent's hand-off,
+/// against the PARENT, and again on the sub itself, and both must hold. So a
+/// gate that reads the gated instruction's own target is only representable on
+/// a proven root.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResolvedChainRoot {
+    /// Not proven: the chain may be attached under another node, or have
+    /// another instruction appended below it, at parse or cast time (a nested
+    /// remainder parse, a mode, a spell with a second paragraph, a fused half, a
+    /// spliced card or a splice host, a gift spell, an awaken spell), or lose
+    /// its targets at cast time (an overloaded spell).
+    #[default]
+    Unproven,
+    /// Set by a top-level entry point whose chain is its ability's resolved
+    /// root with its printed targets (a triggered ability's body, an activated
+    /// ability's effect on a card without a gift keyword, the spell line of a
+    /// card whose only non-keyword line it is and whose spell is not rewritten
+    /// at cast). A gift card is excluded for activated abilities too: the
+    /// engine wraps its first spell or activated ability under a `GiftDelivery`
+    /// root (`synthesize_gift`; Starforged Sword's synthesized Equip sits under
+    /// it).
+    Proven,
 }
 
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
@@ -882,6 +942,18 @@ pub struct ParseContext {
     /// admitted inside a mode. Set to `ModalMode` on each mode's context by
     /// `parse_modal_mode_irs`; `WholeAbility` everywhere else.
     pub body_scope: BodyScope,
+    /// CR 608.2c: whether the next effect chain parsed on this context is its
+    /// ability's resolved root ([`ResolvedChainRoot`]). Set immediately before
+    /// the entry point's chain parse and taken by that parse on entry, so a
+    /// nested chain parsed inside it, or on a clone made afterwards, sees
+    /// `Unproven`. Never serialized.
+    pub resolved_chain_root: ResolvedChainRoot,
+    /// CR 608.2c: the card-level proof for the effects of this card's activated
+    /// abilities ([`ResolvedChainRoot`]), set once by the pipeline from the
+    /// card's gift keyword (MTGJSON or printed line) and read by the
+    /// activated-ability entry point. `Unproven` by default, so a context
+    /// built elsewhere proves nothing. Never serialized.
+    pub activated_chain_root: ResolvedChainRoot,
     /// CR 608.2c + CR 400.7: Source zone of the tracked set that a downstream
     /// "put those cards / put them onto the battlefield" anaphor (a
     /// `TargetFilter::TrackedSet`) must scan. Set by a producer clause that
@@ -893,8 +965,9 @@ pub struct ParseContext {
     /// it lowers a `TrackedSet` put-onto-battlefield whose own clause text named
     /// no explicit origin; an impulse/cascade producer leaves this `None`, so
     /// the lowering keeps the exile default. Reset per effect chain in
-    /// `parse_effect_chain_ir`.
-    pub pending_tracked_set_origin: Option<Zone>,
+    /// `parse_effect_chain_ir`. The producer kind decides whether a bare
+    /// pronoun may name the set ([`Self::chosen_tracked_set_pending`]).
+    pub pending_tracked_set: Option<PendingTrackedSet>,
     /// CR 701.42a: The partner card name extracted from a meld instigator's
     /// own/control gate ("if you both own and control [self] and a [type] named
     /// [partner], exile them, then meld them into [result]"). The gate is parsed

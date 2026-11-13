@@ -301,7 +301,9 @@ fn core_type_subtype_set(core_type: CoreType) -> Option<SubtypeSet> {
         | CoreType::Plane
         | CoreType::Phenomenon
         | CoreType::Scheme
-        | CoreType::Conspiracy => None,
+        | CoreType::Conspiracy
+        | CoreType::Boss
+        | CoreType::Event => None,
     }
 }
 
@@ -4622,6 +4624,9 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         // Direct graveyard card count (CR 404). `player` scope is irrelevant to
         // the zone identity — any player's graveyard is still the graveyard.
         QuantityRef::GraveyardSize { .. } => zone == Zone::Graveyard,
+        // Turtle Team-Up: the deployed-Boss census reads the command-zone
+        // pile — a membership change there (deploy/clear) perturbs it.
+        QuantityRef::DeployedBossCount => zone == Zone::Command,
         // Zone-parameterized card counts.
         QuantityRef::ZoneCardCount {
             zone: zone_ref,
@@ -5092,6 +5097,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -21626,6 +21632,7 @@ mod tests {
                     cause: ZoneChangeCause::Effect { source: object_id },
                     mods: EntryMods::default(),
                     placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_links: ExileLinkSpec::default(),
                     replacement_applied: Default::default(),
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -21965,6 +21972,7 @@ mod tests {
                     cause: ZoneChangeCause::Effect { source: object_id },
                     mods: EntryMods::default(),
                     placement: None,
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                     exile_links: ExileLinkSpec::default(),
                     replacement_applied: Default::default(),
                     face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -29457,6 +29465,7 @@ mod tests {
                 cause: ZoneChangeCause::Effect { source },
                 mods: EntryMods::default(),
                 placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
@@ -29523,6 +29532,7 @@ mod tests {
                 },
                 mods: EntryMods::default(),
                 placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,

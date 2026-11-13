@@ -49,6 +49,7 @@ fn redirect_moved_to(destination: Zone, redirected_to: Zone) -> ReplacementDefin
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                library_shuffle: Default::default(),
                 destination: redirected_to,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -14418,6 +14419,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,

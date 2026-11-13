@@ -6485,6 +6485,32 @@ where
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
 }
 
+/// Legacy decode: a `DraftFromSpellbook` written before `selection` existed (or
+/// with `random: false`) was resolved by offering the whole spellbook.
+fn default_spellbook_selection_legacy_whole_book() -> SpellbookSelection {
+    SpellbookSelection::Chosen
+}
+
+/// Compatibility deserializer for `selection`, which replaced `random: bool`.
+/// Paired with `#[serde(alias = "random")]`: a legacy bool maps `true` →
+/// `Random`, `false` → `Chosen` (what base executed); the current
+/// representation decodes as the enum. Both keys at once is a serde
+/// duplicate-field error. Only `selection` is ever written.
+fn deserialize_spellbook_selection_compat<'de, D>(d: D) -> Result<SpellbookSelection, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if let serde_json::Value::Bool(random) = raw {
+        return Ok(if random {
+            SpellbookSelection::Random
+        } else {
+            SpellbookSelection::Chosen
+        });
+    }
+    serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
 /// CR 608.2n: Compatibility deserializer for the `graveyard_replacement` field
 /// that replaced the former `exile_instead_of_graveyard_on_resolve: bool` on
 /// `CastingPermission::ExileWithAltCost`. Accepts both the current
@@ -8588,15 +8614,15 @@ pub enum TargetFilter {
     OriginalController,
     /// CR 613.1f + CR 608.2c: Resolves to the ability's *original*, pre-rebind
     /// source identity — the object that put this ability on the stack — even
-    /// inside a `ChangeZone { forward_result: true }` sub-ability chain where
-    /// the runtime has rebound `ResolvedAbility::source_id` to the just-moved
-    /// object.
+    /// inside a `ChangeZone { forward_result: true }` chain whose legacy
+    /// object-relative child has rebound `ResolvedAbility::source_id` to the
+    /// just-moved object.
     ///
     /// Motivation (reanimator-Aura class: Animate Dead / Dance of the Dead):
     /// the ETB effect returns the enchanted creature card to the battlefield
-    /// via `ChangeZone { forward_result: true }`, which rebinds `source_id` to
-    /// the reanimated creature so trailing `SelfRef`/`ParentTarget` anaphora
-    /// (the attach, the leaves-battlefield sacrifice) bind to that creature.
+    /// via `ChangeZone { forward_result: true }`. Its legacy immediate generic
+    /// grant reads the reanimated object, while returned-object anaphora use the
+    /// forwarded context. A primary `SelfRef` still names the creating source.
     /// But the same effect ALSO rewrites the Aura's OWN enchant restriction
     /// ("it loses \"enchant creature card in a graveyard\" and gains \"enchant
     /// creature put onto the battlefield with this Aura\""). That keyword swap
@@ -8610,8 +8636,9 @@ pub enum TargetFilter {
     /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
     /// the about-to-be-mutated sub-ability clone coexist.
     ///
-    /// Distinct from `SelfRef` (rebound to the moved object under
-    /// `forward_result`) and from `OriginalController` (a player reference).
+    /// Unlike the current ability's primary `SelfRef` or a moved-object
+    /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
+    /// `OriginalController` is the separate player reference.
     OriginalSource,
     /// CR 615.5 + CR 609.7: Resolves to the controller of the *prevented event's*
     /// damage source. Used by prevention follow-up sentences such as "the source's
@@ -9411,6 +9438,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10272,6 +10300,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -10695,6 +10724,73 @@ pub fn effect_owns_resolution_zone_choice(effect: &Effect, timing: TargetChoiceT
         && !effect_requires_parent_target_object(effect)
 }
 
+#[cfg(test)]
+mod r2_resolution_choice_authority_tests {
+    use super::*;
+
+    #[test]
+    fn zone_union_choice_ownership_requires_resolution_and_preserves_target_filter() {
+        let target = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+        });
+        let mut effect: Effect =
+            serde_json::from_str(r#"{"type":"ChangeZone","destination":"Battlefield"}"#).unwrap();
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = target.clone();
+        assert!(effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Stack
+        ));
+        assert_eq!(effect.target_filter(), Some(&target));
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = TargetFilter::ParentTarget;
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+    }
+
+    #[test]
+    fn terminal_owner_movement_exposes_bound_parent_slots() {
+        for target in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+        ] {
+            let mut effect: Effect =
+                serde_json::from_str(r#"{"type":"ChangeZoneAll","destination":"Library"}"#)
+                    .unwrap();
+            let Effect::ChangeZoneAll {
+                target: slot,
+                library_shuffle,
+                ..
+            } = &mut effect
+            else {
+                unreachable!()
+            };
+            *slot = target.clone();
+            *library_shuffle = LibraryShuffleMode::TerminalShuffle;
+            assert_eq!(effect_parent_ref_slots(&effect), vec![&target]);
+            assert!(effect_requires_parent_target_object(&effect));
+            assert!(!effect_owns_resolution_zone_choice(
+                &effect,
+                TargetChoiceTiming::Resolution
+            ));
+        }
+    }
+}
+
 /// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
 /// introduce or move — the objects a later instruction's definite anaphor
 /// ("that creature") could name. See [`instruction_object_reach`].
@@ -10819,6 +10915,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
             destination: _,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -11055,7 +11152,10 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+        | Effect::Unimplemented { .. }
+        // Turtle Team-Up: plays cards whose own instructions introduce objects;
+        // this instruction's reach is not classified.
+        | Effect::HordePlayCard { .. } => InstructionObjectReach::Unclassified,
     }
 }
 
@@ -12447,6 +12547,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::ExiledFromHandThisResolution
@@ -13574,6 +13675,16 @@ pub enum QuantityRef {
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
     /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
     CardsExiledBySource,
+    /// Turtle Team-Up: the number of Bosses currently deployed (face-up Boss
+    /// cards in the command zone). Chrome Dome's "+1/+0 for each boss in play"
+    /// reads this live so the bonus tracks stage transitions without
+    /// re-grafting. Not expressible as `ObjectCount { filter }`: there is no
+    /// Boss `TypeFilter` member, no face-up predicate, and undeployed
+    /// (face-down) Bosses share `Zone::Command`, so even a Boss+InZone filter
+    /// would over-count. No CR section (casual product) — the product booklet
+    /// is the authority. Synthesized only (Boss grafts never go through the
+    /// Oracle parser).
+    DeployedBossCount,
     /// CR 607.2b: The power of a specific card exiled by the source, indexed by order.
     /// Its only producer is The Mimeoplasm's entry replacement, which reads the second
     /// card exiled "this way" (the per-turn ledger) for counter placement. Readers of
@@ -14297,6 +14408,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -14453,6 +14565,7 @@ impl QuantityRef {
             | QuantityRef::TargetZoneCardCount { .. }
             | QuantityRef::Devotion { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::BasicLandTypeCount { .. }
             | QuantityRef::TrackedSetSize
@@ -14567,6 +14680,7 @@ impl QuantityRef {
             | QuantityRef::SharedCardTypes { .. }
             | QuantityRef::DistinctSubtypes { .. }
             | QuantityRef::CardsExiledBySource
+            | QuantityRef::DeployedBossCount
             | QuantityRef::ExiledCardPower { .. }
             | QuantityRef::ZoneCardCount { .. }
             | QuantityRef::BasicLandTypeCount { .. }
@@ -15449,7 +15563,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
-        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource | QuantityRef::DeployedBossCount
         // Numbers, counters on players, and resolution/turn records.
         | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
@@ -15791,6 +15905,9 @@ impl Effect {
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
+            // Horde-internal wave instruction: never parser-built, never an
+            // indicated action — no address route from its shape.
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
         let scoped_change_zone = matches!(
@@ -16096,6 +16213,11 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
+        // Horde-internal wave instruction: never parser-built, never an
+        // indicated action. OnAccept fails closed — OnSpellCast would route
+        // to the strict single-card CastFromZone shape check above, which a
+        // Horde wave play can never satisfy.
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => IndicatedActionCommit::OnAccept,
     }
 }
@@ -20573,21 +20695,28 @@ impl LibraryPosition {
     }
 }
 
-/// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
+/// CR 701.24a + CR 701.24d: Whether a move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
-/// Ordinary mass moves retain the zone pipeline's per-object library behavior;
+/// Ordinary moves retain the zone pipeline's per-object library behavior;
 /// `TerminalShuffle` reserves the single shuffle for the chained `Shuffle`
 /// instruction after every member has moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type")]
-pub enum MassLibraryShuffleMode {
+pub enum LibraryShuffleMode {
     #[default]
     PerObject,
     TerminalShuffle,
 }
 
-fn is_default_mass_library_shuffle_mode(mode: &MassLibraryShuffleMode) -> bool {
-    matches!(mode, MassLibraryShuffleMode::PerObject)
+impl LibraryShuffleMode {
+    /// Serde skip-helper: `PerObject` is the default and is omitted from JSON.
+    pub fn is_per_object(&self) -> bool {
+        matches!(self, Self::PerObject)
+    }
+}
+
+fn is_default_library_shuffle_mode(mode: &LibraryShuffleMode) -> bool {
+    mode.is_per_object()
 }
 
 /// CR 701.20a + CR 608.2c: How the *set* of matching cards found by an
@@ -20781,6 +20910,21 @@ pub enum ConjureSource {
     /// referenced card's copiable characteristics (CR 707.2), resolved at
     /// resolution time from the ability's target / anaphoric reference.
     Duplicate { duplicate_of: TargetFilter },
+}
+
+/// Digital-only Alchemy (no CR entry): how `Effect::DraftFromSpellbook` picks
+/// the card it conjures from the source card's spellbook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpellbookSelection {
+    /// "draft a card from X's spellbook": the game offers a random sample of
+    /// distinct spellbook entries and the controller chooses one of them.
+    Draft,
+    /// "conjure a card of your choice from X's spellbook": the controller
+    /// chooses from the whole spellbook.
+    Chosen,
+    /// "conjure a random card from X's spellbook": one entry is picked at
+    /// random, with no prompt.
+    Random,
 }
 
 impl ConjureCard {
@@ -22434,6 +22578,11 @@ pub enum Effect {
         /// (not controller's). Used for "shuffle into its owner's library".
         #[serde(default)]
         owner_library: bool,
+        /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the move component
+        /// of a parser-emitted "shuffle [set] into [library]" operation. Its
+        /// chained `Shuffle` owns the one library randomization.
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 712.2: When true, the object enters the battlefield showing its back face.
         #[serde(default)]
         enter_transformed: bool,
@@ -22529,8 +22678,8 @@ pub enum Effect {
         /// CR 701.24a + CR 701.24d: `TerminalShuffle` marks the mass-move
         /// component of a parser-emitted "shuffle [set] into [library]"
         /// operation. Its chained `Shuffle` owns the one library randomization.
-        #[serde(default, skip_serializing_if = "is_default_mass_library_shuffle_mode")]
-        library_shuffle: MassLibraryShuffleMode,
+        #[serde(default, skip_serializing_if = "is_default_library_shuffle_mode")]
+        library_shuffle: LibraryShuffleMode,
         /// CR 401.4: When `true`, the objects are placed in a random order
         /// (e.g. Endurance). When `false`, the owner chooses the order per
         /// CR 401.4's default rule. Independent of `library_position`.
@@ -24489,11 +24638,13 @@ pub enum Effect {
     /// `recipient_scope`.
     PreventDamage {
         amount: PreventionAmount,
-        /// CR 615.11 + CR 107.3i: When present, overrides `amount` at effect
-        /// resolution — the dynamic quantity is resolved to a concrete count and
-        /// the prevention shield is created as a static `Next(n)` depletion shield.
-        /// Set by "prevent X … where X is <quantity>" clauses. `None` for the
-        /// common fixed/All forms.
+        /// CR 615.7 + CR 107.3a + CR 107.3c: when present, overrides `amount` at
+        /// effect resolution — the quantity is resolved to a concrete count and
+        /// the shield is created as a static `Next(n)` depletion shield (CR 615.7).
+        /// Set by the announced `{X}` of a counted prevention clause ('prevent the
+        /// next X damage …', CR 107.3a) or by a trailing 'where X is <quantity>'
+        /// binder (CR 107.3c), which overwrites the announced-X reading. `None`
+        /// for the fixed/All forms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         amount_dynamic: Option<QuantityExpr>,
         #[serde(default = "default_target_filter_any")]
@@ -25655,6 +25806,18 @@ pub enum Effect {
         /// Number of +1/+1 counters to place.
         count: QuantityExpr,
     },
+    /// Turtle Team-Up (Savanti Romero, Temporal Rogue): "the bosses play a
+    /// card" — reveal and resolve the top card of the Boss event deck
+    /// immediately, outside the wave (Savanti triggers on combat damage, mid
+    /// combat). Not a cast: creatures enter, Events resolve one-shot, exactly
+    /// as in the Action-phase wave. No CR section (casual product) — the
+    /// product booklet is the authority. Synthesized only (Boss grafts never
+    /// go through the Oracle parser).
+    HordePlayCard {
+        /// How many cards to play.
+        #[serde(default = "default_one")]
+        count: u32,
+    },
     /// Digital-only Specialize: permanently become a color-specific face after
     /// paying the synthesized activation cost (mana + discard). Not in CR text.
     Specialize,
@@ -25863,20 +26026,34 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
     },
-    /// Digital-only Alchemy keyword action (no CR entry): "draft a card from
-    /// [this card]'s spellbook" — reveal the source card's fixed spellbook list,
-    /// the controller chooses one card name from it, and that card is conjured
-    /// into `destination` (mirrors `Conjure`, but the controller picks one entry
-    /// from a per-card list). The list is not in the Oracle text; it is carried
-    /// on the source object (`GameObject::spellbook`, from
-    /// `CardFace::metadata.spellbook`), so the resolver reads it from the source.
-    /// An empty list resolves as a no-op.
+    /// Digital-only Alchemy keyword action (no CR entry): take one card from the
+    /// source card's fixed spellbook list and conjure it into `destination`
+    /// (mirrors `Conjure`, but the card comes from a per-card list). `selection`
+    /// is how the card is picked: a draft offers a random sample of distinct
+    /// entries and the controller chooses one; "a card of your choice" offers the
+    /// whole book; "a random card" picks one with no prompt. The list is not in
+    /// the Oracle text; it is carried on the source object
+    /// (`GameObject::spellbook`, from `CardFace::metadata.spellbook`), so the
+    /// resolver reads it from the source. An empty list resolves as a no-op.
+    ///
+    /// For `SpellbookSelection::Draft`, `destination` is `Hand`, except the
+    /// deferred " and put it onto the battlefield[ tapped]" rider, which keeps
+    /// `Battlefield`. The exile riders (" and exile it", ", then exile it") are a
+    /// following `Effect::ChangeZone` of the drafted card, not a destination.
     DraftFromSpellbook {
         destination: Zone,
         #[serde(default)]
         tapped: bool,
-        #[serde(default)]
-        random: bool,
+        /// How the card is picked from the spellbook. Decodes the legacy
+        /// `random: bool` key (`true` → `Random`; `false` or absent → `Chosen`,
+        /// the whole-book choice base executed) through
+        /// `deserialize_spellbook_selection_compat`; only `selection` is written.
+        #[serde(
+            default = "default_spellbook_selection_legacy_whole_book",
+            alias = "random",
+            deserialize_with = "deserialize_spellbook_selection_compat"
+        )]
+        selection: SpellbookSelection,
     },
     /// CR 701.55 + CR 608.2d: Inline "[player] chooses/faces [effect A] or
     /// [effect B]" — the configured chooser scope chooses at resolution which
@@ -26030,6 +26207,16 @@ fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
 pub fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
     effect_introduces_per_player_object_referent(effect)
         || effect_introduces_per_player_chosen_card_referent(effect)
+        // CR 608.2c: a single exiled top card is also an iteration-local
+        // referent for the following land-deploy or optional-cast instruction.
+        || matches!(
+            effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        )
 }
 
 pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
@@ -26211,6 +26398,76 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
                 && tf.properties.is_empty()
         }
         _ => false,
+    }
+}
+
+/// CR 115.10a: a PhaseOut union of supported already-bound object references
+/// declares no new target. Keep this narrower than `TargetFilter::is_context_ref`:
+/// other context references need their own object authority before joining a
+/// phasing batch. This does not prove any supported reference is live.
+pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
+        TargetFilter::SelfRef
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::TriggeringSource => true,
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -26408,6 +26665,13 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
+    }
+    // CR 115.10a: affecting the source and a previously selected target does
+    // not declare another target. PhaseOut collects these references as a union.
+    if let Effect::PhaseOut { target } = effect {
+        if phase_out_filter_is_context_union(target) {
+            return None;
+        }
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
@@ -27769,6 +28033,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -29535,6 +29800,9 @@ impl TargetFilter {
                 // the source's live-or-LKI incarnation, never chosen while
                 // announcing the ability.
                 | TargetFilter::SourceController
+                // CR 108.3 + CR 115.10a: the source's owner is fixed by
+                // ownership, not selected when announcing this ability.
+                | TargetFilter::Owner
                 | TargetFilter::OriginalController
                 // CR 608.2c: the reanimator-Aura's pre-rebind source identity is
                 // resolved (concretized to SpecificObject) during resolution, never
@@ -29966,6 +30234,21 @@ enum CreatedReferentPublisher {
 }
 
 impl Effect {
+    /// CR 605.1a + CR 701.10f: whether resolving this effect adds mana to a mana
+    /// pool — `Effect::Mana`, or doubling a pool's mana (CR 701.10f: "that player
+    /// adds an amount of mana of that type equal to the amount they already have").
+    /// The single shape authority every "could add mana" classifier reads.
+    pub fn adds_mana_on_resolution(&self) -> bool {
+        matches!(
+            self,
+            Effect::Mana { .. }
+                | Effect::Double {
+                    target_kind: DoubleTarget::ManaPool { .. },
+                    ..
+                }
+        )
+    }
+
     /// CR 608.2c: true for the structural "repeat this process" directive
     /// node (`RuntimeHandled { RepeatProcess }`).
     pub fn is_repeat_directive(&self) -> bool {
@@ -30346,6 +30629,7 @@ impl Effect {
             // nor the note names a copied stack object.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning names no stack object at all.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => false,
@@ -30598,6 +30882,7 @@ impl Effect {
             // note resolve their slot as operand, never as a donor.
             | Effect::CreateBoon { .. }
             | Effect::NoteNumber { .. }
+            | Effect::HordePlayCard { .. }
             // CR 701.33b: abandoning resolves its slot as operand.
             | Effect::AbandonScheme
             | Effect::Unimplemented { .. } => AttachmentHostSlot::Operand,
@@ -31165,6 +31450,9 @@ impl Effect {
             // surfaced by `collect_target_slots`.
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            // Turtle Team-Up (no CR section — casual product): HordePlayCard
+            // names no target; the Boss event deck it plays from is implied.
+            | Effect::HordePlayCard { .. }
             // CR 603.7e: ChooseObjectsIntoTrackedSet has no discrete effect-target
             // slot — `chooser` is a player ref resolved like `PayCost.payer`, and
             // `filter` constrains the interactive selection, not a targeting slot.
@@ -31630,6 +31918,7 @@ impl Effect {
             | Effect::ChooseOneOf { .. }
             | Effect::ChooseCounterAdjustment { .. }
             | Effect::Unimplemented { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::ChooseObjectsIntoTrackedSet { .. }
             | Effect::SeparateIntoPiles { .. }
             | Effect::ExileTopCardContest { .. }
@@ -31764,7 +32053,12 @@ impl Effect {
             | Effect::Learn
             // Randomly picks card(s) FROM a library matching a filter; the library
             // is always the origin.
-            | Effect::Seek { .. } => true,
+            | Effect::Seek { .. }
+            // Turtle Team-Up (no CR section — casual product): "the bosses
+            // play a card" reveals the top cards of the Boss event deck (a
+            // library) and resolves them onto the battlefield / into the
+            // graveyard; the library is always the origin.
+            | Effect::HordePlayCard { .. } => true,
 
             // CR 701.40a names no source zone ("Put that card onto the
             // battlefield face down"), so the verdict is conditional on the
@@ -32623,6 +32917,9 @@ impl Effect {
             | Effect::VentureInto { .. }
             | Effect::VentureIntoDungeon
             | Effect::WinTheGame { .. }
+            // Turtle Team-Up: plays cards; this node publishes no created referent
+            // (a played card's own token creation is that node's answer).
+            | Effect::HordePlayCard { .. }
             | Effect::AbandonScheme
             => None,
         }
@@ -33342,6 +33639,7 @@ macro_rules! define_effect_quantity_walk {
             // CR 122.1: the per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`, so there is nothing to visit here.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33701,6 +33999,7 @@ impl Effect {
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::Unimplemented { .. } => {}
         }
     }
@@ -33981,6 +34280,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34252,6 +34552,7 @@ impl Effect {
             // CR 122.1: per-kind magnitude is `EventCounterReproductionCount`,
             // not a `QuantityExpr`.
             | Effect::ReproduceEventCounters { .. }
+            | Effect::HordePlayCard { .. }
             | Effect::WinTheGame { .. } => None,
         }
     }
@@ -34475,6 +34776,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Amass { .. } => "Amass",
         Effect::EmpowerJace { .. } => "EmpowerJace",
         Effect::Monstrosity { .. } => "Monstrosity",
+        Effect::HordePlayCard { .. } => "HordePlayCard",
         Effect::Specialize => "Specialize",
         Effect::Renown { .. } => "Renown",
         Effect::Bolster { .. } => "Bolster",
@@ -34736,6 +35038,7 @@ pub enum EffectKind {
     Amass,
     EmpowerJace,
     Monstrosity,
+    HordePlayCard,
     Specialize,
     Renown,
     Bolster,
@@ -35030,6 +35333,7 @@ impl From<&Effect> for EffectKind {
             Effect::Amass { .. } => EffectKind::Amass,
             Effect::EmpowerJace { .. } => EffectKind::EmpowerJace,
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
+            Effect::HordePlayCard { .. } => EffectKind::HordePlayCard,
             Effect::Specialize => EffectKind::Specialize,
             Effect::Renown { .. } => EffectKind::Renown,
             Effect::Bolster { .. } => EffectKind::Bolster,
@@ -35674,9 +35978,11 @@ pub struct AbilityDefinition {
     /// CR 601.2f: Self-referential cost reduction applied before activation.
     /// "This ability costs {N} less to activate for each [condition]"
     pub cost_reduction: Option<CostReduction>,
-    /// When true, after this ability's effect resolves, moved/created objects are forwarded
-    /// to the sub_ability: the moved object becomes sub's source_id, and the original source
-    /// becomes a target. Used for "put onto the battlefield attached to [source]" patterns.
+    /// Forward the settled moved/created objects to the sub-ability's result context.
+    /// Legacy object-relative children may also rebind their source to the moved
+    /// object; a primary `SelfRef`, delayed trigger, or repeat directive keeps its
+    /// creating source instead. Use the forwarded-object operands for the result,
+    /// independently of the printed source identity.
     pub forward_result: bool,
     /// Player scope for "each player/opponent [effect]" patterns.
     /// When set, the effect iterates over matching players (each becomes the acting player).
@@ -35796,7 +36102,9 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
 }
 
 /// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
-/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
+/// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
+/// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
+/// (CR 606.2). Deliberately EXCLUDES the
 /// fourth criterion ("its cost and effect don't move any card to or from a
 /// library"), which is why this is NOT the mana-ability test and must never be
 /// used for activation routing — use [`is_mana_ability`] for that.
@@ -35825,7 +36133,14 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
     let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
+        Effect::Mana { target, .. } => target
+            .as_ref()
+            .and_then(|r| r.declared_filters().next())
+            .map(|(_, filter)| filter),
+        // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
+        // target only when the shared target-slot authority surfaces one ("you" is a
+        // context reference — Doubling Cube).
+        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
         _ => return false,
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
@@ -35913,7 +36228,8 @@ pub fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
 
 /// CR 605.1b: could this triggered ability body — if its trigger observed an
 /// activated mana ability — be a triggered mana ability? True when its OWN
-/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
+/// resolution could add mana (any reachable effect for which
+/// [`Effect::adds_mana_on_resolution`] holds, whatever else the
 /// chain does or in whatever order) and it requires no target anywhere in that
 /// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
 /// replacement bodies) are not this ability's resolution and are not walked
@@ -35924,8 +36240,11 @@ pub fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
     let mut adds_mana = false;
     let mut targets = false;
     let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
-        if let Effect::Mana { target, .. } = effect {
+        // CR 605.1a + CR 701.10f: a pool doubling adds mana too.
+        if effect.adds_mana_on_resolution() {
             adds_mana = true;
+        }
+        if let Effect::Mana { target, .. } = effect {
             if target
                 .as_ref()
                 .is_some_and(|role| role.declared_filters().next().is_some())
@@ -43171,6 +43490,94 @@ mod tests {
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn phase_out_context_union_extracts_no_new_target() {
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for target in [
+            pair.clone(),
+            TargetFilter::Or {
+                filters: vec![pair, TargetFilter::SelfRef],
+            },
+            TargetFilter::Or { filters: vec![] },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::Any,
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+            let control = Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&control).unwrap(),
+                control.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&control));
+        }
+    }
+
+    #[test]
+    fn phase_out_context_union_preserves_targeted_boundaries() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, creature],
+        };
+        for target in [
+            mixed.clone(),
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, mixed],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
+            },
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&effect).unwrap(),
+                effect.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for effect in [
+            Effect::PhaseIn {
+                target: pair.clone(),
+            },
+            Effect::Destroy {
+                target: pair,
+                cant_regenerate: false,
+            },
+        ] {
+            assert_eq!(
+                extract_target_filter_from_effect(&effect),
+                effect.target_filter()
+            );
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        for target in [
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseIn { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+        }
+    }
+
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {
             name: "Goblin".to_string(),
@@ -48127,6 +48534,7 @@ mod tests {
     #[test]
     fn change_zone_owner_library_serde_roundtrip() {
         let effect = Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Library,
             target: TargetFilter::Any,
@@ -48583,6 +48991,7 @@ mod tests {
     /// Helper: build a minimal `Effect::ChangeZone` with `enters_under` set.
     fn change_zone_with_enters_under(enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -50231,7 +50640,7 @@ mod static_condition_traversal_tests {
         else {
             panic!("expected ChangeZoneAll");
         };
-        assert_eq!(library_shuffle, MassLibraryShuffleMode::PerObject);
+        assert_eq!(library_shuffle, LibraryShuffleMode::PerObject);
         let legacy_json = serde_json::to_value(Effect::ChangeZoneAll {
             origin: None,
             destination: Zone::Library,
@@ -50242,7 +50651,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::PerObject,
+            library_shuffle: LibraryShuffleMode::PerObject,
             random_order: false,
         })
         .expect("default mode serializes");
@@ -50261,7 +50670,7 @@ mod static_condition_traversal_tests {
             enter_with_counters: vec![],
             face_down_profile: None,
             library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            library_shuffle: LibraryShuffleMode::TerminalShuffle,
             random_order: false,
         };
         let terminal_json = serde_json::to_value(&terminal).expect("terminal mode serializes");
@@ -50626,7 +51035,7 @@ mod created_referent_classification_tests {
                 "destination": "Battlefield"
             })),
             effect(
-                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "random": true }),
+                json!({ "type": "DraftFromSpellbook", "destination": "Battlefield", "selection": "Random" }),
             ),
             effect(json!({
                 "type": "CopyTokenBlockingAttacker",
@@ -50869,5 +51278,105 @@ mod created_referent_classification_tests {
             serde_json::from_value(serde_json::json!({"target": {"type": "Any"}, "count": 2}))
                 .expect("legacy decode");
         assert_eq!(legacy.requirement, SacrificeRequirement::Count { count: 2 });
+    }
+}
+
+#[cfg(test)]
+mod spellbook_selection_serde_tests {
+    //! `Effect::DraftFromSpellbook.selection` replaced `random: bool`. Persisted
+    //! payloads (server sessions, P2P backups, client saves, card data) written
+    //! before the change must keep decoding to the selection base executed.
+    use super::*;
+    use serde_json::json;
+
+    fn decode(value: serde_json::Value) -> Result<Effect, serde_json::Error> {
+        serde_json::from_value(value)
+    }
+
+    fn selection_of(value: serde_json::Value) -> SpellbookSelection {
+        match decode(value.clone()).unwrap_or_else(|err| panic!("{value} must load: {err}")) {
+            Effect::DraftFromSpellbook { selection, .. } => selection,
+            other => panic!("{value} decoded to {other:?}"),
+        }
+    }
+
+    /// Legacy `random: true` was the random pick; `random: false` and an absent
+    /// key were resolved as a whole-book choice, so both decode to `Chosen`.
+    #[test]
+    fn legacy_random_key_decodes_to_the_selection_base_executed() {
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true })
+            ),
+            SpellbookSelection::Random,
+            "legacy random: true"
+        );
+        assert_eq!(
+            selection_of(
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": false })
+            ),
+            SpellbookSelection::Chosen,
+            "legacy random: false"
+        );
+        assert_eq!(
+            selection_of(json!({ "type": "DraftFromSpellbook", "destination": "Hand" })),
+            SpellbookSelection::Chosen,
+            "neither key present"
+        );
+    }
+
+    #[test]
+    fn selection_key_decodes_every_variant_and_round_trips() {
+        for (wire, variant) in [
+            ("Draft", SpellbookSelection::Draft),
+            ("Chosen", SpellbookSelection::Chosen),
+            ("Random", SpellbookSelection::Random),
+        ] {
+            let payload =
+                json!({ "type": "DraftFromSpellbook", "destination": "Hand", "selection": wire });
+            assert_eq!(selection_of(payload.clone()), variant, "selection {wire}");
+            let effect = decode(payload).expect("modern payload loads");
+            let reencoded = serde_json::to_value(&effect).expect("effect serializes");
+            assert_eq!(
+                decode(reencoded).expect("re-encoded payload loads"),
+                effect,
+                "selection {wire} round-trips"
+            );
+        }
+    }
+
+    /// Serialization always writes `selection`; the legacy key survives as a
+    /// read-side alias only.
+    #[test]
+    fn serialization_emits_only_the_selection_key() {
+        let effect =
+            decode(json!({ "type": "DraftFromSpellbook", "destination": "Hand", "random": true }))
+                .expect("legacy payload loads");
+        let json = serde_json::to_string(&effect).expect("effect serializes");
+        assert!(
+            json.contains("\"selection\":\"Random\""),
+            "the selection key must be written: {json}"
+        );
+        assert!(
+            !json.contains("\"random\""),
+            "the legacy key must never be written back out: {json}"
+        );
+    }
+
+    /// Both spellings name ONE field, so carrying both is a duplicate, not a
+    /// silent last-one-wins.
+    #[test]
+    fn both_keys_at_once_is_a_duplicate_field_error() {
+        let err = decode(json!({
+            "type": "DraftFromSpellbook",
+            "destination": "Hand",
+            "random": true,
+            "selection": "Draft"
+        }))
+        .expect_err("a payload carrying both spellings must be rejected");
+        assert!(
+            err.to_string().contains("duplicate field"),
+            "expected a duplicate-field error, got {err}"
+        );
     }
 }
