@@ -58,7 +58,7 @@ use crate::types::ability::{
     CopyRetargetPermission, CountBinding, CountScope, CounterAdjustment, CounterKindChooser,
     CounterKindDomain, DigSource, DoorLockOp, Duration, Effect, EffectScope, ExtraPhaseAnchor,
     ExtraPhaseRecipient, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
-    LibraryPosition, MassLibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
+    LibraryPosition, LibraryShuffleMode, MultiTargetSpec, ObjectSelectionCardinality,
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
@@ -2987,6 +2987,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin,
                 destination: Zone::Battlefield,
                 target,
@@ -3020,6 +3022,8 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             up_to,
             multi_target: _,
         } => Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,
@@ -3060,6 +3064,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
                 _ => origin,
             };
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -4154,6 +4159,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             reveal,
@@ -4237,6 +4243,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner,
             quantifier: MultiZoneExileQuantifier::All,
         } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::default().controller(owner).properties(vec![
@@ -4970,6 +4977,12 @@ fn try_parse_choose_object_and_player(
     if min != 1 || max != Some(1) {
         return None;
     }
+    // CR 608.2d + CR 115.10a: the object and player are chosen while the effect is
+    // applied. Declared for every subject, exactly as before the bare-choice
+    // timing change: a non-controller subject's choice is still prompted to the
+    // controller by TargetOnly's resolution chooser (an existing third-party
+    // chooser limitation), and this producer deliberately leaves that behavior
+    // unchanged rather than moving it.
     choice_ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
     choice_ctx.relative_player_scope = Some(ControllerRef::ChosenPlayer {
         index: choice_ctx.chosen_player_count,
@@ -4999,6 +5012,16 @@ pub(super) fn is_standalone_object_choice_clause(fragment: &str) -> bool {
     let rest_lower = &lower[lower.len() - rest.len()..];
     let mut throwaway = ParseContext::default();
     parse_battlefield_object_choice_core(rest, rest_lower, &mut throwaway).is_some()
+}
+
+fn is_you_controlled_target(target: &TargetFilter) -> bool {
+    matches!(
+        target,
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::You),
+            ..
+        })
+    )
 }
 
 pub(super) fn parse_choose_ast(
@@ -5158,8 +5181,52 @@ pub(super) fn parse_choose_ast(
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
             let diagnostic_count = ctx.diagnostics.len();
-            let (target, _) = parse_target_with_ctx(rest, ctx);
+            let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            let tail = remainder.trim();
+            if (tail.split_whitespace().count() == 1
+                && !tail.chars().all(|c| c.is_ascii_punctuation())
+                && !super::sequence::starts_clause_text_or_conjugated(tail))
+                || matches!(&target, TargetFilter::Typed(filter)
+                    if filter.type_filters.is_empty()
+                        && filter.controller.is_none()
+                        && filter.properties.is_empty())
+            {
+                return None;
+            }
+            // CR 115.10a + CR 608.2d: a fully parsed, untargeted singular
+            // "a/an <object> you control" declares Resolution here, at any chain
+            // position. Stripped optional quantifiers and exact counts fail the
+            // a/an gate. Peeled actor scopes and random selections are not
+            // controller choices. The engine's TargetOnly exemption in
+            // `defers_conditional_target_selection` keeps later announced targets.
+            // A peeled opponent-may scope is not a controller choice and declares
+            // nothing here, so the accepting-player timing fallback keeps the
+            // timing it had before this producer existed.
+            if ctx.clause_opponent_may_scope.is_none()
+                && remainder.trim().is_empty()
+                && nom_primitives::parse_article(rest_lower.trim_start()).is_ok()
+                && ctx.target_selection_mode == TargetSelectionMode::Chosen
+                && ctx.clause_player_scope.is_none()
+                && ctx.clause_subject_chooser.is_none()
+                && !nom_primitives::scan_contains(rest_lower, "target ")
+                && is_you_controlled_target(&target)
+                && !target.is_context_ref()
+                && !target.denotes_player_target()
+                // A filter that reads an earlier object ("that shares a creature
+                // type with it") is enumerated against the slots declared at cast,
+                // and a resolution-time choice has none to read.
+                && !super::filter_reads_earlier_object(&target)
+                // The resolution chooser enumerates battlefield permanents only,
+                // so a card in another zone ("a creature card you control in
+                // exile") keeps its announced pick.
+                && target
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+            {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }
@@ -6172,6 +6239,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
     // CR 400.7 + CR 608.2c: exile EVERY chosen permanent (`ChangeZoneAll` over
     // the tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Battlefield),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -6309,6 +6377,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
     // CR 608.2c: exile EVERY chosen card (`ChangeZoneAll` over the
     // tracked set the per-player choose accumulated).
     let exile_all = Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(Zone::Graveyard),
         destination: Zone::Exile,
         target: TargetFilter::TrackedSet {
@@ -8343,33 +8412,93 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
     }
 }
 
-/// CR 615.1a: decompose the prevention amount from the LOCAL parser stream
-/// (`rest`, positioned just past "prevent ") with nom combinators. "all but "
-/// must be tried before the bare "all " arm because it shares that prefix.
+/// CR 615.7: Strip the optional "the next "/"next " count quantifier and parse
+/// the counted shield quantity with the shared `parse_count_expr` grammar,
+/// returning the quantity and the remaining stream. Single authority for the
+/// quantifier axis shared by [`parse_prevention_amount`] and
+/// `lower::try_parse_prevent_distribute`; a determiner-less "prevent <qty>
+/// damage" is left untouched.
+///
+/// The two callers keep different static placeholders for a dynamic quantity —
+/// `Next(1)` here, `All` in the distribute path (whose shield is natively
+/// expressed as "all damage, split among the targets") — because
+/// `prevent_damage::resolve` never reads the placeholder once `amount_dynamic`
+/// is `Some` — it resolves the dynamic quantity and overwrites `amount` with it.
+/// (`apply_where_x_effect_expression` does read it at parse time: an `All`
+/// placeholder opts the distribute path out of a trailing where-X binder.)
+pub(super) fn parse_counted_prevention_quantity(rest: &str) -> Option<(QuantityExpr, &str)> {
+    let after_quantifier = opt(alt((
+        tag::<_, _, OracleError<'_>>("the next "),
+        tag("next "),
+    )))
+    .parse(rest)
+    .map_or(rest, |(after, _)| after);
+    parse_count_expr(after_quantifier)
+}
+
+/// CR 615.1a + CR 615.7 + CR 107.3a: decompose the prevention amount from the
+/// LOCAL parser stream (`rest`, positioned just past "prevent ") with nom
+/// combinators. Returns the static `amount` plus the dynamic quantity that
+/// overrides it at effect resolution (CR 615.7), so callers carry both into
+/// `Effect::PreventDamage` and never silently drop the counted form.
+///
+/// "all but " is tried before bare "all " (shared prefix). The counted forms
+/// ("prevent [the] next <qty> damage", "prevent <qty> damage") strip the
+/// optional quantifier and delegate to `parse_count_expr`, the shared
+/// effect-quantity grammar: a literal yields `Next(n)` (CR 615.7); the
+/// announced `X` (CR 107.3a) or any composed dynamic count is carried in the
+/// dynamic slot with `Next(1)` as the static placeholder.
+///
+/// `None` means the clause names a dynamic count the prevention grammar does
+/// not fully own: the shared count grammar left an operand unconsumed ("the
+/// next X plus X damage") or the quantity is followed by the out-of-model
+/// "noncombat damage". Callers report it as an explicit gap
+/// ([`PREVENT_UNCONSUMED_QUANTITY_GAP`]) instead of publishing a shield sized
+/// from a partial quantity. The boundary applies to the dynamic form only; the
+/// literal-count form keeps its established prefix acceptance.
+///
+/// `amount_dynamic` is later overwritten when the clause also prints a
+/// trailing "where X is <quantity>" binder (CR 107.3c), which DEFINES X.
+///
 /// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
 /// (issue #1094) so amount detection lives in one authority.
-pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+pub(super) fn parse_prevention_amount(
+    rest: &str,
+) -> Option<(PreventionAmount, Option<QuantityExpr>)> {
     if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
         let n = nom_primitives::parse_number
             .parse(after_all_but)
             .map(|(_, n)| n)
             .unwrap_or(1);
-        PreventionAmount::AllBut(n)
-    } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-        PreventionAmount::All
-    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-        let n = nom_primitives::parse_number
-            .parse(after_next)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
-    } else {
-        // Fallback: try to extract a number.
-        let n = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
+        return Some((PreventionAmount::AllBut(n), None));
+    }
+    if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
+        return Some((PreventionAmount::All, None));
+    }
+    // CR 615.7: counted shield. One quantifier axis for "the next" and the
+    // determiner-less "next" (the form `try_parse_prevent_distribute` accepts);
+    // a bare "prevent <qty> damage" is left untouched.
+    match parse_counted_prevention_quantity(rest) {
+        Some((QuantityExpr::Fixed { value }, _)) => Some((
+            PreventionAmount::Next(u32::try_from(value).unwrap_or(0)),
+            None,
+        )),
+        // CR 615.7 + CR 107.3a + CR 120.2a: publish a dynamic shield only when the
+        // count grammar consumed the whole quantity, i.e. its remainder opens on the
+        // prevention damage noun ("[combat] damage", or the event-relative "of that
+        // damage" whose X a trailing where-X binder defines). An unconsumed
+        // connective ("X plus X damage") must not become a one-operand shield.
+        Some((quantity, remainder)) => peek(alt((
+            crate::parser::oracle_replacement::parse_prevention_damage_noun,
+            preceded(
+                tag("of that "),
+                crate::parser::oracle_replacement::parse_prevention_damage_noun,
+            ),
+        )))
+        .parse(remainder)
+        .ok()
+        .map(|_| (PreventionAmount::Next(1), Some(quantity))),
+        None => Some((PreventionAmount::Next(1), None)),
     }
 }
 
@@ -8562,7 +8691,11 @@ fn parse_prevent_effect_with_context(
             .map(|(_, d, _)| d);
 
     // Determine amount: "all damage" vs "all but N" vs "the next N damage".
-    let amount = parse_prevention_amount(rest);
+    // CR 615.7 + CR 107.3a: an unconsumed dynamic quantity is an explicit receipt,
+    // reported before any emitter below so no shield is published for it.
+    let Some((amount, amount_dynamic)) = parse_prevention_amount(rest) else {
+        return Effect::unimplemented(PREVENT_UNCONSUMED_QUANTITY_GAP, text);
+    };
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal
@@ -8577,7 +8710,7 @@ fn parse_prevent_effect_with_context(
         // shield captures it via `ParentTargetSlot { index: 0 }`.
         return Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic: amount_dynamic.clone(),
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,
@@ -8597,7 +8730,7 @@ fn parse_prevent_effect_with_context(
         return match dealt_by {
             Ok(source_filter) => Effect::PreventDamage {
                 amount,
-                amount_dynamic: None,
+                amount_dynamic: amount_dynamic.clone(),
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope,
@@ -8717,15 +8850,15 @@ fn parse_prevent_effect_with_context(
         recipient_scope = EffectScope::All;
     }
 
-    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
-    // <quantity>" override) is populated at chunk level by
-    // `apply_where_x_effect_expression`, not here — the chunk machinery
-    // strips the trailing "where x is …" binding before this parser ever
-    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
-    // is present (or when the binding fails to resolve to a known quantity).
+    // CR 615.7 + CR 107.3a + CR 107.3c: `amount_dynamic` is populated here from
+    // the announced `{X}` of a counted prevention clause (CR 107.3a), and is
+    // later overwritten at chunk level by `apply_where_x_effect_expression`
+    // when the clause also prints a trailing "where x is …" binder (CR 107.3c).
+    // `amount` is the Next(1) fallback used when no dynamic clause is present
+    // (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic,
         target,
         recipient_scope,
         scope,
@@ -8741,6 +8874,10 @@ pub(crate) const PREVENT_DEALT_BY_TARGET_GAP: &str = "prevent_damage_dealt_by_ta
 /// Gap for prevention target roles this recipient route cannot bind. Preserve
 /// it on the spell route rather than retrying a weaker replacement reading.
 pub(crate) const PREVENT_RECIPIENT_TARGET_ROLE_GAP: &str = "prevent_damage_recipient_target_role";
+/// Gap for a counted prevention whose dynamic quantity does not reach the damage noun
+/// (the shared count grammar left an operand such as "plus X" unconsumed). Held on the
+/// spell route so a weaker priority cannot re-read the line with X as 0.
+pub(crate) const PREVENT_UNCONSUMED_QUANTITY_GAP: &str = "prevent_damage_unconsumed_quantity";
 
 /// Gap for a bidirectional prevent whose "to" half names a declared "target
 /// <X>" recipient; no representation scopes both halves to the one chosen
@@ -9559,7 +9696,7 @@ pub(super) fn parse_put_ast(
                 // never moved as part of THIS clause, so the clause text gives
                 // no origin (`infer_origin_zone` → None). When a producer clause
                 // earlier in the chain published the set's source zone
-                // (`pending_tracked_set_origin`, e.g. Breach the Multiverse's
+                // (`pending_tracked_set`, e.g. Breach the Multiverse's
                 // graveyard choose), bind it here. An impulse/cascade producer
                 // leaves the context unset, so the exile default in
                 // `lower_put_ast` still governs those reanimations.
@@ -9567,7 +9704,7 @@ pub(super) fn parse_put_ast(
                     (
                         None,
                         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
-                    ) => ctx.pending_tracked_set_origin.or(origin),
+                    ) => ctx.pending_tracked_set.map(|set| set.zone).or(origin),
                     _ => origin,
                 };
                 Some(PutImperativeAst::ZoneChange {
@@ -9662,6 +9799,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 );
             }
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -9724,6 +9862,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     _ => origin.or(Some(Zone::Exile)),
                 };
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
                     // defaults to scanning Exile (cascade, impulse-draw, and the
                     // `ExiledBySource` class all leave their members in exile).
@@ -9750,6 +9889,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin,
                     destination,
                     target,
@@ -9830,6 +9971,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
         // player ("that player") by `inject_subject_target` when the enclosing
         // subject-predicate clause carries a player subject.
         PutImperativeAst::HandToLibraryPosition { position } => Effect::ChangeZoneAll {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Hand),
             destination: Zone::Library,
             target: TargetFilter::Controller,
@@ -10235,7 +10377,96 @@ pub(super) fn shuffle_rest_clause(lower: &str) -> Option<ShuffleRestClause> {
     Some(form)
 }
 
-pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
+/// CR 608.2c + CR 400.7e + CR 115.10a: true when the bare pronoun "it" in a
+/// "shuffle it into its owner's library" clause names the ability's own source
+/// instead of an announced object.
+///
+/// Two nearer antecedents veto the reading, and both are proofs rather than
+/// guesses: an explicitly bound object pronoun (`object_pronoun_ref`, set by a
+/// trigger condition or a preceding clause), and any object slot an earlier
+/// clause of this chain announced (CR 601.2c — the registry is authoritative;
+/// an `Indeterminate` registry cannot prove the absence of one, so it declines).
+/// With neither, the departed object is the trigger's own source (CR 400.7e),
+/// and a subjectless construct ("Shuffle it into its owner's library") has no
+/// other referent at all. The source therefore binds `SelfRef`, the
+/// single-object movement authority; binding `ParentTarget` there would lower
+/// to the selected-population `ChangeZoneAll`, which requires announced targets
+/// to move anything (Alabaster Dragon, Dread, Serra Avatar).
+fn shuffle_it_names_the_source(object: &str, ctx: &ParseContext) -> bool {
+    if object.trim() != "it" {
+        return false;
+    }
+    if ctx.object_pronoun_ref.is_some() {
+        return false;
+    }
+    match &ctx.chain_declared_slots {
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(entries) => {
+            if !entries.is_empty() {
+                return false;
+            }
+        }
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate => return false,
+    }
+    matches!(ctx.subject, None | Some(TargetFilter::SelfRef))
+}
+
+pub(super) fn parse_shuffle_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ShuffleImperativeAst> {
+    // CR 108.3 + CR 400.3: a typed object anaphor followed by an owner's
+    // library. Bare "their" needs a proven owner actor and object pin.
+    //
+    // The pronoun's referent decides the MOVEMENT AUTHORITY, not just the
+    // destination: a bare "it" with no announced antecedent names the ability's
+    // own source (CR 400.7e — the object that left is the departure event's
+    // source), so source-bound placement precedes its one terminal owner shuffle.
+    // `ParentTarget` is reserved for a genuinely announced object; lowering uses
+    // selected-population `ChangeZoneAll`, which resolves only against announced
+    // targets (CR 115.10a: being affected is not being a target).
+    if let Some(((object, owner_library), _)) = nom_on_lower(text, lower, |input| {
+        let (input, _) =
+            alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
+        let (input, object) = take_until(" into ").parse(input)?;
+        let (input, _) = tag(" into ").parse(input)?;
+        let (input, explicit_owner) = alt((
+            value(
+                true,
+                alt((
+                    tag("its owner's library"),
+                    tag("their owner's library"),
+                    tag("their owners' libraries"),
+                )),
+            ),
+            value(false, tag("their library")),
+        ))
+        .parse(input)?;
+        let (input, _) = all_consuming(opt(tag("."))).parse(input)?;
+        Ok((input, (object.to_string(), explicit_owner)))
+    }) {
+        let owner_context = ctx.relative_player_scope == Some(ControllerRef::ParentTargetOwner)
+            && ctx.object_pronoun_ref == Some(TargetFilter::ParentTarget);
+        if owner_library || owner_context {
+            let mut trial = ctx.clone_throwaway();
+            let (target, rest) = parse_target_with_ctx(&object, &mut trial);
+            if rest.trim().is_empty()
+                && matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef)
+            {
+                let target = if matches!(target, TargetFilter::ParentTarget)
+                    && shuffle_it_names_the_source(&object, ctx)
+                {
+                    TargetFilter::SelfRef
+                } else {
+                    target
+                };
+                return Some(ShuffleImperativeAst::ChangeZoneToLibrary {
+                    target,
+                    owner_library: true,
+                });
+            }
+        }
+    }
     if matches!(
         lower,
         "shuffle" | "shuffles" | "then shuffle" | "then shuffles"
@@ -10541,6 +10772,14 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             } else {
                 None
             };
+            let target = if !all
+                && origin == Some(Zone::Graveyard)
+                && matches!(&target, TargetFilter::Typed(_))
+            {
+                super::add_inferred_origin_constraints_to_target(target, origin, lower)
+            } else {
+                target
+            };
             return Some(ShuffleImperativeAst::TargetedChangeZoneToLibrary {
                 target,
                 origin,
@@ -10594,11 +10833,34 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             target,
             owner_library,
         } => {
+            if owner_library
+                && matches!(
+                    target,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                )
+            {
+                return with_shuffle_sub_ability(Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: None,
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                    random_order: false,
+                });
+            }
             // CR 701.24c + CR 400.3: `target` and `owner_library` are
             // populated by `parse_shuffle_ast`'s combinator-based pronoun /
             // possessive classification. See the construction site for the
             // detection grammar and the owner-scoped terminal Shuffle.
             let effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Library,
                 target,
@@ -10675,6 +10937,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             // this way" quantity reads). The single-target form keeps `ChangeZone`.
             if all {
                 let effect = Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10690,6 +10953,8 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
                 with_shuffle_sub_ability(effect)
             } else {
                 let effect = Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Library,
                     target,
@@ -10811,6 +11076,8 @@ pub(super) fn lower_multi_filter_search_library(
     // ends at a `SearchLibrary` (the last extra filter) so the outer intrinsic
     // continuation can append the terminal `ChangeZone` for that last search.
     let change_zone_effect = || Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Library),
         destination,
         target: TargetFilter::Any,
@@ -10966,6 +11233,13 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         // object's owner as the anaphoric shuffle subject. Unlike a mass move,
         // this already has one exact parent object and needs no tracked-set
         // population fan-out (Chaos Warp and prevention follow-ups).
+        // CR 108.3 + CR 400.3: the source's owner is independent of any
+        // earlier announced target still carried by this ability.
+        Effect::ChangeZone {
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+            ..
+        } => TargetFilter::Owner,
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -10974,13 +11248,50 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         _ => TargetFilter::Controller,
     };
     let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
-    if let Effect::ChangeZoneAll {
-        destination: Zone::Library,
-        library_shuffle,
-        ..
-    } = &mut effect
-    {
-        *library_shuffle = MassLibraryShuffleMode::TerminalShuffle;
+    // A selected graveyard population explicitly owned by the caster or the
+    // declared player has one library subject (Dwell on the Past). ParentTarget/
+    // SelfRef moves do not establish that guarantee: their receiving owner may
+    // differ from the terminal actor.
+    let single_library_population = matches!(
+        &effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Typed(filter),
+            owner_library: false,
+            ..
+        } if filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Owned {
+                controller:
+                    ControllerRef::You
+                    | ControllerRef::TargetPlayer
+                    | ControllerRef::ScopedPlayer
+            }
+        ))
+    );
+    match &mut effect {
+        // CR 701.24a + CR 701.24d: every parser-emitted compound move into a
+        // library appends the terminal `Shuffle` below. Randomizing during
+        // delivery as well would shuffle twice (Watery Grasp), so defer to that
+        // single instruction. The source's own move ("shuffle it into its
+        // owner's library": Gandalf, Wandering Wizard; Alabaster Dragon) is the
+        // same operation, and CR 701.24c still shuffles when it cannot move.
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            owner_library: true,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        Effect::ChangeZone {
+            library_shuffle, ..
+        } if single_library_population => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            library_shuffle,
+            ..
+        } => *library_shuffle = LibraryShuffleMode::TerminalShuffle,
+        _ => {}
     }
     // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
     // the exact prospective subject population. Cause filtering prevents an
@@ -11013,7 +11324,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
 /// shuffles. Used by the terminal shuffle and by each ChangeZoneAll in the
 /// chain so they all publish the same owner population (including empty zones
 /// per CR 701.24d). Centralized here to keep publisher and consumer in sync.
-fn owner_library_shuffle_scope() -> PlayerFilter {
+pub(super) fn owner_library_shuffle_scope() -> PlayerFilter {
     PlayerFilter::TrackedSetPossessor {
         relation: PlayerRelation::All,
         possession: PossessionAxis::Owner,
@@ -11024,6 +11335,7 @@ fn owner_library_shuffle_scope() -> PlayerFilter {
 
 fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effect {
     Effect::ChangeZoneAll {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
         origin: Some(origin),
         destination: Zone::Library,
         target,
@@ -11033,7 +11345,7 @@ fn change_zone_all_to_library_effect(origin: Zone, target: TargetFilter) -> Effe
         enter_with_counters: vec![],
         face_down_profile: None,
         library_position: None,
-        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+        library_shuffle: LibraryShuffleMode::TerminalShuffle,
         random_order: false,
     }
 }
@@ -12519,7 +12831,11 @@ fn counter_unless_where_x_quantity(rest: &str) -> Option<&str> {
     Some(qty_text.trim_end_matches('.').trim())
 }
 
-pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_counter_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     // CR 701.6 + CR 405.1: "Counter all/each [filter] spells/abilities"
     // mass-counter precheck. Mirrors the `parse_destroy_ast` precheck +
     // `BounceAll` precedent: consume the verb plus an optional `all`/`each`
@@ -12599,15 +12915,21 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // `oracle_effect::try_parse_put_zone_change_parts`).
     let (without_where_tp, where_x_expression) =
         super::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(rest_orig, rest));
+    // CR 608.2c: parse the stack-target phrase with the context-free entry (the
+    // same one this parser used before the anaphor fix, so diagnostics stay put),
+    // then refine a bare "that spell" for a non-trigger instruction to the spell's
+    // earlier announced target.
     let (target, _rem) = parse_target(without_where_tp.original);
+    let target = crate::parser::oracle_target::bind_spell_anaphor_to_context(ctx, target);
     #[cfg(debug_assertions)]
     assert_no_compound_remainder(_rem, text);
     // `parse_target("... spell with mana value X or less")` already scopes
     // the spell phrase to the stack through the shared target parser. Keep this
     // path on that building block and only apply the trailing X definition.
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
-    // `parse_counter_ast` takes no `ParseContext`, so there is no antecedent to
-    // supply here; the filter bound keeps the legacy seeds.
+    // `WhereXBinding::bare` binds the where-X count with no player antecedents:
+    // this path does not hand the parse context's antecedents to the count, so
+    // the filter bound keeps the legacy seeds.
     let target =
         super::apply_where_x_to_filter(target, WhereXBinding::bare(where_x_expression.as_deref()))?;
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
@@ -12620,25 +12942,23 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     })
 }
 
+/// Shared word-boundary guard for the `pay` residue tokens: the token just
+/// consumed must be followed by end-of-input or punctuation/whitespace — not
+/// another alpha char. This blocks false matches like "lifelink" when we only
+/// want "life", or "manafoo" when we only want "mana".
+fn word_boundary(i: &str) -> OracleResult<'_, ()> {
+    peek(alt((value((), eof), value((), recognize(one_of(" .,")))))).parse(i)
+}
+
 /// CR 118.8 + CR 119.4: Parse the amount portion of a "pay <amount> life" cost.
 ///
 /// `rest` is the lowercase text after the leading `"pay "` token. Returns the
 /// resolved `QuantityExpr` on success — literal (`"3 life"`), X variable
 /// (`"X life"`), or a dynamic reference (`"life equal to its power"`,
 /// `"life equal to <quantity-ref>"`). All dispatch is nom-combinator based,
-/// with a shared `life_with_boundary` combinator that guards `"life"` against
+/// with the shared `word_boundary` combinator that guards `"life"` against
 /// accidental alpha-suffix matches (e.g., `"x lifelink"`).
 fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
-    use crate::parser::oracle_nom::error::OracleResult;
-    use nom::sequence::terminated;
-
-    // Shared word-boundary guard: the token just consumed must be followed by
-    // end-of-input or punctuation/whitespace — not another alpha char. This
-    // blocks false matches like "lifelink" when we only want "life".
-    fn word_boundary(i: &str) -> OracleResult<'_, ()> {
-        peek(alt((value((), eof), value((), recognize(one_of(" .,")))))).parse(i)
-    }
-
     // CR 118.8: "pay life equal to <quantity-ref>" — delegates to the shared
     // event-context / named-quantity resolvers so every dynamic amount pattern
     // already recognized for gain/lose life composes here too. The quantity
@@ -12728,65 +13048,111 @@ pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> 
     Ok((rest, phrase.trim().to_string()))
 }
 
+/// CR 118.1 + CR 107.1c + CR 107.3f: the cost named by a `pay ` residue, plus
+/// the resolution-time multiplier when the clause scales that cost by an
+/// amount the player chooses (`pay any amount of {R}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayResidueCost {
+    pub(crate) cost: AbilityCost,
+    pub(crate) scale: Option<QuantityExpr>,
+}
+
+/// CR 107.3f: the player-chosen amount of an `any amount of …` payment,
+/// encoded as the bare `X` variable bound at resolution.
+fn any_amount_variable_x() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }
+}
+
+/// Adapter: the existing mana-symbol authority (`parse_mana_symbols`, which
+/// case-folds itself) as a nom parser.
+fn pay_mana_symbols(i: &str) -> OracleResult<'_, crate::types::mana::ManaCost> {
+    parse_mana_symbols(i)
+        .map(|(cost, rest)| (rest, cost))
+        .ok_or_else(|| oracle_err(i))
+}
+
+/// CR 107.1c + CR 107.3f + CR 118.1: the `any amount of …` payments, nested
+/// under their shared prefix — one `alt` arm per resource:
+/// - `life` (CR 119.4) and `mana` (Join forces) → the variable amount lives in
+///   the cost itself (`PayLife { X }` / `Mana { {X} }`), no scale;
+/// - `{e}` (CR 107.14) → `PayEnergy { X }`, no scale;
+/// - mana symbols (`any amount of {R}`) → the per-unit cost `{R}` scaled by
+///   the player-chosen amount (bare `Variable "X"`). The leaf must consume the
+///   whole tail (a lone trailing period allowed), so `any amount of {R} and
+///   {G}` declines instead of silently dropping `and {G}`, and the per-unit
+///   cost may not itself carry an `{X}` shard.
+fn parse_any_amount_of_payment(i: &str) -> OracleResult<'_, PayResidueCost> {
+    preceded(
+        tag("any amount of "),
+        alt((
+            map(terminated(tag("life"), word_boundary), |_| PayResidueCost {
+                cost: AbilityCost::PayLife {
+                    amount: any_amount_variable_x(),
+                },
+                scale: None,
+            }),
+            map(terminated(tag("mana"), word_boundary), |_| PayResidueCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                scale: None,
+            }),
+            map(tag("{e}"), |_| PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: any_amount_variable_x(),
+                },
+                scale: None,
+            }),
+            map(
+                all_consuming(terminated(
+                    verify(pay_mana_symbols, |cost: &crate::types::mana::ManaCost| {
+                        !cost.has_x()
+                    }),
+                    opt(tag(".")),
+                )),
+                |cost| PayResidueCost {
+                    cost: AbilityCost::Mana { cost },
+                    scale: Some(any_amount_variable_x()),
+                },
+            ),
+        )),
+    )
+    .parse(i)
+}
+
 /// CR 118.1 + CR 119.4 + CR 107.1c: parse the residue after a `pay ` prefix
-/// into an `AbilityCost` — mana+life combos, `pay <amount> life`, any-amount
-/// energy/life/mana payments, `{E}` counts, and bare mana symbols. Single
-/// authority shared by the imperative `CostResource` family and the as-enters
-/// payment replacement builder (`parse_as_enters_pay`, which requires the
-/// any-amount-life shape). `rest` is the lowercased remainder, `rest_orig` the
-/// original-case remainder for case-sensitive mana parsing.
-pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<AbilityCost> {
+/// into a [`PayResidueCost`] — mana+life combos, `pay <amount> life`,
+/// any-amount energy/life/mana/mana-symbol payments
+/// (`parse_any_amount_of_payment`; only the mana-symbol leaf carries a
+/// `scale`), the separate fixed-quantity `an amount of {E} equal to …` axis,
+/// `{E}` counts, and bare mana symbols. Single authority shared by the
+/// imperative `CostResource` family and the as-enters payment replacement
+/// builder (`parse_as_enters_pay`, which requires the unscaled any-amount-life
+/// shape). `rest` is the lowercased remainder, `rest_orig` the original-case
+/// remainder for case-sensitive mana parsing.
+pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<PayResidueCost> {
     if let Some(cost) = parse_mana_and_life_payment(rest_orig) {
-        return Some(cost);
+        return Some(PayResidueCost { cost, scale: None });
     }
     // CR 118.1 + CR 119.4: `pay <amount> life` — literal count, X variable,
     // or dynamic reference (`pay life equal to its power`). Dispatched with
     // nom combinators over the post-"pay " remainder.
     if let Some(amount) = parse_pay_life_amount(rest) {
-        return Some(AbilityCost::PayLife { amount });
-    }
-    // CR 107.14: "pay any amount of {E}" → variable energy payment
-    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
-        return Some(AbilityCost::PayEnergy {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
+        return Some(PayResidueCost {
+            cost: AbilityCost::PayLife { amount },
+            scale: None,
         });
     }
-    // CR 119.4 + CR 107.1c: "pay any amount of life" → variable life payment;
-    // the amount paid binds X for the downstream "draw/look at that many"
-    // step. The word-boundary guard (eof or " .,") blocks "lifelink" /
-    // "lifeforce" from false-matching.
-    if terminated(
-        tag::<_, _, OracleError<'_>>("any amount of life"),
-        peek(alt((
-            value((), eof),
-            value((), nom::combinator::recognize(one_of(" .,"))),
-        ))),
-    )
-    .parse(rest)
-    .is_ok()
-    {
-        return Some(AbilityCost::PayLife {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-        });
-    }
-    // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
-    // mana payment. Join forces uses the total paid this way as X for the
-    // following effect chain.
-    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
-        return Some(AbilityCost::Mana {
-            cost: crate::types::mana::ManaCost::Cost {
-                shards: vec![crate::types::mana::ManaCostShard::X],
-                generic: 0,
-            },
-        });
+    // CR 107.1c + CR 107.3f + CR 118.1: "pay any amount of <life|mana|{E}|mana symbols>".
+    if let Ok((_, residue)) = parse_any_amount_of_payment(rest) {
+        return Some(residue);
     }
     // "pay an amount of {e} equal to ..." → dynamic energy payment.
     // Delegates to the single-authority combinator
@@ -12797,15 +13163,21 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
         .is_ok()
     {
         if let Some(amount) = super::parse_dynamic_energy_unless_cost(rest) {
-            return Some(AbilityCost::PayEnergy { amount });
+            return Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy { amount },
+                scale: None,
+            });
         }
         // Fallback: variable energy payment
-        return Some(AbilityCost::PayEnergy {
-            amount: QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
+        return Some(PayResidueCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
                 },
             },
+            scale: None,
         });
     }
     // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → AbilityCost::PayEnergy.
@@ -12817,10 +13189,13 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
         let cleaned = rest.replace("{e}", "").replace(' ', "");
         if cleaned.is_empty() {
             // Pure {E} symbols: "pay {e}{e}"
-            return Some(AbilityCost::PayEnergy {
-                amount: QuantityExpr::Fixed {
-                    value: energy_count as i32,
+            return Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed {
+                        value: energy_count as i32,
+                    },
                 },
+                scale: None,
             });
         }
         // "pay N {e}" / "pay eight {e}" — `parse_number` halts before the
@@ -12836,15 +13211,21 @@ pub(crate) fn parse_pay_residue_cost(rest: &str, rest_orig: &str) -> Option<Abil
             .parse(after_number)
             .is_ok()
             {
-                return Some(AbilityCost::PayEnergy {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
+                return Some(PayResidueCost {
+                    cost: AbilityCost::PayEnergy {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    },
+                    scale: None,
                 });
             }
         }
     }
     // "pay {2}{B}" → AbilityCost::Mana (CR 118.3a)
     if let Some((mana_cost, _)) = parse_mana_symbols(rest_orig.trim()) {
-        return Some(AbilityCost::Mana { cost: mana_cost });
+        return Some(PayResidueCost {
+            cost: AbilityCost::Mana { cost: mana_cost },
+            scale: None,
+        });
     }
     None
 }
@@ -12871,8 +13252,8 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("pay ")).parse(input))
     {
         let rest = &lower[lower.len() - rest_orig.len()..];
-        if let Some(cost) = parse_pay_residue_cost(rest, rest_orig) {
-            return Some(CostResourceImperativeAst::Pay { cost });
+        if let Some(PayResidueCost { cost, scale }) = parse_pay_residue_cost(rest, rest_orig) {
+            return Some(CostResourceImperativeAst::Pay { cost, scale });
         }
     }
     // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` — a spoken
@@ -12882,8 +13263,10 @@ pub(super) fn parse_cost_resource_ast(
         nom_on_lower(text, lower, |input| value((), tag("say ")).parse(input))
     {
         if let Ok((_, phrase)) = parse_say_phrase_payment(rest_orig) {
+            // A spoken payment has no amount axis.
             return Some(CostResourceImperativeAst::Pay {
                 cost: AbilityCost::SayPhrase { phrase },
+                scale: None,
             });
         }
     }
@@ -12989,9 +13372,9 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                 }
             }
         }
-        CostResourceImperativeAst::Pay { cost } => Effect::PayCost {
+        CostResourceImperativeAst::Pay { cost, scale } => Effect::PayCost {
             cost,
-            scale: None,
+            scale,
             payer: TargetFilter::Controller,
         },
         CostResourceImperativeAst::DamageEffect(effect) => *effect,
@@ -14910,7 +15293,7 @@ pub(super) fn parse_imperative_family_ast(
         }
 
         // Shuffle (CR 701.19)
-        "shuffle" | "shuffles" => parse_shuffle_ast(text, lower).map(ImperativeFamilyAst::Shuffle),
+        "shuffle" | "shuffles" => parse_shuffle_ast(text, lower, ctx).map(ImperativeFamilyAst::Shuffle),
 
         // Reveal: "reveal the top N" → Dig (via search path), else hand reveal (CR 701.16, CR 701.20)
         "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
@@ -15732,7 +16115,7 @@ pub(super) fn parse_imperative_family_ast(
             }
             // Shuffle: "that player shuffles" / "target player shuffles" have
             // non-verb first words but are exact-match shuffle patterns
-            if let Some(ast) = parse_shuffle_ast(text, lower) {
+            if let Some(ast) = parse_shuffle_ast(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::Shuffle(ast));
             }
             None
@@ -16957,6 +17340,8 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             // the Grave, Reanimate — store Some(Graveyard); that is a different
             // phrase and not this card's.)
             let mut clause = parsed_clause(Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target,
@@ -17131,6 +17516,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 },
             };
             let primary = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin,
                 destination,
                 target,
@@ -17147,6 +17533,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 random_order: primary_random,
             };
             let complement = Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: None,
                 destination: rest_destination,
                 target: rest_target,
@@ -18402,7 +18789,7 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
-    if let Some(ast) = parse_counter_ast(text, lower) {
+    if let Some(ast) = parse_counter_ast(text, lower, ctx) {
         return Some(Ok(ast));
     }
     if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
@@ -18658,6 +19045,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 // a "with counters" clause (all five non-from-hand construction
                 // sites pass `vec![]`).
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin,
                     destination: Zone::Exile,
                     target,
@@ -18672,6 +19060,8 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             } else {
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin,
                     destination: Zone::Exile,
                     target,
@@ -19360,6 +19750,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;
@@ -20460,7 +20851,7 @@ mod tests {
     #[test]
     fn parse_counter_louisoix_three_way_disjunction() {
         let text = "Counter target activated ability, triggered ability, or noncreature spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Louisoix's Sacrifice counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20501,7 +20892,7 @@ mod tests {
     #[test]
     fn parse_counter_spider_sense_spell_first_disjunction() {
         let text = "Counter target instant spell, sorcery spell, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spider-Sense counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20554,7 +20945,7 @@ mod tests {
     #[test]
     fn parse_counter_disallow_three_way_disjunction() {
         let text = "Counter target spell, activated ability, or triggered ability.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Disallow counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20609,7 +21000,7 @@ mod tests {
     #[test]
     fn parse_counter_target_spell_with_where_x_cmc_bound() {
         let text = "counter target spell with mana value X or less, where X is the number of Faeries you control.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("Spellstutter Sprite counter clause should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -20661,7 +21052,7 @@ mod tests {
     #[test]
     fn parse_counter_plain_spell_unchanged() {
         let text = "Counter target spell.";
-        let ast = parse_counter_ast(text, &text.to_lowercase())
+        let ast = parse_counter_ast(text, &text.to_lowercase(), &mut ParseContext::default())
             .expect("\"Counter target spell\" should parse");
         let ZoneCounterImperativeAst::Counter { target, .. } = ast else {
             panic!("expected a Counter AST");
@@ -22650,6 +23041,7 @@ mod tests {
         let effect = lower_targeted_action_ast(ast);
         match effect {
             Effect::ChangeZoneAll {
+                actor: _,
                 origin,
                 destination,
                 target: TargetFilter::Or { filters },
@@ -24057,6 +24449,7 @@ mod tests {
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
             cost: AbilityCost::Mana { cost },
+            ..
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected variable mana PayCost");
@@ -24079,6 +24472,7 @@ mod tests {
         let lower = text.to_lowercase();
         let Some(CostResourceImperativeAst::Pay {
             cost: AbilityCost::PayLife { amount },
+            ..
         }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
         else {
             panic!("expected PayLife cost for {text:?}");
@@ -24108,6 +24502,7 @@ mod tests {
             let lower = text.to_lowercase();
             let Some(CostResourceImperativeAst::Pay {
                 cost: AbilityCost::PayLife { amount },
+                ..
             }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
             else {
                 panic!("expected PayLife variable cost for {text:?}");
@@ -24134,7 +24529,8 @@ mod tests {
                 !matches!(
                     res,
                     Some(CostResourceImperativeAst::Pay {
-                        cost: AbilityCost::PayLife { .. }
+                        cost: AbilityCost::PayLife { .. },
+                        ..
                     })
                 ),
                 "{text:?} must not parse as a life payment"
@@ -27297,7 +27693,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_your_hand_into_your_library() {
         let text = "shuffle the cards from your hand into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand]);
@@ -27312,7 +27708,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_your_graveyard_into_your_library() {
         let text = "shuffle the cards from your graveyard into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Graveyard]);
@@ -27327,7 +27723,7 @@ mod tests {
     #[test]
     fn parse_shuffle_cards_from_their_hand_into_their_library() {
         let text = "shuffle the cards from their hand into their library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand]);
@@ -27341,7 +27737,7 @@ mod tests {
     #[test]
     fn parse_shuffle_that_library_resolves_to_parent_target() {
         let text = "shuffle that library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
                 assert_eq!(target, TargetFilter::ParentTarget);
@@ -27357,7 +27753,7 @@ mod tests {
             "shuffle their library",
             "shuffle his or her library",
         ] {
-            let result = parse_shuffle_ast(text, text);
+            let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
             match result {
                 Some(ShuffleImperativeAst::ShuffleLibrary { target }) => {
                     assert_eq!(target, TargetFilter::ParentTarget);
@@ -27372,7 +27768,7 @@ mod tests {
     #[test]
     fn parse_shuffle_hand_and_graveyard_into_your_library() {
         let text = "shuffle your hand and graveyard into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
@@ -27433,7 +27829,7 @@ mod tests {
     #[test]
     fn parse_shuffle_self_ref_into_owners_library() {
         let text = "shuffle ~ into its owner's library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
@@ -27452,7 +27848,7 @@ mod tests {
     #[test]
     fn parse_shuffle_self_ref_into_your_library() {
         let text = "shuffle ~ into your library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
@@ -27471,7 +27867,7 @@ mod tests {
     #[test]
     fn parse_shuffle_their_hand_and_graveyard_into_their_library() {
         let text = "shuffle their hand and graveyard into their library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origins }) => {
                 assert_eq!(origins, vec![Zone::Hand, Zone::Graveyard]);
@@ -27492,7 +27888,7 @@ mod tests {
     fn parse_shuffle_enchanted_creature_into_owners_library() {
         use crate::types::ability::FilterProp;
         let text = "shuffle enchanted creature into its owner's library";
-        let result = parse_shuffle_ast(text, text);
+        let result = parse_shuffle_ast(text, text, &mut ParseContext::default());
         match result {
             Some(ShuffleImperativeAst::ChangeZoneToLibrary {
                 target,
@@ -29195,6 +29591,7 @@ mod tests {
         );
         let Effect::PreventDamage {
             amount,
+            amount_dynamic,
             target,
             damage_source_filter,
             ..
@@ -29203,6 +29600,10 @@ mod tests {
             panic!("expected PreventDamage, got {effect:?}");
         };
         assert_eq!(amount, PreventionAmount::Next(3));
+        assert_eq!(
+            amount_dynamic, None,
+            "the fixed counted form carries no dynamic amount"
+        );
         assert!(
             typed_leg(&target).is_some_and(|tf| has_type(tf, TypeFilter::Creature)),
             "recipient target must stay Typed(creature), got {target:?}"
@@ -29211,6 +29612,196 @@ mod tests {
             damage_source_filter, None,
             "recipient prevent must not carry a source filter"
         );
+    }
+
+    /// CR 615.7 + CR 107.3a: the shared prevention-amount authority
+    /// decomposes every form of the amount axis from the stream just past
+    /// "prevent ". The blanket forms carry no dynamic quantity; a literal counted
+    /// form yields `Next(n)` (the `2` row proves the literal path still fires);
+    /// the announced `X` is carried in the dynamic slot with `Next(1)` as the
+    /// static placeholder instead of being silently dropped. A dynamic quantity
+    /// whose remainder does not open on the prevention damage noun (an
+    /// unconsumed "plus X" / "minus X" connective, or the out-of-model
+    /// "noncombat damage") is `None`: it never becomes the fallback `Next(1)`.
+    ///
+    /// No printed card prints a counted dynamic prevention other than "the next
+    /// X damage" (Festival of the Guildpact: "Prevent the next X damage that
+    /// would be dealt to you this turn.") or "X of that damage" (Errant Minion /
+    /// Power Leak: "Prevent X of that damage, where X is the amount of mana that
+    /// player paid this way."). The determiner-less "next" rows, the combat-noun,
+    /// offset, connective and noncombat rows are synthetic boundary probes (no
+    /// printed card prints "prevent next …"); the nearest printed combat
+    /// form is Decorated Griffin ("{1}{W}: Prevent the next 1 combat damage that
+    /// would be dealt to you this turn.").
+    #[test]
+    fn prevention_amount_covers_counted_and_blanket_forms() {
+        let variable_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        type Decomposition = Option<(PreventionAmount, Option<QuantityExpr>)>;
+        let cases: &[(&str, Decomposition)] = &[
+            (
+                "all damage that would be dealt this turn",
+                Some((PreventionAmount::All, None)),
+            ),
+            (
+                "all but 2 damage that would be dealt this turn",
+                Some((PreventionAmount::AllBut(2), None)),
+            ),
+            (
+                "the next 3 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(3), None)),
+            ),
+            (
+                "next 3 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(3), None)),
+            ),
+            (
+                "the next x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "next x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "x damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "2 damage that would be dealt this turn",
+                Some((PreventionAmount::Next(2), None)),
+            ),
+            (
+                "damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), None)),
+            ),
+            // Reach guards for the dynamic boundary: every accepted continuation
+            // of a dynamic quantity (bare / combat damage noun, the event-relative
+            // "of that damage", a fully consumed composed count) still publishes.
+            (
+                "the next x combat damage that would be dealt this turn",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "x of that damage, where x is the amount of mana that player paid this way",
+                Some((PreventionAmount::Next(1), variable_x.clone())),
+            ),
+            (
+                "the next x plus 1 damage that would be dealt this turn",
+                Some((
+                    PreventionAmount::Next(1),
+                    Some(QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        }),
+                        offset: 1,
+                    }),
+                )),
+            ),
+            // The Fixed arm is untouched: Save Life's "2\u{bd} damage" keeps the
+            // integer prefix and the unconsumed remainder, exactly as before.
+            (
+                "the next 2\u{bd} damage that would be dealt to target creature this turn",
+                Some((PreventionAmount::Next(2), None)),
+            ),
+            // The dynamic boundary: a quantity that does not reach the damage noun
+            // is not a shield.
+            ("the next x plus x damage that would be dealt this turn", None),
+            ("x minus x damage that would be dealt this turn", None),
+            (
+                "the next x plus the number of creatures you control damage that would be dealt this turn",
+                None,
+            ),
+            (
+                "the next x noncombat damage that would be dealt this turn",
+                None,
+            ),
+        ];
+        for (rest, expected) in cases {
+            assert_eq!(
+                parse_prevention_amount(rest),
+                *expected,
+                "amount decomposition for {rest:?}"
+            );
+        }
+    }
+
+    /// CR 615.7 + CR 107.3a: an unconsumed dynamic quantity is an explicit receipt
+    /// from the imperative parser, ahead of every `PreventDamage` emitter and ahead
+    /// of the dealt-by gap. A clause that also fails another authority ("dealt by
+    /// target creature" is the dealt-by gap) is reported for its quantity first.
+    ///
+    /// The "the next X damage" forms are the reach guards: the clause got past the
+    /// quantity gate and reached the dealt-by emitter, which publishes the
+    /// source-scoped announced-X shield for "target blocked creature" and the
+    /// dealt-by gap for "target creature". The bidirectional gate-off reach guard
+    /// (`parent_target_available == false`) lives here too, because
+    /// `parse_prevent_effect` is a private test-only function.
+    ///
+    /// No printed card prints a counted (X) prevention dealt by a target source;
+    /// the nearest is Benalish Missionary ("{1}{W}, {T}: Prevent all combat
+    /// damage that would be dealt by target blocked creature this turn."). No
+    /// printed card has the "X plus X" connective either (the corpus has no
+    /// "prevent the next X plus …" head); the nearest printed cards are Festival
+    /// of the Guildpact ("Prevent the next X damage that would be dealt to you
+    /// this turn.") for the "to you" row and Maze of Ith ("Prevent all combat
+    /// damage that would be dealt to and dealt by that creature this turn.") for
+    /// the bidirectional row.
+    #[test]
+    fn unconsumed_prevention_quantity_is_a_receipt_ahead_of_every_emitter() {
+        let announced_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        let assert_gap = |text: &str, gap: &str| {
+            let effect = parse_prevent_effect(text, false);
+            assert!(
+                matches!(&effect, Effect::Unimplemented { name, .. } if name == gap),
+                "{text:?} must be the {gap:?} gap, got {effect:?}"
+            );
+        };
+
+        // Reach guards: with the quantity consumed, each clause is judged by its own
+        // dealt-by / recipient authority.
+        let effect = parse_prevent_effect(
+            "Prevent the next X damage that would be dealt by target blocked creature this turn.",
+            false,
+        );
+        let Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            damage_source_filter,
+            ..
+        } = &effect
+        else {
+            panic!("expected the dealt-by shield, got {effect:?}");
+        };
+        assert_eq!(*amount, PreventionAmount::Next(1));
+        assert_eq!(*amount_dynamic, announced_x);
+        assert!(
+            damage_source_filter.is_some(),
+            "the dealt-by emitter scopes the shield to its source, got {effect:?}"
+        );
+        assert_gap(
+            "Prevent the next X damage that would be dealt by target creature this turn.",
+            PREVENT_DEALT_BY_TARGET_GAP,
+        );
+
+        // The unconsumed quantity wins over every downstream authority.
+        for text in [
+            "Prevent the next X plus X damage that would be dealt by target blocked creature this turn.",
+            "Prevent the next X plus X damage that would be dealt by target creature this turn.",
+            "Prevent the next X plus X damage that would be dealt to you this turn.",
+            "Prevent the next X plus X damage that would be dealt to and dealt by that creature this turn.",
+        ] {
+            assert_gap(text, PREVENT_UNCONSUMED_QUANTITY_GAP);
+        }
     }
 
     /// CR 615.2 + CR 109.4: Haze Frog — "prevent all combat damage that other
@@ -31273,14 +31864,14 @@ mod tests {
         );
         // Reach-guard: the neighboring energy forms still parse.
         assert_eq!(
-            parse_pay_residue_cost("{e}{e}", "{E}{E}"),
+            parse_pay_residue_cost("{e}{e}", "{E}{E}").map(|r| r.cost),
             Some(AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 2 }
             }),
             "pure sigils still parse"
         );
         assert_eq!(
-            parse_pay_residue_cost("eight {e}", "eight {E}"),
+            parse_pay_residue_cost("eight {e}", "eight {E}").map(|r| r.cost),
             Some(AbilityCost::PayEnergy {
                 amount: QuantityExpr::Fixed { value: 8 }
             }),
@@ -31288,7 +31879,7 @@ mod tests {
         );
         assert!(
             matches!(
-                parse_pay_residue_cost("any amount of {e}", "any amount of {E}"),
+                parse_pay_residue_cost("any amount of {e}", "any amount of {E}").map(|r| r.cost),
                 Some(AbilityCost::PayEnergy {
                     amount: QuantityExpr::Ref {
                         qty: QuantityRef::Variable { .. }
@@ -31297,6 +31888,288 @@ mod tests {
             ),
             "variable energy still parses"
         );
+    }
+
+    /// The bare `X` the `any amount of <mana symbols>` leaf must emit as its
+    /// scale — asserted by equality, never `contains_x()`: the engine's submit
+    /// arm scales the base cost by the chosen amount, which is only right for
+    /// a bare X.
+    fn bare_variable_x() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    /// CR 107.1c + CR 107.3f + CR 118.1: "pay any amount of <mana symbols>"
+    /// is the per-unit cost scaled by the player-chosen amount, for any
+    /// symbol run (single colored, multi-symbol, colorless, generic) and with
+    /// a lone trailing period.
+    #[test]
+    fn pay_any_amount_of_mana_symbols_scales_per_unit_cost() {
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}"),
+            Some(PayResidueCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+                scale: Some(bare_variable_x()),
+            }),
+            "Leyline Tyrant's {{R}} is a per-unit cost scaled by bare X"
+        );
+        for symbols in ["{r}", "{g}", "{r}{r}", "{c}", "{2}"] {
+            let lower = format!("any amount of {symbols}");
+            let (expected, _) = parse_mana_symbols(symbols).expect("symbol run parses");
+            let residue = parse_pay_residue_cost(&lower, &lower);
+            assert_eq!(
+                residue,
+                Some(PayResidueCost {
+                    cost: AbilityCost::Mana { cost: expected },
+                    scale: Some(bare_variable_x()),
+                }),
+                "{lower}"
+            );
+            let scale = residue.and_then(|r| r.scale).expect("scaled");
+            assert!(crate::types::ability::is_pay_any_amount(&scale), "{lower}");
+        }
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}.", "any amount of {R}."),
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}"),
+            "a lone trailing period is accepted"
+        );
+    }
+
+    /// The folded `any amount of` siblings keep their unscaled shapes, keep
+    /// their word-boundary guards (`life`), and `mana` gains one (intended
+    /// tightening: `manafoo` declines; `mana,` still parses).
+    #[test]
+    fn pay_any_amount_of_siblings_keep_unscaled_shape() {
+        let x_mana = AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::X],
+                generic: 0,
+            },
+        };
+        for (lower, expected) in [
+            (
+                "any amount of {e}",
+                AbilityCost::PayEnergy {
+                    amount: bare_variable_x(),
+                },
+            ),
+            (
+                "any amount of life",
+                AbilityCost::PayLife {
+                    amount: bare_variable_x(),
+                },
+            ),
+            ("any amount of mana", x_mana.clone()),
+            ("any amount of mana, then", x_mana),
+            (
+                "{r}",
+                AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+            ),
+        ] {
+            assert_eq!(
+                parse_pay_residue_cost(lower, lower),
+                Some(PayResidueCost {
+                    cost: expected,
+                    scale: None,
+                }),
+                "{lower}"
+            );
+        }
+        for lower in [
+            "any amount of lifelink",
+            "any amount of lifeforce",
+            "any amount of manafoo",
+        ] {
+            assert_eq!(parse_pay_residue_cost(lower, lower), None, "{lower}");
+        }
+    }
+
+    /// The mana-symbol leaf declines a tail it cannot consume (instead of
+    /// paying `{R}` per unit with `and {G}` silently dropped) and a per-unit
+    /// cost carrying an `{X}` shard; the whole clause then stays unparsed.
+    #[test]
+    fn pay_any_amount_of_mana_symbols_declines_tail_and_x_shard() {
+        // Reach-guard: the same prefix and leaf accept the bare symbol run.
+        assert!(parse_pay_residue_cost("any amount of {r}", "any amount of {R}").is_some());
+        for lower in ["any amount of {r} and {g}", "any amount of {x}"] {
+            assert_eq!(parse_pay_residue_cost(lower, lower), None, "{lower}");
+        }
+        let text = "pay any amount of {R} and {G}";
+        let lower = text.to_lowercase();
+        assert_eq!(
+            parse_cost_resource_ast(text, &lower, &mut ParseContext::default()),
+            None,
+            "{text}"
+        );
+    }
+
+    /// Behemoth of Vault 0 ("…you may pay an amount of {E} equal to target
+    /// nonland permanent's mana value…") still reaches the separate
+    /// `an amount of {e} equal to` arm: an energy cost, never scaled. Only the
+    /// variant is pinned for its verbatim tail (today's amount is the
+    /// quantity-parser fallback, not derived from the card).
+    #[test]
+    fn pay_any_amount_fold_keeps_energy_equal_to_arm_reachable() {
+        let behemoth = parse_pay_residue_cost(
+            "an amount of {e} equal to target nonland permanent's mana value",
+            "an amount of {E} equal to target nonland permanent's mana value",
+        );
+        assert!(
+            matches!(
+                behemoth,
+                Some(PayResidueCost {
+                    cost: AbilityCost::PayEnergy { .. },
+                    scale: None,
+                })
+            ),
+            "Behemoth of Vault 0 tail: {behemoth:?}"
+        );
+        assert_eq!(
+            parse_pay_residue_cost(
+                "an amount of {e} equal to its mana value",
+                "an amount of {E} equal to its mana value",
+            ),
+            Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: crate::types::ability::ObjectScope::Recipient,
+                        },
+                    },
+                },
+                scale: None,
+            }),
+            "the dynamic-energy delegation is reached"
+        );
+        // Paired positives: the fold's leaf and its `{e}` sibling.
+        assert_eq!(
+            parse_pay_residue_cost("any amount of {r}", "any amount of {R}").and_then(|r| r.scale),
+            Some(bare_variable_x())
+        );
+        assert!(matches!(
+            parse_pay_residue_cost("any amount of {e}", "any amount of {E}"),
+            Some(PayResidueCost {
+                cost: AbilityCost::PayEnergy { .. },
+                scale: None,
+            })
+        ));
+    }
+
+    /// Lowering carries the residue's scale onto `Effect::PayCost`; an
+    /// unscaled payment lowers with `scale: None`.
+    #[test]
+    fn pay_any_amount_lowering_carries_bare_variable_x_scale() {
+        let red = AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::Red],
+                generic: 0,
+            },
+        };
+        for (text, scale) in [
+            ("pay any amount of {R}", Some(bare_variable_x())),
+            ("pay {R}", None),
+        ] {
+            let lower = text.to_lowercase();
+            let ast = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+                .expect("pay clause parses");
+            assert_eq!(
+                lower_cost_resource_ast(ast),
+                Effect::PayCost {
+                    cost: red.clone(),
+                    scale,
+                    payer: TargetFilter::Controller,
+                },
+                "{text}"
+            );
+        }
+    }
+
+    /// Leyline Tyrant, verbatim Oracle text: the dies trigger's execute chain
+    /// is the per-unit `{R}` payment scaled by bare X, followed by a
+    /// "When you do" rider (CR 603.12) dealing "that much" damage
+    /// (`EventContextAmount`) to any target — nothing unimplemented.
+    #[test]
+    fn pay_any_amount_leyline_tyrant_whole_card_reaches_engine_shape() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "Flying\nYou don't lose unspent red mana as steps and phases end.\nWhen this creature dies, you may pay any amount of {R}. When you do, it deals that much damage to any target.",
+            "Leyline Tyrant",
+            &[],
+            &["Creature".to_string()],
+            &["Dragon".to_string()],
+        );
+        // Reach-guard: the whole card parsed, static line included.
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|s| matches!(s.mode, StaticMode::StepEndUnspentMana { .. })),
+            "static line: {:?}",
+            parsed.statics
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+        let trigger = &parsed.triggers[0];
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone
+        );
+        assert_eq!(trigger.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+        let execute = trigger.execute.as_deref().expect("trigger execute");
+        assert!(execute.optional, "\"you may pay\" is optional: {trigger:?}");
+        assert_eq!(
+            *execute.effect,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::Red],
+                        generic: 0,
+                    },
+                },
+                scale: Some(bare_variable_x()),
+                payer: TargetFilter::Controller,
+            }
+        );
+        let rider = execute.sub_ability.as_deref().expect("When you do rider");
+        assert_eq!(rider.condition, Some(AbilityCondition::WhenYouDo));
+        assert!(
+            matches!(
+                &*rider.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "rider: {:?}",
+            rider.effect
+        );
+        let mut node = Some(execute);
+        while let Some(def) = node {
+            assert!(
+                !matches!(&*def.effect, Effect::Unimplemented { .. }),
+                "unimplemented link: {:?}",
+                def.effect
+            );
+            node = def.sub_ability.as_deref();
+        }
     }
 }
 

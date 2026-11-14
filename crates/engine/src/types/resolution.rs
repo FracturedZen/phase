@@ -1957,6 +1957,44 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 400.7 + CR 616.1: Find the UNIQUE parked BatchDelivery owner whose
+    /// `paused_current` matches a resumed delivery. Unlike the fixed
+    /// parent/child accessor above, this walks the whole stack because a tail
+    /// park can push more than one frame above the batch (counter ordering, the
+    /// continuation tail). Owners are matched by the pre-move occurrence
+    /// (member incarnation, object, origin zone), so a CR 614.6 destination
+    /// redirect on the approved event does not defeat the match. Ambiguity (no
+    /// matching owner, or more than one) fails closed, and the
+    /// incarnation-bearing member key makes a collision impossible for a single
+    /// batch.
+    pub fn paused_batch_delivery_mut_for_member(
+        &mut self,
+        member: crate::types::identifiers::ObjectIncarnationRef,
+        approved_event: &crate::types::proposed_event::ProposedEvent,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let mut found = None;
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(current) {
+                if batch
+                    .paused_current
+                    .as_ref()
+                    .is_some_and(|paused| paused.captures_resumed(member, approved_event))
+                {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(current);
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        match self.frames.get_mut(found?) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(_) | None => None,
+        }
+    }
+
     /// Consume exactly the active BatchDelivery owner after its logical group
     /// settles once.
     pub fn take_active_batch_delivery(
@@ -3744,43 +3782,6 @@ impl ResolutionStack {
         self.frames.iter()
     }
 
-    /// CR 104.4b: whether any parked frame is an unsettled delivery (a
-    /// zone-change or batch delivery mid-flight). Its retained events are not
-    /// normalized, so loop equality treats a state holding one as not
-    /// comparable. Exhaustive on purpose: a new frame family must say whether
-    /// it is a settled, visited carrier or an unsettled one.
-    pub(crate) fn holds_unsettled_delivery_frame(&self) -> bool {
-        self.frames.iter().any(|frame| match frame {
-            ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_) => true,
-            ResolutionFrame::AbilityContinuation(_)
-            | ResolutionFrame::RepeatFor(_)
-            | ResolutionFrame::RepeatUntil(_)
-            | ResolutionFrame::RepeatedOptionalPayment(_)
-            | ResolutionFrame::CounterMoves(_)
-            | ResolutionFrame::CounterRemovals(_)
-            | ResolutionFrame::CounterAdditions(_)
-            | ResolutionFrame::CopyToken(_)
-            | ResolutionFrame::DebugCardEntries(_)
-            | ResolutionFrame::EachPlayerCopyChosen(_)
-            | ResolutionFrame::ChooseOneOf(_)
-            | ResolutionFrame::VoteBallot(_)
-            | ResolutionFrame::PerPlayerZoneChoice(_)
-            | ResolutionFrame::PerCategoryZoneChoice(_)
-            | ResolutionFrame::OptionalEffect(_)
-            | ResolutionFrame::CoinFlip(_)
-            | ResolutionFrame::DieRoll(_)
-            | ResolutionFrame::Proliferate(_)
-            | ResolutionFrame::MultiDraw(_)
-            | ResolutionFrame::Discard(_)
-            | ResolutionFrame::ConniveReentry(_)
-            | ResolutionFrame::LifeTotalAssignment(_)
-            | ResolutionFrame::SpellResolution(_)
-            | ResolutionFrame::MutateMerge(_)
-            | ResolutionFrame::CipherEncode(_)
-            | ResolutionFrame::PostReplacement(_) => false,
-        })
-    }
-
     /// CR 104.4b: every trigger event a parked frame retains, in every frame
     /// rather than only the active one — an optional frame's singular and plural
     /// events, a copy-chosen walk's trigger event, and an ability continuation's zone-choice and pending trigger
@@ -3866,6 +3867,16 @@ impl ResolutionStack {
             self.observe_draw_sequence_frame_id(draw.draw_sequences.next_frame_id());
         }
         self.frames.push(frame);
+    }
+
+    /// CR 104.1: retire every suspended frame because the game this stack belongs to
+    /// has ended; no instruction of a resolution still under way is owed to a
+    /// finished game. Frames are dropped through the stack's own `pop` whatever
+    /// their kind, so a direct-choice owner and every parent beneath it go together.
+    /// The monotonic draw, discard and post-replacement allocators are left as they
+    /// are, as for any other abandoned frame.
+    pub(crate) fn abandon_all_frames(&mut self) {
+        while self.frames.pop().is_some() {}
     }
 
     /// Install an outer continuation immediately below the active child.
@@ -4255,7 +4266,9 @@ impl ResolutionStack {
 /// and parked frames, and preserves unavailable announced bindings through coin
 /// outcomes and detached continuations (CR 601.2c + CR 608.2b); coin frames and
 /// unresolved coin abilities from earlier versions are refused.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+/// Version 12 separates a parked ChangeZone instruction's recorded performer
+/// from its family/controller-relative duration authority.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 12;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -4296,6 +4309,15 @@ const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 /// illegal-announcement absence provenance (#10300's random-result trigger-scope
 /// version).
 const LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
+
+/// Last wire version whose parked ChangeZone instruction actor was recorded
+/// in `controller` rather than an independent `performed_by` field.
+const LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION: u64 = 11;
+
+/// Bound random-result branches identify their v11 format, not unrelated
+/// features added to later full-state resolution versions.
+const RANDOM_RESULT_BINDING_WIRE_VERSION: u64 =
+    LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION + 1;
 
 /// Stable refusal: old coin saves lack the independently announced bindings;
 /// neither today's board nor the old flat target vector can reconstruct them.
@@ -4661,14 +4683,14 @@ struct RandomResultBoundaryStack {
     frames: Vec<RandomResultBoundaryFrame>,
 }
 
-/// Dates an undeclared payload by what its random-result frames carry. Only the
-/// current writer emits `bound_branches`; #10300's v10 writer emits owned
+/// Dates an undeclared payload by what its random-result frames carry. The
+/// v11 writer introduced `bound_branches`; #10300's v10 writer emits owned
 /// trigger scope (including explicit emptiness) on coin and die frames; v9
-/// emits coin branch inheritance alone. A coin frame without bindings can only
-/// come from an earlier writer, so it dates the payload to that writer even
-/// beside current evidence, and the payload is refused with the stable message
-/// rather than decoded as current (CR 601.2c + CR 608.2b). Die scope decodes
-/// identically at v10 and v11, so it dates to current, as #10300 did.
+/// emits coin branch inheritance alone. A coin frame without bindings dates
+/// the payload to that older writer even beside newer evidence, and is refused
+/// with the stable message (CR 601.2c + CR 608.2b). Die scope decodes identically
+/// at v10 and v11, so it retains the v11 binding-era date. Neither marker proves
+/// the independent ChangeZone actor shape introduced in v12.
 fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
     let stack = serde_json::from_value::<RandomResultBoundaryStack>(stack.clone())
         .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
@@ -4699,7 +4721,7 @@ fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
             RandomResultBoundaryFrame::Other => {}
         }
     }
-    Ok(legacy.or((current && !unbound_coin).then_some(RESOLUTION_STATE_WIRE_VERSION)))
+    Ok(legacy.or((current && !unbound_coin).then_some(RANDOM_RESULT_BINDING_WIRE_VERSION)))
 }
 
 /// Inspect only an active carrier supplied by the persistence boundary.
@@ -4931,7 +4953,7 @@ fn migrate_legacy_change_zone_carrier(carrier: &mut Value) -> Result<(), String>
 /// [`LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR`]. The v1 top-level carrier
 /// is migrated by the v1 reader arm of `ResolutionStateWire::from_value`
 /// through the same `migrate_legacy_change_zone_carrier`, which stays the
-/// single per-carrier authority. v7 and later decode directly.
+/// single per-carrier authority. v7 and later already carry resolved members.
 fn migrate_legacy_change_zone_member_entries(
     value: &mut Value,
     version: u64,
@@ -4964,6 +4986,51 @@ fn migrate_legacy_change_zone_member_entries(
         }
     }
     Ok(())
+}
+
+fn migrate_legacy_change_zone_performer(carrier: &mut Value) {
+    let Some(carrier) = carrier.as_object_mut() else {
+        return;
+    };
+    if carrier.contains_key("performed_by") {
+        return;
+    }
+    if let Some(controller) = carrier.get("controller").and_then(Value::as_u64) {
+        carrier.insert("performed_by".to_string(), Value::from(controller));
+    }
+}
+
+/// Preserve the performer recorded by deployed historical ChangeZone writers:
+/// they used their captured controller for both the family and the move actor.
+/// Only the absent actor is copied. Controller, duration and replacement anchors
+/// stay untouched; admission never reconstructs or corrects historical gameplay.
+/// Current carriers must supply their independent actor explicitly.
+fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
+    if !(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION
+        ..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION)
+        .contains(&version)
+    {
+        return;
+    }
+
+    let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for frame in frames {
+        if frame.get("type").and_then(Value::as_str) != Some("ChangeZone") {
+            continue;
+        }
+        if let Some(carrier) = frame
+            .get_mut("data")
+            .and_then(|data| data.get_mut("pending"))
+        {
+            migrate_legacy_change_zone_performer(carrier);
+        }
+    }
 }
 
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
@@ -5249,12 +5316,18 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 through 8 use the same
-    /// frame layout with an explicit draw-result-owner presence check, and a
-    /// version-4 draw frame simply has no dealer. A v2–v6 parked ChangeZone
-    /// frame carrier is migrated or refused first by
-    /// `migrate_legacy_change_zone_member_entries`; the v1 top-level carrier,
-    /// by the v1 reader arm before that arm's validation and legacy decodes.
+    /// 2 and 3 share the typed-frame reader; versions 4 and later use its common
+    /// layout after version-specific preparation, including explicit draw-result
+    /// ownership (a version-4 draw frame simply has no dealer). A v2–v6 parked
+    /// ChangeZone carrier is migrated or refused by
+    /// `migrate_legacy_change_zone_member_entries`; the v1 reader handles its
+    /// top-level carrier. Pre-v12 carriers preserve their recorded controller as
+    /// the historical actor when `performed_by` is absent. Their family controller,
+    /// duration and replacement anchor remain exactly as saved, even when current
+    /// rules would attribute that instruction to a different player. Explicit
+    /// actors and current carriers retain their independent roles. Admission never
+    /// infers authority from a resolving entry, live object or continuation, nor
+    /// decides whether begun resolution continues after a player leaves.
     ///
     /// Every version then passes the onset admission (`admit_entry_onset_record`, CR 611.2e): a
     /// payload written before ability onsets were recorded is admitted only when it holds no
@@ -5291,10 +5364,11 @@ impl ResolutionStateWire {
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -5303,6 +5377,7 @@ impl ResolutionStateWire {
         }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
         migrate_legacy_change_zone_member_entries(&mut value, version)?;
+        migrate_legacy_change_zone_performers(&mut value, version);
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -5392,6 +5467,7 @@ impl ResolutionStateWire {
                     .filter(|carrier| !carrier.is_null())
                 {
                     migrate_legacy_change_zone_carrier(carrier)?;
+                    migrate_legacy_change_zone_performer(carrier);
                 }
                 let legacy_draw_sequence_frames = value
                     .get("draw_sequences")
@@ -5647,15 +5723,20 @@ impl ResolutionStateWire {
                 Err("invalid resolution-state wire decode mode".to_string())
             }
         })();
-        decoded.map_err(|error: String| {
-            if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
-                && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
-            {
-                LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
-            } else {
-                error
-            }
-        })
+        decoded
+            .and_then(|wire: Self| {
+                crate::types::game_state::validate_restored_event_context_pins(&wire.state)?;
+                Ok(wire)
+            })
+            .map_err(|error: String| {
+                if version <= LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+                    && error.contains("INVALID_COIN_BRANCH_BINDINGS:")
+                {
+                    LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string()
+                } else {
+                    error
+                }
+            })
     }
 }
 
@@ -6647,9 +6728,9 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CoinFlipRun, CopyChooseScope,
-        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
-        PostReplacementContinuation, QuantityExpr, RepeatContinuation, ReplacementDefinition,
-        SpellContext, TargetFilter, TypedFilter, ZoneOwner,
+        Duration, Effect, EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
+        PlayerScope, PostReplacementContinuation, QuantityExpr, RepeatContinuation,
+        ReplacementDefinition, SpellContext, TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
@@ -6658,9 +6739,10 @@ mod tests {
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PersistedGameState,
-        PostReplacementDrain, RandomDraw, RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry,
-        StackEntryKind, ZoneDeliveryExileTracking,
+        PendingSpellResolution, PendingVoteBallotIteration, PendingZoneChangeDelivery,
+        PersistedGameState, PostReplacementDrain, RandomDraw, RepeatUntilStopWitness,
+        ResidentDrainPolicy, StackEntry, StackEntryKind, ZoneDeliveryExileTracking,
+        ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
@@ -6908,6 +6990,247 @@ mod tests {
         }))
     }
 
+    /// A `BatchDelivery` owner parked on the resumed member's pre-choice key.
+    fn paused_batch_delivery_frame(
+        seed: u64,
+        member: ObjectIncarnationRef,
+        expected: &ProposedEvent,
+    ) -> ResolutionFrame {
+        let mut frame = batch_delivery_frame(seed);
+        match &mut frame {
+            ResolutionFrame::BatchDelivery(batch) => {
+                batch.paused_current =
+                    Some(PendingZoneChangeDelivery::new(member, expected.clone()));
+            }
+            other => unreachable!("batch_delivery_frame builds a BatchDelivery, got {other:?}"),
+        }
+        frame
+    }
+
+    /// The approved resume event for `expected`: the same pre-move occurrence
+    /// (object, origin) with a CR 614.6 destination redirect; the entry counter
+    /// stands in for any other replacement-controlled modifier (CR 614.1c /
+    /// CR 614.1d) the key must also ignore.
+    fn approved_with_redirect(expected: &ProposedEvent, destination: Zone) -> ProposedEvent {
+        let mut approved = expected.clone();
+        match &mut approved {
+            ProposedEvent::ZoneChange {
+                to,
+                enter_with_counters,
+                ..
+            } => {
+                *to = destination;
+                *enter_with_counters = vec![(CounterType::Plus1Plus1, 1)];
+            }
+            other => unreachable!("fixture builds a ZoneChange, got {other:?}"),
+        }
+        approved
+    }
+
+    /// Stack: the paused `BatchDelivery` owner, then the counter-ordering park a
+    /// tail park pushes above it, then one more non-batch frame. Neither fixed
+    /// accessor can reach the owner from this shape.
+    fn state_with_buried_paused_owner(
+        member: ObjectIncarnationRef,
+        expected: &ProposedEvent,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        state
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(7, member, expected));
+        state
+            .resolution_stack
+            .push_inner(ResolutionFrame::CounterAdditions(
+                PendingCounterAdditionQueue {
+                    remaining: Vec::new(),
+                    completion: None,
+                },
+            ));
+        state.resolution_stack.push_inner(continuation_frame(7));
+        state
+    }
+
+    fn buried_owner_terminal(state: &GameState) -> Option<ZoneMoveCompletion> {
+        state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) => batch.paused_current.as_ref(),
+                _ => None,
+            })
+            .expect("the paused owner is resident")
+            .terminal_completion
+    }
+
+    // CR 400.7 + CR 614.6 + CR 616.1: typed-invariant row. No printed card
+    // currently reaches a destination redirect under a buried BatchDelivery
+    // owner: Obstinate Baloth-class discard redirects are owned by
+    // PendingDiscardBatch/PendingSingleDiscard, and a Containment Priest exile
+    // redirect of a reveal-until entrant has no ETB tail park, so the fixed
+    // relation captures it. Both directions are exercised so the predicate is
+    // proven to ignore `to`.
+    #[test]
+    fn resumed_lookup_matches_a_buried_owner_by_pre_move_occurrence_across_a_destination_redirect()
+    {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let source = ObjectId(41);
+        for (from, to, redirected_to) in [
+            (Zone::Hand, Zone::Graveyard, Zone::Battlefield),
+            (Zone::Library, Zone::Battlefield, Zone::Exile),
+        ] {
+            let expected = ProposedEvent::zone_change(member.object_id, from, to, Some(source));
+            let approved = approved_with_redirect(&expected, redirected_to);
+            let mut state = state_with_buried_paused_owner(member, &expected);
+
+            // Reach guard: neither fixed relation can see the buried owner, so
+            // only the whole-stack walk can match it.
+            assert!(state.resolution_stack.active_batch_delivery().is_none());
+            assert!(
+                state
+                    .resolution_stack
+                    .active_batch_delivery_or_post_replacement_child_mut()
+                    .is_none(),
+                "the fixed parent/child relation does not reach a twice-buried owner"
+            );
+            assert_eq!(buried_owner_terminal(&state), None);
+
+            assert!(
+                state.capture_resumed_paused_zone_change_delivery(
+                    member,
+                    &approved,
+                    &[],
+                    ZoneMoveCompletion::Moved,
+                ),
+                "{from:?} -> {to:?} redirected to {redirected_to:?} still names the same occurrence"
+            );
+            assert_eq!(
+                buried_owner_terminal(&state),
+                Some(ZoneMoveCompletion::Moved),
+                "the buried owner records the resumed terminal completion"
+            );
+        }
+    }
+
+    // Hostile siblings of the redirect row. Each negative is paired with the
+    // positive control on the same fixture, so it cannot pass by missing the
+    // owner for an unrelated reason.
+    #[test]
+    fn resumed_lookup_still_rejects_a_different_origin_or_a_later_incarnation() {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let expected = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Hand,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let approved = approved_with_redirect(&expected, Zone::Battlefield);
+        let mut state = state_with_buried_paused_owner(member, &expected);
+
+        // Different origin zone: not the same pre-move occurrence.
+        let other_origin = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Library,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let other_origin = approved_with_redirect(&other_origin, Zone::Battlefield);
+        assert!(!state.capture_resumed_paused_zone_change_delivery(
+            member,
+            &other_origin,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(buried_owner_terminal(&state), None);
+
+        // Same object, later incarnation (CR 400.7): a different member.
+        let later = ObjectIncarnationRef::of(member.object_id, member.incarnation + 1);
+        assert!(!state.capture_resumed_paused_zone_change_delivery(
+            later,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(buried_owner_terminal(&state), None);
+
+        // Positive control on the identical fixture.
+        assert!(state.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(
+            buried_owner_terminal(&state),
+            Some(ZoneMoveCompletion::Moved)
+        );
+    }
+
+    // The unique-owner ambiguity rejection is preserved: two parked owners that
+    // both match the resumed member fail closed, and neither records.
+    #[test]
+    fn resumed_lookup_rejects_two_matching_owners_and_accepts_a_single_owner() {
+        let member = ObjectIncarnationRef::of(ObjectId(40), 3);
+        let expected = ProposedEvent::zone_change(
+            member.object_id,
+            Zone::Hand,
+            Zone::Graveyard,
+            Some(ObjectId(41)),
+        );
+        let approved = approved_with_redirect(&expected, Zone::Battlefield);
+
+        let mut ambiguous = GameState::new_two_player(7);
+        ambiguous
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(7, member, &expected));
+        ambiguous
+            .resolution_stack
+            .push_inner(paused_batch_delivery_frame(8, member, &expected));
+        ambiguous.resolution_stack.push_inner(continuation_frame(7));
+        assert!(
+            ambiguous
+                .resolution_stack
+                .paused_batch_delivery_mut_for_member(member, &approved)
+                .is_none(),
+            "two matching owners are ambiguous"
+        );
+        assert!(!ambiguous.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert!(
+            ambiguous.resolution_stack.iter().all(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) => batch
+                    .paused_current
+                    .as_ref()
+                    .is_some_and(|paused| paused.terminal_completion.is_none()),
+                _ => true,
+            }),
+            "neither ambiguous owner records a completion"
+        );
+
+        // Positive control: a freshly built state with exactly one owner.
+        let mut single = state_with_buried_paused_owner(member, &expected);
+        assert!(
+            single
+                .resolution_stack
+                .paused_batch_delivery_mut_for_member(member, &approved)
+                .is_some(),
+            "a single matching owner is found"
+        );
+        assert!(single.capture_resumed_paused_zone_change_delivery(
+            member,
+            &approved,
+            &[],
+            ZoneMoveCompletion::Moved,
+        ));
+        assert_eq!(
+            buried_owner_terminal(&single),
+            Some(ZoneMoveCompletion::Moved)
+        );
+    }
+
     #[test]
     fn take_continuation_preserves_an_active_batch_delivery_child() {
         let mut stack = ResolutionStack::default();
@@ -7021,6 +7344,7 @@ mod tests {
                 remaining: Vec::new(),
                 source_id: ObjectId(group_seed),
                 controller: PlayerId(0),
+                performed_by: PlayerId(0),
                 origin: None,
                 destination: Zone::Battlefield,
                 enter_transformed: false,
@@ -7031,11 +7355,68 @@ mod tests {
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
             devour_eligible_snapshot: None,
         }))
+    }
+
+    /// Constructed older carrier shapes pin the versioned ingress contract;
+    /// the deployed-v11 integration fixtures separately pin real writer output.
+    #[test]
+    fn legacy_change_zone_actor_wire_admission_preserves_recorded_roles() {
+        let duration = Some(Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        });
+        for version in 1..=11 {
+            let mut state = GameState::new_two_player(55);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            let ResolutionFrame::ChangeZone(mut owner) = change_zone_frame(55) else {
+                unreachable!("the fixture constructs a ChangeZone owner")
+            };
+            let pending = owner.pending.as_mut().unwrap();
+            pending.controller = PlayerId(1);
+            pending.performed_by = PlayerId(1);
+            pending.destination = Zone::Exile;
+            pending.effect_kind = EffectKind::ChangeZoneAll;
+            pending.duration = duration.clone();
+            state.next_logical_zone_change_group_id =
+                pending.logical_zone_change_group.logical_group_id.0 + 1;
+            let mut frames = ResolutionStack::default();
+            frames.push_inner(ResolutionFrame::ChangeZone(owner));
+            let mut wire = v2_fixture_with_frames(state, frames);
+            wire["resolution_state_version"] = Value::from(version);
+            let carrier = wire["resolution_frames"]["frames"][0]["data"]["pending"]
+                .as_object_mut()
+                .unwrap();
+            carrier.remove("performed_by");
+            if version <= 6 {
+                carrier.insert("enter_tapped".to_string(), Value::Bool(false));
+                carrier.insert("enters_attacking".to_string(), Value::Bool(false));
+            }
+            if version == 1 {
+                let object = wire.as_object_mut().unwrap();
+                let frames = object.remove("resolution_frames").unwrap();
+                object.insert(
+                    "pending_change_zone_iteration".to_string(),
+                    frames["frames"][0]["data"]["pending"].clone(),
+                );
+            }
+            let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap_or_else(|error| panic!("constructed recorded-role v{version}: {error}"))
+                .into_game_state();
+            let pending = restored
+                .active_change_zone_frame()
+                .and_then(|frame| frame.pending.as_ref())
+                .expect("the recorded family remains parked without a continuation");
+            assert_eq!(pending.controller, PlayerId(1), "v{version}");
+            assert_eq!(pending.performed_by, PlayerId(1), "v{version}");
+            assert_eq!(pending.duration, duration, "v{version}");
+        }
     }
 
     fn paused_post_replacement_frame() -> ResolutionFrame {
@@ -8106,7 +8487,7 @@ mod tests {
     #[test]
     fn resolution_wire_keeps_all_legacy_readers_available() {
         let state = GameState::new_two_player(57);
-        for version in 1..=LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION {
+        for version in 1..=LEGACY_COMBINED_CHANGE_ZONE_ACTOR_RESOLUTION_STATE_WIRE_VERSION {
             let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
                 serde_json::to_value(&state).unwrap()
             } else {
@@ -8119,41 +8500,6 @@ mod tests {
             assert_eq!(restored.players, state.players);
             assert!(restored.resolution_stack.is_empty());
         }
-    }
-
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: pins the
-    // resolution wire writer at v11 and every legacy reader version constant, and that an idle v1
-    // save still loads. It persists no card state.
-    #[test]
-    fn resolution_wire_contract_pins_v11_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 11);
-        assert_eq!(LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION, 10);
-        assert_eq!(
-            LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION,
-            9
-        );
-        assert_eq!(
-            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
-            8
-        );
-        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
-        assert_eq!(
-            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
-            6
-        );
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        // The newest legacy reader sits directly below the writer.
-        assert_eq!(
-            LEGACY_UNBOUND_COIN_BRANCH_RESOLUTION_STATE_WIRE_VERSION + 1,
-            RESOLUTION_STATE_WIRE_VERSION
-        );
-        let mut v1 = serde_json::to_value(GameState::new_two_player(57)).unwrap();
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
     }
 
     #[test]
@@ -9764,6 +10110,7 @@ mod tests {
                 index: 0,
             }],
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -10305,30 +10652,20 @@ mod tests {
         }
     }
 
-    // Real cards: wire/persistence test, not a card-behavior test. Persistence/wire test: an
-    // unversioned raw save is dated by its random-result frames (bindings = current, coin trigger
-    // scope = v10, branch_context = v9); unbound coin frames are refused, even beside a die frame.
-    // The in-flight card state it persists: Krark's Thumb ("If you would flip a coin, instead flip
-    // two coins and ignore one.").
-    /// An unversioned raw payload is dated by what its random-result frames
-    /// carry: bound branches only by the current writer, a coin trigger scope
-    /// without bindings by version 10, and a coin `branch_context` alone by
-    /// version 9 (CR 601.2c + CR 608.2b: a coin frame without bindings is
-    /// refused rather than decoded as current).
+    // A raw save's unchanged random-result fields retain their historical era:
+    // bound branches identify v11, coin trigger scope v10, branch inheritance v9.
+    // Krark's Thumb: "If you would flip a coin, instead flip two coins and ignore one."
     #[test]
-    fn unversioned_coin_binding_shape_dates_current_v10_and_v9() {
+    fn unversioned_coin_binding_shape_dates_v11_v10_and_v9() {
         let raw = serde_json::to_value(state_with_parked_coin_flip(non_empty_branch_context(
             &GameState::new_two_player(42),
         )))
         .expect("raw");
 
-        // Current raw: the writer always emits `bound_branches`.
+        // A newer raw writer still emits the same v11 bound-branch shape.
         let mut current = raw.clone();
         declare_raw_resolution_wire(&mut current).expect("current version inferred");
-        assert_eq!(
-            current["resolution_state_version"],
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
-        );
+        assert_eq!(current["resolution_state_version"], Value::from(11_u64));
         serde_json::from_value::<ResolutionStateWire>(current)
             .expect("positive control: a bare current payload restores");
 
@@ -10518,13 +10855,10 @@ mod tests {
                 }
                 let mut raw = serde_json::to_value(&state).unwrap();
                 declare_raw_resolution_wire(&mut raw).unwrap();
-                // A coin frame always carries `bound_branches`, which dates it
-                // to the current writer; a die frame is dated by its scope alone.
+                // Bound branches and owned die scope retain their v11-era
+                // date; neither implies later, unrelated carrier features.
                 if context.is_some() || !die {
-                    assert_eq!(
-                        raw["resolution_state_version"],
-                        RESOLUTION_STATE_WIRE_VERSION
-                    );
+                    assert_eq!(raw["resolution_state_version"], 11);
                 }
                 let restored = serde_json::from_value::<ResolutionStateWire>(raw)
                     .unwrap()
@@ -10938,13 +11272,9 @@ mod tests {
                 .contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR));
             let mut raw = serde_json::to_value(runner.state()).unwrap();
             declare_raw_resolution_wire(&mut raw).unwrap();
-            // CR 601.2c + CR 608.2b: a bare current payload at the keep prompt
-            // carries `bound_branches`, which only the current writer emits, so
-            // it is dated current and finishes rules-correctly.
-            assert_eq!(
-                raw["resolution_state_version"],
-                Value::from(RESOLUTION_STATE_WIRE_VERSION)
-            );
+            // CR 601.2c + CR 608.2b: the v11 bound-branch shape restores its
+            // announced targets even when emitted by a later writer.
+            assert_eq!(raw["resolution_state_version"], Value::from(11_u64));
             let restored_bare = serde_json::from_value::<PersistedGameState>(
                 serde_json::to_value(runner.state()).unwrap(),
             )

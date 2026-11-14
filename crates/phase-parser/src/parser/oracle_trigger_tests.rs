@@ -7782,6 +7782,8 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     let mut head = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -7800,6 +7802,8 @@ fn stamp_self_return_origin_skips_nested_parent_target_return() {
     head.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,
@@ -28680,6 +28684,116 @@ fn trigger_is_exiled() {
     assert!(def.valid_card.is_some());
 }
 
+/// CR 603.6c + CR 701.13a: "is exiled from [zone]" must carry the source-zone
+/// restriction (issue #10195). The arm used to drop the whole tail, so these
+/// triggers fired on an exile from any zone.
+#[test]
+fn trigger_is_exiled_from_battlefield_carries_its_origin() {
+    for (name, text) in [
+        (
+            "Soulherder",
+            "Whenever a creature is exiled from the battlefield, put a +1/+1 counter on this creature.",
+        ),
+        (
+            "Captain Marvel, Shooting Star",
+            "Whenever a creature other than Captain Marvel is exiled from the battlefield, you gain life equal to its power.",
+        ),
+        (
+            "Market Gnome",
+            "When this creature is exiled from the battlefield while you're activating a craft ability, you gain 1 life and draw a card.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::Exiled, "{name}");
+        assert_eq!(def.origin, Some(Zone::Battlefield), "{name}");
+        assert!(def.origin_zones.is_empty(), "{name}");
+    }
+}
+
+/// CR 603.6c + CR 108.4a: an "exiled from <zone>" tail the arm's vocabulary
+/// cannot read fails the arm closed rather than widening the trigger to every
+/// origin. That includes the possessive zones ("your graveyard", ...):
+/// `TriggerMode::Exiled` carries no owner scope, so reading them would also
+/// fire on an opponent's card leaving that opponent's zone.
+///
+/// Synthetic text: no printed card carries these tails; the nearest printed
+/// cards are the three "exiled from the battlefield" triggers.
+#[test]
+fn trigger_is_exiled_with_an_unreadable_origin_fails_closed() {
+    for text in [
+        "Whenever a creature is exiled from an opponent's library, draw a card.",
+        "Whenever a creature is exiled from your graveyard, draw a card.",
+        "Whenever a creature is exiled from your hand, draw a card.",
+        "Whenever a creature is exiled from your library, draw a card.",
+        "Whenever a creature is exiled from anywhere other than your graveyard, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Card");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text}: expected fail-closed Unknown, got {:?}",
+            def.mode
+        );
+    }
+}
+
+/// CR 603.6c: an unconsumed zone-list or exclusion remainder fails the arm
+/// closed instead of narrowing or widening the origin silently.
+///
+/// Synthetic text: no printed card carries these remainders; the nearest
+/// printed cards are the three "exiled from the battlefield" triggers.
+#[test]
+fn trigger_is_exiled_with_a_residual_tail_fails_closed() {
+    for text in [
+        "Whenever a creature is exiled from the battlefield or your graveyard, draw a card.",
+        "Whenever a creature is exiled from anywhere other than a graveyard, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Card");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text}: expected fail-closed Unknown, got {:?}",
+            def.mode
+        );
+    }
+}
+
+/// CR 603.6c + CR 701.13a: "is exiled from anywhere other than <zone>" is a
+/// source-zone exclusion. `TriggerMode::Exiled` has no negative-origin field, so
+/// the exclusion is expressed as the positive zone list of every zone except the
+/// excluded one (`origin == None`, `origin_zones` without the battlefield).
+///
+/// Synthetic text: no printed card carries this tail; the nearest printed cards
+/// are the three "exiled from the battlefield" triggers.
+#[test]
+fn trigger_is_exiled_from_anywhere_other_than_the_battlefield_excludes_it() {
+    let def = parse_trigger_line(
+        "Whenever a creature is exiled from anywhere other than the battlefield, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Exiled);
+    assert_eq!(def.origin, None);
+    assert!(!def.origin_zones.is_empty());
+    assert!(!def.origin_zones.contains(&Zone::Battlefield));
+    assert!(def.origin_zones.contains(&Zone::Graveyard));
+}
+
+/// The no-`from` shape keeps the unconstrained origin.
+///
+/// Synthetic text: no printed card pairs a bare "is exiled" with its effect
+/// verbatim; the nearest printed card is Malfegor Avatar — "Whenever a creature
+/// you control is exiled, if it was unearthed, shuffle that card into its
+/// owner's library." (its trigger is unsupported for the separate "if it was
+/// unearthed" condition).
+#[test]
+fn trigger_is_exiled_without_origin_stays_unconstrained() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control is exiled, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Exiled);
+    assert_eq!(def.origin, None);
+    assert!(def.origin_zones.is_empty());
+}
+
 #[test]
 fn trigger_is_sacrificed() {
     let def = parse_trigger_line(
@@ -33294,6 +33408,66 @@ fn gornog_one_or_more_warriors_attack_uses_defending_player_controller() {
             other => panic!("expected Some(Typed) target filter, got {other:?}"),
         },
         other => panic!("expected GenericEffect, got {other:?}"),
+    }
+}
+
+/// CR 603.2c + CR 608.2h + CR 106.4: Fangorn's batched attack trigger filters
+/// on Treefolk you control and multiplies the event-context amount by two.
+/// Revert probe: with the mana arm reverted the body is `Unimplemented`, so
+/// the `Effect::Mana` match fails.
+#[test]
+fn fangorn_tree_shepherd_attack_trigger_adds_multiplied_event_context_green() {
+    let def = parse_trigger_line(
+        "Whenever one or more Treefolk you control attack, add twice that much {G}.",
+        "Fangorn, Tree Shepherd",
+    );
+    assert_eq!(def.mode, TriggerMode::YouAttack);
+    assert!(
+        def.batched,
+        "CR 603.2c: one-or-more attack trigger is batched"
+    );
+
+    let filter = def.valid_card.as_ref().expect("valid_card set");
+    match filter {
+        TargetFilter::Typed(tf) => {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Treefolk".to_string())),
+                "expected Treefolk subtype filter; got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "expected 'you control' controller filter"
+            );
+        }
+        other => panic!("expected Typed filter, got {other:?}"),
+    }
+
+    let execute = def.execute.as_deref().expect("execute ability");
+    match execute.effect.as_ref() {
+        Effect::Mana {
+            produced:
+                ManaProduction::AnyOneColor {
+                    count,
+                    color_options,
+                    ..
+                },
+            ..
+        } => {
+            assert_eq!(*color_options, vec![ManaColor::Green]);
+            assert_eq!(
+                *count,
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }),
+                }
+            );
+        }
+        other => panic!("expected green AnyOneColor Mana, got {other:?}"),
     }
 }
 
@@ -42525,6 +42699,157 @@ fn stack_spell_copy_cast_indicated_action_strict_fails() {
         "{:?}",
         cast.effect
     );
+}
+
+/// CR 608.2c + CR 118.12a: Indoraptor's Enrage — "that player" (damage
+/// recipient) and "they" (unless-payer) both name the opponent chosen at random,
+/// not the triggering player or the controller.
+#[test]
+fn indoraptor_enrage_binds_damage_and_payer_to_chosen_opponent() {
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals damage equal to its power to that player unless they sacrifice a nontoken creature of their choice.",
+        "Indoraptor, the Perfect Hybrid",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+    let damage = execute.sub_ability.as_ref().expect("damage sub-ability");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, chosen);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Sacrifice(_)));
+}
+
+/// CR 608.2c + CR 118.12a: the chosen-player unless-payer rebind is a FALLBACK
+/// for an anaphoric "they"/"that player". The shared building block covers the
+/// mana and non-mana unless-payment forms over either choice type, and a clause
+/// that declares its own player subject keeps that nearer antecedent.
+///
+/// SHAPE: these are synthetic combined grammar probes, with no known exact
+/// printed witness. The nearest printed anchors are Indoraptor, the Perfect
+/// Hybrid and Vial Smasher the Fierce for chosen-player damage; neither prints
+/// the declared-recipient/unless conflict isolated here. These rows pin the
+/// preserve-nearer-declared-player fallback invariant, not new card coverage.
+#[test]
+fn chosen_player_unless_payer_rebind_covers_the_grammar() {
+    let chosen = TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+    );
+
+    // Non-mana alternative cost after "choose a player at random": the
+    // anaphoric "they" names the resolution-chosen player.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose a player at random. That player discards a card unless they sacrifice a creature.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    assert!(matches!(
+        execute.effect.as_ref(),
+        Effect::Choose {
+            choice_type: crate::types::ability::ChoiceType::Player { .. },
+            selection: crate::types::ability::TargetSelectionMode::Random,
+            ..
+        }
+    ));
+    let discard = execute.sub_ability.as_ref().expect("discard clause");
+    let unless_pay = discard.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+
+    // Mana alternative cost: the "they pay" arm is the same anaphor.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. That player sacrifices a creature unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let sacrifice = execute.sub_ability.as_ref().expect("sacrifice clause");
+    let unless_pay = sacrifice.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, chosen);
+    assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+
+    // Nearer declared player subject: "Target player loses 3 life unless they
+    // discard a card" names its own player, so the earlier random choice must
+    // not capture the payer.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. Target player loses 3 life unless they discard a card.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let lose_life = execute.sub_ability.as_ref().expect("lose-life clause");
+    let unless_pay = lose_life.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Nearer declared player RECIPIENT: "deals 3 damage to target player"
+    // declares its own player after the verb, so "they" is that target, not
+    // the opponent chosen earlier in the chain.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target player unless they pay {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+        panic!("expected DealDamage, got {:?}", damage.effect);
+    };
+    assert_eq!(*target, TargetFilter::Player);
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Player);
+
+    // Compound declared recipients still introduce a player target even when
+    // the target grammar also permits an object in the same slot.
+    for recipient in [
+        "target player or planeswalker",
+        "target permanent or player",
+    ] {
+        let text = format!(
+            "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to {recipient} unless they pay {{2}}."
+        );
+        let def = parse_trigger_line(&text, "Rebind Probe");
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(matches!(
+            execute.effect.as_ref(),
+            Effect::Choose {
+                choice_type: crate::types::ability::ChoiceType::Opponent { .. },
+                selection: crate::types::ability::TargetSelectionMode::Random,
+                ..
+            }
+        ));
+        let damage = execute.sub_ability.as_ref().expect("damage clause");
+        let Effect::DealDamage { target, .. } = damage.effect.as_ref() else {
+            panic!("expected DealDamage, got {:?}", damage.effect);
+        };
+        assert!(matches!(
+            target,
+            TargetFilter::Or { filters }
+                if filters.iter().any(|filter| matches!(filter, TargetFilter::Player))
+        ));
+        let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Player);
+        assert!(matches!(unless_pay.cost, AbilityCost::Mana { .. }));
+    }
+
+    // An explicitly named payer is never rebound: "unless its controller
+    // pays" keeps the damaged permanent's controller even after the chain
+    // chose an opponent at random.
+    let def = parse_trigger_line(
+        "Whenever ~ is dealt damage, choose an opponent at random. ~ deals 3 damage to target creature unless its controller pays {2}.",
+        "Rebind Probe",
+    );
+    let execute = def.execute.as_ref().expect("should have execute");
+    let damage = execute.sub_ability.as_ref().expect("damage clause");
+    let unless_pay = damage.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
 }
 
 // CR 122.1 + CR 603.2: an active-voice "you remove a <kind> counter" trigger
