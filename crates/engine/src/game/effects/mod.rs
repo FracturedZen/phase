@@ -9831,6 +9831,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::Quality(_)
         | ProtectionTarget::Multicolored
         | ProtectionTarget::ChosenColor
+        | ProtectionTarget::LastChosenColor
         | ProtectionTarget::ChosenCardType
         | ProtectionTarget::ChosenPlayer
         | ProtectionTarget::ChosenCardName

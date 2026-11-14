@@ -100,6 +100,7 @@ describe("getKeywordDetail", () => {
     expect(getKeywordDetail({ Protection: { Color: "Black" } })).toBe("from black");
     expect(getKeywordDetail({ Protection: "Multicolored" })).toBe("from multicolored");
     expect(getKeywordDetail({ Protection: "ChosenColor" })).toBe("from chosen color");
+    expect(getKeywordDetail({ Protection: "LastChosenColor" })).toBe("from last chosen color");
     expect(getKeywordDetail({ Protection: { CardType: "Instant" } })).toBe("from instants");
     expect(getKeywordDetail({ Protection: { Quality: "Dragons" } })).toBe("from Dragons");
   });

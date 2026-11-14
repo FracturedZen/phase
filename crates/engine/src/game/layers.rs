@@ -11872,6 +11872,27 @@ fn apply_continuous_effect_filtered(
         None
     };
 
+    // "Hexproof from the last chosen color": the NEWEST colour on the granting
+    // source (`current_chosen_color`), not the CR 607.2d linked (oldest) read
+    // above. Pre-read for the same borrow reason.
+    let last_chosen_color = if matches!(
+        &effect.modification,
+        ContinuousModification::AddKeyword { keyword }
+            if matches!(
+                keyword,
+                crate::types::keywords::Keyword::HexproofFrom(
+                    crate::types::keywords::HexproofFilter::LastChosenColor,
+                )
+            )
+    ) {
+        state
+            .objects
+            .get(&effect.source_id)
+            .and_then(|src| src.current_chosen_color())
+    } else {
+        None
+    };
+
     // Pre-read chosen keyword from source (avoids borrow conflict in the loop).
     // CR 608.2d + CR 613.1f: When the modification is `RemoveChosenKeyword`,
     // the granting source's `chosen_attributes` carry the typed `Keyword` that
@@ -12240,6 +12261,23 @@ fn apply_continuous_effect_filtered(
                     let Some(color) = chosen_color else {
                         // No chosen color yet — skip the grant rather than
                         // pushing an unresolvable variant.
+                        continue;
+                    };
+                    grant_keyword_instance(
+                        obj,
+                        crate::types::keywords::Keyword::HexproofFrom(
+                            crate::types::keywords::HexproofFilter::Color(color),
+                        ),
+                        effect,
+                        0,
+                    );
+                }
+                // Same as above for "hexproof from the last chosen color",
+                // resolved from the source's newest chosen colour.
+                crate::types::keywords::Keyword::HexproofFrom(
+                    crate::types::keywords::HexproofFilter::LastChosenColor,
+                ) => {
+                    let Some(color) = last_chosen_color else {
                         continue;
                     };
                     grant_keyword_instance(

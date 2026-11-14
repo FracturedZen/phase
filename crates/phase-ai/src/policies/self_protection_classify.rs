@@ -545,6 +545,9 @@ fn hexproof_from_blocks_source(
         HexproofFilter::ChosenColor => protected
             .chosen_color()
             .is_some_and(|color| source.color.contains(&color)),
+        HexproofFilter::LastChosenColor => protected
+            .current_chosen_color()
+            .is_some_and(|color| source.color.contains(&color)),
     }
 }
 

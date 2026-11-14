@@ -48,7 +48,10 @@ fn equip_and_choose(
                 .is_some_and(|d| d.contains("Equip"))
         })
         .expect("Sanctuary Blade must carry an Equip activated ability");
-    runner.activate(blade, equip_idx).target_object(target).resolve();
+    runner
+        .activate(blade, equip_idx)
+        .target_object(target)
+        .resolve();
     match &runner.state().waiting_for {
         WaitingFor::NamedChoice {
             choice_type: ChoiceType::Color { .. },
@@ -71,7 +74,11 @@ fn equip_and_choose(
     );
 }
 
-fn has_protection_from(runner: &engine::game::scenario::GameRunner, id: ObjectId, c: ManaColor) -> bool {
+fn has_protection_from(
+    runner: &engine::game::scenario::GameRunner,
+    id: ObjectId,
+    c: ManaColor,
+) -> bool {
     runner.state().objects[&id]
         .keywords
         .iter()

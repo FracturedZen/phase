@@ -511,7 +511,7 @@ fn parse_chosen_color_grant_prefix(input: &str) -> OracleResult<'_, ()> {
 }
 
 /// CR 607.2d's own phrase list. `the last chosen color` (Sanctuary Blade) now
-/// lowers to `ProtectionTarget::ChosenColor` (F9), so this alternative can fire
+/// lowers to `ProtectionTarget::LastChosenColor` (F9), so this alternative can fire
 /// on a grant the injector visits; it is anaphoric to the linked "choose a
 /// color" ability, and its failure direction is `AnaphoricOnly`, i.e.
 /// suppression preserved.

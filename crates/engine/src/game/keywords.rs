@@ -741,6 +741,11 @@ fn protection_quality_matches(
         ProtectionTarget::ChosenColor => protected
             .and_then(|object| object.chosen_color())
             .is_some_and(|color| source_colors.contains(&color)),
+        // CR 702.16 + CR 105.4: "the last chosen color" is the newest colour
+        // chosen on the protected permanent, not the CR 607.2d linked read.
+        ProtectionTarget::LastChosenColor => protected
+            .and_then(|object| object.current_chosen_color())
+            .is_some_and(|color| source_colors.contains(&color)),
         // CR 702.16 + CR 205.2: "Protection from the chosen card
         // type" — resolved from the protected permanent's own chosen card type.
         // This arm only fires for objects that themselves carry the choice
@@ -848,6 +853,10 @@ pub fn source_matches_hexproof_filter(
         crate::types::keywords::HexproofFilter::ChosenColor => source
             .chosen_color()
             .is_some_and(|color| source_colors.contains(&color)),
+        // "the last chosen color": newest colour on the same object.
+        crate::types::keywords::HexproofFilter::LastChosenColor => source
+            .current_chosen_color()
+            .is_some_and(|color| source_colors.contains(&color)),
     }
 }
 
@@ -898,6 +907,16 @@ pub fn resolve_granted_protection(
             .objects
             .get(&source_id)
             .and_then(|source| source.chosen_color())
+            .map(ProtectionTarget::Color)
+            .into_iter()
+            .collect(),
+        // CR 702.16 + CR 105.4: "the last chosen color" — the MOST RECENT
+        // colour chosen on the granting source (Sanctuary Blade re-chooses each
+        // time it becomes attached; colours accumulate on the source).
+        ProtectionTarget::LastChosenColor => state
+            .objects
+            .get(&source_id)
+            .and_then(|source| source.current_chosen_color())
             .map(ProtectionTarget::Color)
             .into_iter()
             .collect(),

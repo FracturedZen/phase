@@ -2064,6 +2064,7 @@ pub fn player_protection_from_object_with_source_name(
                 | ProtectionTarget::Quality(_)
                 | ProtectionTarget::Multicolored
                 | ProtectionTarget::ChosenColor
+                | ProtectionTarget::LastChosenColor
                 | ProtectionTarget::ChosenPlayer
                 | ProtectionTarget::Filter(_)
                 | ProtectionTarget::FromPlayer(_)

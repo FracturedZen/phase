@@ -688,6 +688,11 @@ pub enum HexproofFilter {
     /// chosen color" — resolved at runtime from the source permanent's
     /// `chosen_attributes`. Parallels `ProtectionTarget::ChosenColor`.
     ChosenColor,
+    /// CR 702.11d + CR 105.4: "hexproof from the last chosen color" — the
+    /// MOST RECENT colour chosen on the source (`current_chosen_color`), not
+    /// the CR 607.2d linked (oldest) read. Parallels
+    /// `ProtectionTarget::LastChosenColor`.
+    LastChosenColor,
 }
 
 /// What a Protection keyword protects from (CR 702.16).
@@ -700,6 +705,13 @@ pub enum ProtectionTarget {
     /// CR 702.16: Protection from the chosen color — resolved at runtime from the
     /// source permanent's `chosen_attributes`.
     ChosenColor,
+    /// CR 702.16 + CR 105.4: "Protection from the last chosen color" (Sanctuary
+    /// Blade) — the MOST RECENT colour chosen on the source
+    /// (`GameObject::current_chosen_color`). Chosen colours accumulate on a
+    /// source, and `ChosenColor` takes the CR 607.2d linked (oldest) read; "the
+    /// last chosen color" instead names the newest answer, so a re-attached
+    /// Sanctuary Blade grants protection from the colour chosen this time.
+    LastChosenColor,
     /// CR 702.16 + CR 205.2: "Protection from the chosen card type" —
     /// resolved at runtime from the source permanent's `chosen_attributes`
     /// (the `CardType` chosen as the permanent entered). Parallels `ChosenColor`.
@@ -3413,16 +3425,15 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         // "the chosen color" / "the last chosen color" anaphors after a
         // preceding `Choose a color` instruction. Resolved at runtime via
         // `ChosenAttribute::Color` on the granting source. Mirrors
-        // `ProtectionTarget::ChosenColor` (CR 702.16). "the last chosen color"
-        // is CR 607.2d's re-choice phrasing (Sanctuary Blade / Chromatic Armor
-        // family) — same linked attribute (CR 607.2d linked read).
+        // `ProtectionTarget::ChosenColor` (CR 702.16).
         "that color"
         | "the chosen color"
         | "chosen color"
-        | "the last chosen color"
-        | "last chosen color"
         | "the color of your choice"
         | "color of your choice" => HexproofFilter::ChosenColor,
+        // "the last chosen color" names the most recent answer on a source
+        // that can choose again (re-attach), not the linked oldest read.
+        "the last chosen color" | "last chosen color" => HexproofFilter::LastChosenColor,
         _ => HexproofFilter::CardType(lower),
     }
 }
@@ -3451,17 +3462,19 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
         // "color of your choice" is the as-resolved phrasing (Mother of Runes,
         // Apostle's Blessing, …); "the chosen color" / "that color" are the
         // anaphor after a preceding "choose a color" instruction; "the last
-        // chosen color" is CR 607.2d's re-choice phrasing (Sanctuary Blade).
-        // All land on the same variant; the engine resolves it with the CR
-        // 607.2d linked read (`GameObject::chosen_color`, oldest-since-entry).
+        // chosen color" (Sanctuary Blade) is split out below. These land on
+        // `ChosenColor`, which the engine resolves with the CR 607.2d linked
+        // read (`GameObject::chosen_color`, oldest-since-entry).
         // Mirror of `parse_hexproof_filter` (F9 / backlog asymmetry).
         "that color"
         | "the chosen color"
         | "chosen color"
-        | "the last chosen color"
-        | "last chosen color"
         | "the color of your choice"
         | "color of your choice" => ProtectionTarget::ChosenColor,
+        // "the last chosen color" names the MOST RECENT answer on a source that
+        // chooses again each time it becomes attached (Sanctuary Blade), so it
+        // resolves via `GameObject::current_chosen_color` (newest).
+        "the last chosen color" | "last chosen color" => ProtectionTarget::LastChosenColor,
         // CR 702.16 + CR 205.2: "the chosen card type" resolves at
         // runtime from the source permanent's chosen `CardType` attribute.
         "the chosen card type" | "chosen card type" => ProtectionTarget::ChosenCardType,
@@ -5153,11 +5166,11 @@ mod tests {
         );
         assert_eq!(
             parse_protection_target("the last chosen color"),
-            ProtectionTarget::ChosenColor
+            ProtectionTarget::LastChosenColor
         );
         assert_eq!(
             parse_protection_target("last chosen color"),
-            ProtectionTarget::ChosenColor
+            ProtectionTarget::LastChosenColor
         );
         // Fix-discriminating: must never be the silent CardType fallthrough.
         assert_ne!(
@@ -5171,7 +5184,7 @@ mod tests {
         // End-to-end through Keyword::from_str (the parser dispatch path).
         assert_eq!(
             Keyword::from_str("Protection:the last chosen color").unwrap(),
-            Keyword::Protection(ProtectionTarget::ChosenColor)
+            Keyword::Protection(ProtectionTarget::LastChosenColor)
         );
         assert_eq!(
             Keyword::from_str("Protection:that color").unwrap(),
@@ -5180,11 +5193,11 @@ mod tests {
         // Hexproof mirror — "the last chosen color" was missing there too.
         assert_eq!(
             parse_hexproof_filter("the last chosen color"),
-            HexproofFilter::ChosenColor
+            HexproofFilter::LastChosenColor
         );
         assert_eq!(
             parse_hexproof_filter("last chosen color"),
-            HexproofFilter::ChosenColor
+            HexproofFilter::LastChosenColor
         );
         assert_eq!(
             parse_hexproof_filter("that color"),

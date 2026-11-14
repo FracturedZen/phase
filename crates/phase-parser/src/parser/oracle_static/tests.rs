@@ -34538,7 +34538,7 @@ fn protection_chosen_color_plain_unchanged() {
 }
 
 /// F9 / CR 607.2d — Sanctuary Blade: "Equipped creature has protection from
-/// the last chosen color" must lower to Protection(ChosenColor), not the
+/// the last chosen color" must lower to Protection(LastChosenColor), not the
 /// silent CardType("the last chosen color") fallthrough.
 #[test]
 fn protection_last_chosen_color_sanctuary_blade() {
@@ -34549,9 +34549,9 @@ fn protection_last_chosen_color_sanctuary_blade() {
     );
     assert!(
         mods.contains(&ContinuousModification::AddKeyword {
-            keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+            keyword: Keyword::Protection(ProtectionTarget::LastChosenColor),
         }),
-        "expected Protection(ChosenColor) for Sanctuary Blade phrasing, got {mods:?}"
+        "expected Protection(LastChosenColor) for Sanctuary Blade phrasing, got {mods:?}"
     );
 }
 

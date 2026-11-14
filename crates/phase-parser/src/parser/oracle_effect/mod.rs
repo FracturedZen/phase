@@ -43041,8 +43041,11 @@ fn effect_grants_chosen_color_keyword(effect: &Effect) -> bool {
                 ContinuousModification::AddKeyword { keyword }
                     if matches!(
                         keyword,
-                        Keyword::Protection(ProtectionTarget::ChosenColor)
-                            | Keyword::HexproofFrom(HexproofFilter::ChosenColor)
+                        Keyword::Protection(
+                            ProtectionTarget::ChosenColor | ProtectionTarget::LastChosenColor
+                        ) | Keyword::HexproofFrom(
+                            HexproofFilter::ChosenColor | HexproofFilter::LastChosenColor
+                        )
                     )
             )
         })

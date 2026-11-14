@@ -514,6 +514,7 @@ function formatProtection(val: unknown): string {
   if (typeof val === "string") {
     if (val === "Multicolored") return "from multicolored";
     if (val === "ChosenColor") return "from chosen color";
+    if (val === "LastChosenColor") return "from last chosen color";
     return `from ${val.toLowerCase()}`;
   }
   if (val && typeof val === "object") {
