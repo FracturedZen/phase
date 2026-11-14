@@ -3415,7 +3415,7 @@ fn parse_hexproof_filter(s: &str) -> HexproofFilter {
         // `ChosenAttribute::Color` on the granting source. Mirrors
         // `ProtectionTarget::ChosenColor` (CR 702.16). "the last chosen color"
         // is CR 607.2d's re-choice phrasing (Sanctuary Blade / Chromatic Armor
-        // family) — same linked attribute; runtime uses the current answer.
+        // family) — same linked attribute (CR 607.2d linked read).
         "that color"
         | "the chosen color"
         | "chosen color"
@@ -3452,8 +3452,8 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
         // Apostle's Blessing, …); "the chosen color" / "that color" are the
         // anaphor after a preceding "choose a color" instruction; "the last
         // chosen color" is CR 607.2d's re-choice phrasing (Sanctuary Blade).
-        // All land on the same variant — runtime reads the current answer via
-        // `current_chosen_color` so a re-choice updates the grant (CR 611.3a).
+        // All land on the same variant; the engine resolves it with the CR
+        // 607.2d linked read (`GameObject::chosen_color`, oldest-since-entry).
         // Mirror of `parse_hexproof_filter` (F9 / backlog asymmetry).
         "that color"
         | "the chosen color"
