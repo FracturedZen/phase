@@ -567,3 +567,4 @@ mod reapers_scythe;
 mod recipient_scoped_discard_filter;
 mod recurring_insight_6856;
 mod recursive_recruitment;
+mod sanctuary_blade_last_chosen_color_9856;
