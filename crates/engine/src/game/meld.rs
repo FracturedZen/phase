@@ -14,8 +14,8 @@ use crate::game::printed_cards::{
 };
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, FilterProp, PermanentEntryMode, ResolvedAbility,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectError, EntryAttackDestination, FilterProp, PermanentEntryMode,
+    ResolvedAbility, TargetFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -253,6 +253,7 @@ pub(crate) fn finish_meld_entry(
             source_id: context.source_id,
             controller: context.controller,
             enters_attacking: attack_target.is_some(),
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -606,7 +607,9 @@ fn refresh_meld_entry_records(
         realized.played_from_zone = old.played_from_zone;
         realized.attachments = old.attachments;
         realized.linked_exile_snapshot = old.linked_exile_snapshot;
+        realized.block_pairs = old.block_pairs;
         realized.co_departed = old.co_departed;
+        realized.co_entered = old.co_entered;
         realized.entered_incarnation = old.entered_incarnation;
         realized.attached_to = old.attached_to;
         realized.turn_zone_change_index = old.turn_zone_change_index;
