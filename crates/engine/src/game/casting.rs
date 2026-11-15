@@ -1150,9 +1150,7 @@ fn append_to_deepest_ability_def(ability: &mut AbilityDefinition, next: AbilityD
 }
 
 /// CR 608.2c: the first "instead" override on a spell-ability spine, if any.
-fn find_instead_override_mut(
-    ability: &mut AbilityDefinition,
-) -> Option<&mut AbilityDefinition> {
+fn find_instead_override_mut(ability: &mut AbilityDefinition) -> Option<&mut AbilityDefinition> {
     let mut cursor = Some(ability);
     while let Some(node) = cursor {
         if node
