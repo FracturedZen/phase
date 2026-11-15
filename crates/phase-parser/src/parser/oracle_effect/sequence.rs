@@ -13363,7 +13363,11 @@ mod tests {
             "Dark Salvation must keep the Token create; got {effects:?}"
         );
         let Some(pump) = effects.iter().find_map(|e| match e {
-            Effect::Pump { target, power, toughness } => Some((target, power, toughness)),
+            Effect::Pump {
+                target,
+                power,
+                toughness,
+            } => Some((target, power, toughness)),
             _ => None,
         }) else {
             panic!("Dark Salvation must keep the creature Pump; got {effects:?}");
