@@ -110,8 +110,12 @@ fn static_source_reads_unspent_mana(state: &GameState) -> bool {
 /// `player.mana_pool`, so a flagged player can pay any cost without divergence
 /// between "shows castable" and "actually pays".
 ///
-/// NOT a rules-legal effect — a developer convenience gated behind the same
-/// debug-action permission as every other `DebugAction`.
+/// Two legitimate producers flag players for this top-up (see
+/// [`GameState::mark_unbounded_loop`]): the developer-convenience
+/// `DebugAction::SetInfiniteMana` toggle, and the production Horde advanced rule
+/// (`deck_loading::grant_horde_emblem` under `HordePostCombatActivation::OncePerPermanent`,
+/// "the Horde has infinite mana"). It is not a rules-legal effect a normal player
+/// can invoke; it is driven either by that debug action or by the Horde ruleset.
 pub fn refill_infinite_mana(state: &mut GameState) {
     // Flagged = players whose unbounded-resource set names at least one Mana axis,
     // paired with the exact mana type(s) that set records.
@@ -4143,7 +4147,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4170,7 +4174,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4223,7 +4227,7 @@ mod tests {
             types: vec!["Creature".to_string(), "Colorless".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4249,7 +4253,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Eldrazi".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4312,7 +4316,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4389,7 +4393,7 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4434,7 +4438,7 @@ mod tests {
             types: vec!["Artifact".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4538,7 +4542,9 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
-            cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+            cast_origin: Some(crate::types::zones::CastProvenance::Zone(
+                crate::types::zones::Zone::Graveyard,
+            )),
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4564,7 +4570,9 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![],
-            cast_from_zone: Some(crate::types::zones::Zone::Hand),
+            cast_origin: Some(crate::types::zones::CastProvenance::Zone(
+                crate::types::zones::Zone::Hand,
+            )),
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4613,7 +4621,9 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
-            cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
+            cast_origin: Some(crate::types::zones::CastProvenance::Zone(
+                crate::types::zones::Zone::Graveyard,
+            )),
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -4639,7 +4649,9 @@ mod tests {
             types: vec!["Instant".to_string()],
             subtypes: vec![],
             keyword_kinds: vec![crate::types::keywords::KeywordKind::Flashback],
-            cast_from_zone: Some(crate::types::zones::Zone::Hand),
+            cast_origin: Some(crate::types::zones::CastProvenance::Zone(
+                crate::types::zones::Zone::Hand,
+            )),
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -5102,7 +5114,11 @@ mod tests {
         assert!(state.players[0].mana_pool.is_empty());
 
         // Flag P0 → seeded to the cap for each of the six types; P1 untouched.
-        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(
+            state.players[0].id,
+            &INFINITE_MANA_AXES,
+            &INFINITE_MANA_AXES,
+        );
         refill_infinite_mana(&mut state);
         for color in INFINITE_MANA_TYPES {
             let n = state.players[0]
@@ -5211,9 +5227,13 @@ mod tests {
         let p1 = state.players[1].id;
 
         // P0 marked with the six Mana axes → all six colors seeded to the cap.
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         // P1 marked with ONLY a non-mana axis → must never receive mana.
-        state.mark_unbounded_loop(p1, &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            p1,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
 
         refill_infinite_mana(&mut state);
 
@@ -5246,7 +5266,11 @@ mod tests {
         let p0 = state.players[0].id;
 
         // Record ONLY the colorless mana axis (the combo detector's real certificate).
-        state.mark_unbounded_loop(p0, &[ResourceAxis::Mana(ManaType::Colorless)]);
+        state.mark_unbounded_loop(
+            p0,
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         refill_infinite_mana(&mut state);
 
         let count_of = |color: ManaType| {
@@ -5288,7 +5312,7 @@ mod tests {
         let mut state = GameState::new_two_player(0);
         let p0 = state.players[0].id;
 
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         refill_infinite_mana(&mut state);
 
         for color in INFINITE_MANA_TYPES {

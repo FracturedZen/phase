@@ -3,7 +3,8 @@ use std::str::FromStr;
 use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{
-    compute_deck_copy_limit_from_text, oracle_text_allows_commander, parse_oracle_text,
+    compute_deck_copy_limit_from_text, compute_no_maximum_deck_size_from_text,
+    oracle_text_allows_commander, parse_oracle_text,
 };
 use crate::parser::oracle_keyword::{keyword_display_name, parse_granted_keyword_fragment};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
@@ -20,15 +21,15 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
     SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    TargetChoiceTiming, TargetFilter, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -265,6 +266,26 @@ pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {
     }
 }
 
+/// Mutable counterpart of [`layout_faces`], in the same face order.
+pub fn layout_faces_mut(layout: &mut CardLayout) -> Vec<&mut CardFace> {
+    match layout {
+        CardLayout::Single(face) => vec![face],
+        CardLayout::Split(a, b)
+        | CardLayout::Flip(a, b)
+        | CardLayout::Transform(a, b)
+        | CardLayout::Meld(a, b)
+        | CardLayout::Adventure(a, b)
+        | CardLayout::Modal(a, b)
+        | CardLayout::Omen(a, b)
+        | CardLayout::Prepare(a, b) => vec![a, b],
+        CardLayout::Specialize(base, variants) => {
+            let mut faces = vec![base];
+            faces.extend(variants.iter_mut());
+            faces
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Synthesize functions — keyword → ability/trigger expansion
 // ---------------------------------------------------------------------------
@@ -283,7 +304,7 @@ impl KeywordTriggerInstaller {
             // boundary for what `handle_unless_payment` + the
             // `expand_per_counter` pipeline can pay end-to-end today.
             // Installing the trigger for an unsupported base (Discard, Exile,
-            // EffectCost, etc.) would silently sacrifice the permanent every
+            // unsupported EffectCost shapes, etc.) would silently sacrifice the permanent every
             // upkeep because the payment falls through to `payment_failed =
             // true`, causing the unless-effect (Sacrifice) to always fire.
             // Pre-branch these cards had no trigger at all (silent no-op),
@@ -762,6 +783,8 @@ pub fn synthesize_craft(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Exile),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -862,6 +885,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: true,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1021,6 +1045,7 @@ fn synthesize_etb_token_attach_keyword(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1722,6 +1747,91 @@ pub fn compute_deck_copy_limit(face: &CardFace) -> Option<DeckCopyLimit> {
         .and_then(compute_deck_copy_limit_from_text)
 }
 
+/// CR 903.5a: determine a card's deck-construction maximum-size override
+/// from its Oracle text. `Some(NoMaximum)` for the Class A marker (Whtz, the
+/// Bibliophile: "A deck with this commander has no maximum deck size") and
+/// the Class B marker naming this face (The Covert Blue Mage: "if <this> is
+/// your commander, your starting deck can contain any number of cards beyond
+/// the maximum deck size"). `None` for every other face — including partners
+/// that merely share a deck with a marker (the subject check pins the marker
+/// to the commander's own face). Delegates to the parser so the recognizer,
+/// the validator, and the coverage skips agree.
+pub fn compute_no_maximum_deck_size(face: &CardFace) -> Option<DeckSizeOverride> {
+    match face.oracle_text.as_deref() {
+        Some(text) => compute_no_maximum_deck_size_from_text(text, &face.name),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod no_maximum_deck_size_tests {
+    use super::*;
+
+    fn face_with_oracle(name: &str, oracle: &str) -> CardFace {
+        CardFace {
+            name: name.to_string(),
+            oracle_text: Some(oracle.to_string()),
+            ..CardFace::default()
+        }
+    }
+
+    const WHTZ_ORACLE: &str = "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.";
+    const COVERT_ORACLE: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.";
+
+    /// CR 903.5a: the Class A marker latches the override on the face.
+    #[test]
+    fn whtz_face_marks_no_maximum_deck_size() {
+        let face = face_with_oracle("Whtz, the Bibliophile", WHTZ_ORACLE);
+        assert_eq!(
+            compute_no_maximum_deck_size(&face),
+            Some(DeckSizeOverride::NoMaximum)
+        );
+    }
+
+    /// CR 903.5a: the Class B marker latches only when the face IS the named
+    /// commander; a partner that merely shares the deck stays unmarked.
+    #[test]
+    fn covert_face_marks_only_when_it_is_the_named_commander() {
+        let covert = face_with_oracle("The Covert Blue Mage", COVERT_ORACLE);
+        assert_eq!(
+            compute_no_maximum_deck_size(&covert),
+            Some(DeckSizeOverride::NoMaximum)
+        );
+        let partner = face_with_oracle("Some Partner", COVERT_ORACLE);
+        assert_eq!(
+            compute_no_maximum_deck_size(&partner),
+            None,
+            "a partner sharing the deck must not inherit the marker"
+        );
+    }
+
+    /// Ordinary faces — including companion-text faces (Class C) and
+    /// keyword-only faces — stay unmarked.
+    #[test]
+    fn ordinary_faces_stay_unmarked() {
+        for (name, oracle) in [
+            ("Relentless Rats", "A deck can have any number of cards named Relentless Rats."),
+            (
+                "Jegantha, the Wellspring",
+                "Companion — No card in your starting deck has more than one of the same mana symbol in its mana cost.",
+            ),
+            ("Grizzly Bears", "Trample"),
+        ] {
+            let face = face_with_oracle(name, oracle);
+            assert_eq!(
+                compute_no_maximum_deck_size(&face),
+                None,
+                "{name} must not mark no-maximum-deck-size"
+            );
+        }
+        let textless = CardFace {
+            name: "Vanilla".to_string(),
+            ..CardFace::default()
+        };
+        assert_eq!(compute_no_maximum_deck_size(&textless), None);
+    }
+}
+
 /// CR 903.3 / CR 702.124k: how a card qualifies to be designated a commander.
 ///
 /// This is the decomposition of [`type_line_commander_eligible`], not a sibling
@@ -1947,6 +2057,8 @@ pub fn cycling_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinitio
             let mut put_in_hand_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -2031,6 +2143,8 @@ pub fn synthesize_transmute(face: &mut CardFace) {
                 let mut put_in_hand_def = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Library),
                         destination: Zone::Hand,
                         target: TargetFilter::Any,
@@ -2127,6 +2241,8 @@ pub fn synthesize_transfigure(face: &mut CardFace) {
             let mut put_on_battlefield_def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Library),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Any,
@@ -2258,7 +2374,7 @@ pub(crate) fn scavenge_ability_for_keyword(keyword: &Keyword) -> Option<AbilityD
 /// (seam 4: activated-ability-on-grant). The runtime activated-ability gather
 /// (`activated_ability_definitions` in `casting.rs`) calls this for each keyword
 /// in a graveyard card's *effective* keyword set so a keyword granted by a
-/// static (e.g. Encore/Scavenge granted to a graveyard card) surfaces its
+/// static (e.g. Encore/Scavenge/Unearth granted to a graveyard card) surfaces its
 /// activatable ability — the `AddKeyword` layer seam installs only the keyword
 /// and triggers, never activated abilities. Returns `None` for keywords whose
 /// behavior is not a graveyard activated ability. Extend this match as new
@@ -2268,6 +2384,9 @@ pub(crate) fn graveyard_activated_ability_for_keyword(
 ) -> Option<AbilityDefinition> {
     crate::database::encore::encore_ability_for_keyword(keyword)
         .or_else(|| scavenge_ability_for_keyword(keyword))
+        // CR 702.84a: Unearth functions while the card is in a graveyard
+        // (Dregscape Sliver, Sedris, Mishra and Solemn Doomguide grant it there).
+        .or_else(|| crate::database::unearth::unearth_ability_for_keyword(keyword))
 }
 
 /// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
@@ -2998,9 +3117,15 @@ pub fn synthesize_entwine(face: &mut CardFace) {
         None => return,
     };
 
+    // Convert EntwineCost to AbilityCost
+    let ability_cost = match cost {
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
+        EntwineCost::NonMana(ac) => ac,
+    };
+
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }
@@ -3041,6 +3166,8 @@ pub fn synthesize_madness_intrinsics(face: &mut CardFace) {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -3133,6 +3260,8 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::SelfRef,
@@ -3157,6 +3286,7 @@ pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
             count: QuantityExpr::Fixed { value: n as i32 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         },
     );
     mill.sub_ability = Some(Box::new(return_to_hand));
@@ -3340,6 +3470,7 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -3538,6 +3669,7 @@ fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAddit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: spec.count,
             extra_keywords: vec![],
@@ -3760,6 +3892,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3897,6 +4030,32 @@ pub(crate) fn entry_replacement_for_grant_static(
             return None;
         };
         keyword_entry_replacement(keyword, affected.clone())
+    })
+}
+
+/// CR 614.12 + CR 702.136a + CR 702.98a: whether `replacement`, carried by an object with
+/// `statics`, is the as-enters replacement a keyword grant among those statics contributes — the
+/// same builders `synthesize_riot`, `synthesize_unleash` and the layer seam-3 derivation install
+/// (`build_riot_replacement` / `build_unleash_replacement` over the static's `affected` filter).
+///
+/// Compared structurally against the builders' own output, the equality the layer seam uses for
+/// idempotent install, so a printed grant and its runtime re-derivation are recognised alike. A
+/// replacement that merely shares the granted population (Metallic Mimic's "Each other creature
+/// you control of the chosen type enters with an additional +1/+1 counter on it.") is built by
+/// neither builder and is not recognised.
+pub(crate) fn is_keyword_grant_entry_replacement<'a>(
+    statics: impl IntoIterator<Item = &'a StaticDefinition>,
+    replacement: &ReplacementDefinition,
+) -> bool {
+    statics.into_iter().any(|static_def| {
+        // CR 702.136a: a Riot grant (seam 3's keyword → as-enters replacement mapping).
+        let grants_riot_replacement = entry_replacement_for_grant_static(static_def)
+            .is_some_and(|derived| derived == *replacement);
+        // CR 702.98a: an Unleash grant, as `synthesize_unleash` installs it.
+        let grants_unleash_replacement = static_grants_unleash(static_def)
+            && build_unleash_replacement(static_def.affected.clone().unwrap_or(TargetFilter::Any))
+                == *replacement;
+        grants_riot_replacement || grants_unleash_replacement
     })
 }
 
@@ -4373,6 +4532,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -4520,6 +4680,8 @@ fn build_soulshift_trigger(n: u32) -> TriggerDefinition {
     // from your graveyard to your hand" shape (oracle_effect's Graveyard→Hand
     // ChangeZone). Default flags (no counters, no transform, owner's control).
     let return_to_hand = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Hand,
         target: spirit_in_graveyard,
@@ -5044,6 +5206,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: true,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -6356,6 +6519,8 @@ fn build_dethrone_trigger() -> TriggerDefinition {
 /// (`Zone::Hand` for the pay branch, `Zone::Exile` for the otherwise branch).
 fn build_recover_self_change_zone(destination: Zone) -> Effect {
     Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination,
         target: TargetFilter::SelfRef,
@@ -6656,6 +6821,8 @@ fn build_dies_return_with_counter_trigger(
     // the object enters the battlefield, via the existing
     // `Effect::ChangeZone.enter_with_counters` plumbing.
     let return_effect = Effect::ChangeZone {
+        actor: crate::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: Some(Zone::Graveyard),
         destination: Zone::Battlefield,
         target: TargetFilter::SelfRef,
@@ -6715,6 +6882,7 @@ fn build_suspend_upkeep_removal_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     let mut trigger = TriggerDefinition::new(TriggerMode::Phase)
@@ -6842,6 +7010,7 @@ fn build_battlefield_upkeep_counter_removal_trigger(
             counter_type: Some(counter_type.clone()),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     TriggerDefinition::new(TriggerMode::Phase)
@@ -6886,6 +7055,7 @@ fn build_fading_upkeep_trigger() -> TriggerDefinition {
             counter_type: Some(CounterType::Fade),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     )
     .sub_ability(sacrifice_if_none_removed);
@@ -8012,6 +8182,8 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
     let exile_branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
             target: champion_filter.clone(),
@@ -8072,6 +8244,8 @@ fn build_champion_ltb_return_trigger() -> TriggerDefinition {
     let return_ability = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ExiledBySource,
@@ -9293,6 +9467,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         // chapter number"; the chosen value is persisted on the entering Saga
         // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 // CR 702.155b: the Saga states its own upper bound (the final
@@ -9823,6 +9998,7 @@ pub fn synthesize_impending(face: &mut CardFace) {
             counter_type: Some(CounterType::Time),
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::SelfRef,
+            scope: EffectScope::Single,
         },
     );
     // CR 702.176a: gated on impending cost paid AND has a time counter.
@@ -9904,6 +10080,8 @@ pub fn synthesize_partner_with(face: &mut CardFace) {
     let put_in_hand = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,
@@ -9997,6 +10175,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10042,6 +10221,8 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         let exile_then_cast = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -10128,6 +10309,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10191,7 +10373,7 @@ fn extracted_supersedes_base(existing: &Keyword, extracted: &Keyword) -> bool {
 /// applies them and then appends the authoritative parser-recovered keywords.
 /// Fallback: if the parser found zero occurrences of a keyword, no rule runs for
 /// it, so the single MTGJSON copy is preserved.
-pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
+pub fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
     for extracted_kw in &extracted {
         base.retain(|existing| !extracted_supersedes_base(existing, extracted_kw));
     }
@@ -10537,6 +10719,7 @@ fn build_oracle_face_inner(
         is_commander: false,
         is_oathbreaker: false,
         deck_copy_limit: None,
+        deck_size_override: None,
         metadata: Default::default(),
         rarities: Default::default(),
         attraction_lights: vec![],
@@ -10549,6 +10732,9 @@ fn build_oracle_face_inner(
     // `face.oracle_text` retains reminder text + DCI prefix, so reminder-only
     // limits (Vazal, the Compleat's Megalegendary) are still discovered.
     face.deck_copy_limit = compute_deck_copy_limit(&face);
+    // CR 903.5a: deck-construction maximum-size override (Whtz / Covert
+    // Blue Mage class). Read at deck-validation time, never at runtime.
+    face.deck_size_override = compute_no_maximum_deck_size(&face);
     synthesize_all(&mut face);
     face
 }
@@ -14550,6 +14736,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
@@ -15951,6 +16138,136 @@ mod riot_synthesis_tests {
             "static Unleash grant should add recipient-gated CantBlock for affected filter, got {:?}",
             face.static_abilities
         );
+    }
+
+    /// The face a card's verbatim Oracle text builds, with its keyword-grant replacements
+    /// synthesized as card-data does.
+    fn synthesized_face(
+        oracle_text: &str,
+        name: &str,
+        keyword_names: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> CardFace {
+        let owned = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let parsed = parse_oracle_text(
+            oracle_text,
+            name,
+            &owned(keyword_names),
+            &owned(types),
+            &owned(subtypes),
+        );
+        let mut face = CardFace {
+            keywords: parsed.extracted_keywords,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            ..CardFace::default()
+        };
+        synthesize_riot(&mut face);
+        synthesize_unleash(&mut face);
+        face
+    }
+
+    /// CR 614.12 + CR 702.136a + CR 702.98a: `is_keyword_grant_entry_replacement` recognises the
+    /// as-enters replacement a keyword grant contributes to its granting source (Rhythm of the
+    /// Wild's riot grant, Tesak, Judith's Hellhound's unleash grant), and nothing else: not the
+    /// source's own printed unleash, not an entry replacement that only shares the granted
+    /// population (Metallic Mimic), and not the riot builder's output over another filter.
+    #[test]
+    fn keyword_grant_entry_replacement_is_recognised() {
+        let rhythm = synthesized_face(
+            "Creature spells you control can't be countered.\nNontoken creatures you control have riot. (They enter with your choice of a +1/+1 counter or haste.)",
+            "Rhythm of the Wild",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let rhythm_grant = rhythm
+            .static_abilities
+            .iter()
+            .find(|static_def| static_grants_riot(static_def))
+            .expect("Rhythm of the Wild parses a riot grant");
+        let rhythm_affected = rhythm_grant
+            .affected
+            .clone()
+            .expect("riot grant population");
+        let rhythm_riot = rhythm
+            .replacements
+            .iter()
+            .find(|replacement| is_riot_replacement(replacement, &rhythm_affected))
+            .expect("synthesize_riot installs the grant's replacement");
+        assert!(is_keyword_grant_entry_replacement(
+            &rhythm.static_abilities,
+            rhythm_riot
+        ));
+
+        let tesak = synthesized_face(
+            "Unleash (You may have this creature enter with a +1/+1 counter on it. It can't block as long as it has a +1/+1 counter on it.)\nOther Dogs you control have unleash.\nCreatures you control with counters on them have haste.\nWhenever Tesak attacks, add {R} for each attacking creature.",
+            "Tesak, Judith's Hellhound",
+            &["Unleash"],
+            &["Creature"],
+            &["Elemental", "Dog"],
+        );
+        let tesak_affected = tesak
+            .static_abilities
+            .iter()
+            .find(|static_def| static_grants_unleash(static_def))
+            .and_then(|static_def| static_def.affected.clone())
+            .expect("Tesak parses an unleash grant to other Dogs");
+        let tesak_grant = tesak
+            .replacements
+            .iter()
+            .find(|replacement| is_unleash_replacement(replacement, &tesak_affected))
+            .expect("synthesize_unleash installs the grant's replacement");
+        let tesak_printed = tesak
+            .replacements
+            .iter()
+            .find(|replacement| is_unleash_replacement(replacement, &TargetFilter::SelfRef))
+            .expect("Tesak's printed unleash installs its own replacement");
+        assert!(is_keyword_grant_entry_replacement(
+            &tesak.static_abilities,
+            tesak_grant
+        ));
+        // The source's own printed keyword is an ability of the source, not a grant.
+        assert!(!is_keyword_grant_entry_replacement(
+            &tesak.static_abilities,
+            tesak_printed
+        ));
+
+        // Hostile: an entry replacement over an overlapping population that no keyword grant
+        // builds (Metallic Mimic's "Each other creature you control of the chosen type enters
+        // with an additional +1/+1 counter on it.").
+        let mimic = synthesized_face(
+            "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.",
+            "Metallic Mimic",
+            &[],
+            &["Artifact", "Creature"],
+            &["Shapeshifter"],
+        );
+        let mimic_counters = mimic
+            .replacements
+            .iter()
+            .find(|replacement| replacement.event == ReplacementEvent::ChangeZone)
+            .expect("Metallic Mimic parses its chosen-type counter replacement");
+        let statics_together: Vec<StaticDefinition> = rhythm
+            .static_abilities
+            .iter()
+            .chain(&mimic.static_abilities)
+            .cloned()
+            .collect();
+        assert!(!is_keyword_grant_entry_replacement(
+            &statics_together,
+            mimic_counters
+        ));
+
+        // Hostile: the riot builder's output over a filter no grant among the statics names.
+        let other_filter = build_riot_replacement(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert!(!is_keyword_grant_entry_replacement(
+            &rhythm.static_abilities,
+            &other_filter
+        ));
     }
 }
 
@@ -24285,6 +24602,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Fade),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
         let sacrifice = removal
@@ -24345,6 +24663,7 @@ mod fading_vanishing_tests {
                 counter_type: Some(CounterType::Time),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         ));
 

@@ -154,11 +154,14 @@ fn printed_card_copy_token_spec() -> CopyTokenSpec {
         additional_modifications: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(1),
         controller: PlayerId(0),
         // Synthetic spec: no donor in scope (serde shape fixture only).
         donor: None,
+        // Single-faced synthetic values: no other face to carry.
+        double_faced: None,
     }
 }
 

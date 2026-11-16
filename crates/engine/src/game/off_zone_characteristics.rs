@@ -1,8 +1,10 @@
 use crate::game::filter::FilterContext;
 use crate::game::layers::{
     active_continuous_effects_from_base_static_source, active_effect_condition_controller,
-    collect_shared_active_continuous_effects_matching, evaluate_condition_with_recipient,
-    order_active_continuous_effects, GatherDependence,
+    collect_shared_active_continuous_effects_matching,
+    collect_shared_active_continuous_effects_matching_from, evaluate_condition_with_recipient,
+    order_active_continuous_effects, GatherDependence, OffZoneStaticSourceIds,
+    OffZoneStaticSources,
 };
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{ContinuousModification, TargetFilter, TriggerProducerOrigin};
@@ -97,6 +99,14 @@ struct OffZoneKeywordFrame {
     /// the state alive and unmutated for as long as the frame exists.
     state: *const GameState,
     gather: SharedGather,
+    /// The scoped state's static-effect sources outside the battlefield and
+    /// command zone, once a gather in this scope has scanned for them. Which
+    /// objects those are depends on no filter or condition, so every gather
+    /// for this state shares them, `ContextDependent` ones included.
+    /// CR 611.3b + CR 113.6: an off-zone static's effect applies only while
+    /// its source is in a zone the ability functions from, so the list is
+    /// valid only for this frame's unchanged state and ends with the frame.
+    off_zone_sources: Option<std::rc::Rc<OffZoneStaticSourceIds>>,
 }
 
 thread_local! {
@@ -172,12 +182,44 @@ fn store_off_zone_keyword_gather(state: &GameState, gather: SharedGather) {
     let _ = stored;
 }
 
+/// The off-zone static-effect sources of the open scope for `state`: read from
+/// its frame, or scanned once and kept there (first writer wins). The scan runs
+/// outside the frame borrow; it reads only zones, phasing and static
+/// definitions, so it cannot re-enter an off-zone keyword query.
+fn scoped_off_zone_static_sources(state: &GameState) -> std::rc::Rc<OffZoneStaticSourceIds> {
+    let known = with_off_zone_keyword_frames(|frames| {
+        frames
+            .iter()
+            .find(|frame| std::ptr::eq(frame.state, state))
+            .and_then(|frame| frame.off_zone_sources.clone())
+    });
+    if let Some(known) = known {
+        return known;
+    }
+    let scanned = std::rc::Rc::new(OffZoneStaticSourceIds::scan(state));
+    with_off_zone_keyword_frames(|frames| {
+        if let Some(frame) = frames
+            .iter_mut()
+            .find(|frame| std::ptr::eq(frame.state, state))
+        {
+            frame
+                .off_zone_sources
+                .get_or_insert_with(|| std::rc::Rc::clone(&scanned));
+        }
+    });
+    scanned
+}
+
 /// RAII owner of one scope frame. `pushed` is `Some` only for the guard that
 /// actually pushed a frame; a scope nested inside another scope on the same
 /// state pushes nothing and owns no removal. `Drop` pops on every exit path —
 /// normal return, early return, or unwind.
 struct OffZoneKeywordScopeGuard {
     pushed: Option<*const GameState>,
+    /// Test-only: the readings as this guard pushed its frame, taken only while
+    /// [`off_zone_keyword_scopes_during`] records.
+    #[cfg(test)]
+    recorded_from: Option<OffZoneKeywordScopeRecord>,
 }
 
 impl OffZoneKeywordScopeGuard {
@@ -194,11 +236,17 @@ impl OffZoneKeywordScopeGuard {
                 frames.push(OffZoneKeywordFrame {
                     state: address,
                     gather: SharedGather::Pending,
+                    off_zone_sources: None,
                 });
                 Some(address)
             }
         });
-        Self { pushed }
+        Self {
+            pushed,
+            #[cfg(test)]
+            recorded_from: pushed
+                .and_then(|_| OffZoneKeywordScopeRecord::reading_while_recording()),
+        }
     }
 }
 
@@ -215,6 +263,8 @@ impl Drop for OffZoneKeywordScopeGuard {
                 }
             });
         }
+        #[cfg(test)]
+        record_off_zone_keyword_scope_frame(self.recorded_from);
     }
 }
 
@@ -226,6 +276,8 @@ impl Drop for OffZoneKeywordScopeGuard {
 /// it instead of gathering again; each query still applies its own recipient
 /// filter and conditions. Otherwise, and for any other state (a clone, a probe
 /// state), every query gathers for itself exactly as it does outside a scope.
+/// Either way, the gathers against the scoped state walk the object map for
+/// off-zone static-effect sources at most once and share the list.
 pub(crate) fn with_off_zone_keyword_scope<R>(state: &GameState, f: impl FnOnce() -> R) -> R {
     let _scope = OffZoneKeywordScopeGuard::enter(state);
     f()
@@ -247,6 +299,22 @@ pub(crate) struct OffZoneKeywordScopeCounts {
     pub(crate) unmatched: usize,
     /// Effects cloned out of a shared slice.
     pub(crate) shared_clones: usize,
+}
+
+#[cfg(test)]
+impl OffZoneKeywordScopeCounts {
+    /// The tallies accumulated since `start`, an earlier reading on this
+    /// thread with no reset in between.
+    fn since(self, start: Self) -> Self {
+        Self {
+            matched: self.matched - start.matched,
+            fills: self.fills - start.fills,
+            hits: self.hits - start.hits,
+            context_fall_opens: self.context_fall_opens - start.context_fall_opens,
+            unmatched: self.unmatched - start.unmatched,
+            shared_clones: self.shared_clones - start.shared_clones,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +358,71 @@ pub(crate) fn off_zone_keyword_scope_counts() -> OffZoneKeywordScopeCounts {
 #[cfg(test)]
 pub(crate) fn off_zone_keyword_scope_depth() -> usize {
     with_off_zone_keyword_frames(|frames| frames.len())
+}
+
+/// Test-only: walks of the object map for off-zone static-effect sources
+/// (`layers::off_zone_static_source_scan_count`) and the scope tallies. A
+/// recorded frame's value is what accumulated on this thread, by any code,
+/// between the frame's push and its pop.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OffZoneKeywordScopeRecord {
+    /// Walks of the object map for off-zone static-effect sources.
+    pub(crate) source_scans: usize,
+    /// The scope tallies.
+    pub(crate) counts: OffZoneKeywordScopeCounts,
+}
+
+#[cfg(test)]
+impl OffZoneKeywordScopeRecord {
+    /// This thread's running readings, if a recording is open.
+    fn reading_while_recording() -> Option<Self> {
+        OFF_ZONE_KEYWORD_SCOPE_RECORDS
+            .with_borrow(Option::is_some)
+            .then(|| Self {
+                source_scans: crate::game::layers::off_zone_static_source_scan_count(),
+                counts: off_zone_keyword_scope_counts(),
+            })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only record of the scope frames pushed and popped on this thread, in
+    /// pop order. It holds a list only while `off_zone_keyword_scopes_during`
+    /// runs, so the hook keeps nothing for any other test.
+    static OFF_ZONE_KEYWORD_SCOPE_RECORDS: std::cell::RefCell<Option<Vec<OffZoneKeywordScopeRecord>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Appends, to this thread's open recording, what accumulated since `opened`:
+/// the readings taken when the frame now being popped was pushed.
+#[cfg(test)]
+fn record_off_zone_keyword_scope_frame(opened: Option<OffZoneKeywordScopeRecord>) {
+    let (Some(opened), Some(now)) = (opened, OffZoneKeywordScopeRecord::reading_while_recording())
+    else {
+        return;
+    };
+    let record = OffZoneKeywordScopeRecord {
+        source_scans: now.source_scans - opened.source_scans,
+        counts: now.counts.since(opened.counts),
+    };
+    OFF_ZONE_KEYWORD_SCOPE_RECORDS.with_borrow_mut(|records| {
+        if let Some(records) = records {
+            records.push(record);
+        }
+    });
+}
+
+/// Runs `f` with a scope recording open on this thread and returns, in pop
+/// order, a record of every scope frame pushed and popped while `f` ran.
+#[cfg(test)]
+pub(crate) fn off_zone_keyword_scopes_during(f: impl FnOnce()) -> Vec<OffZoneKeywordScopeRecord> {
+    let outer = OFF_ZONE_KEYWORD_SCOPE_RECORDS.replace(Some(Vec::new()));
+    f();
+    OFF_ZONE_KEYWORD_SCOPE_RECORDS
+        .replace(outer)
+        .unwrap_or_default()
 }
 
 pub fn effective_off_zone_keywords(state: &GameState, object_id: ObjectId) -> Vec<Keyword> {
@@ -349,6 +482,11 @@ pub(crate) fn effective_off_zone_keyword_contributions(
     keywords
 }
 
+/// The single instance of `kind` that a single-cost reader (flashback, escape,
+/// foretell, miracle, …) uses: the LAST entry of that kind, which is the latest
+/// applied surviving grant, or the printed instance when no grant of that kind
+/// applies. Choosing among several instances of the same keyword (CR 113.2c) is
+/// tracked by phase-rs/phase#10957; until then this keeps the latest instance.
 pub fn effective_off_zone_keyword(
     state: &GameState,
     object_id: ObjectId,
@@ -356,6 +494,7 @@ pub fn effective_off_zone_keyword(
 ) -> Option<Keyword> {
     effective_off_zone_keywords(state, object_id)
         .into_iter()
+        .rev()
         .find(|keyword| keyword.kind() == kind)
 }
 
@@ -373,6 +512,8 @@ pub fn off_zone_has_keyword_kind(
 ///
 /// Inside a [`with_off_zone_keyword_scope`] scope for this exact state the
 /// shared gather may be read from the scope instead of being gathered again.
+/// Inside such a scope the gather also reads the scope's off-zone static-effect
+/// sources instead of walking the object map for them.
 /// The recipient filter and the conditions are evaluated per query on every
 /// path, shared effects first and own base statics second.
 pub(crate) fn collect_applicable_off_zone_keyword_effects(
@@ -399,18 +540,22 @@ pub(crate) fn collect_applicable_off_zone_keyword_effects(
                 counts.matched += 1;
                 counts.context_fall_opens += 1;
             });
-            let (effects, _) = collect_shared_active_continuous_effects_matching(
+            let sources = scoped_off_zone_static_sources(state);
+            let (effects, _) = collect_shared_active_continuous_effects_matching_from(
                 state,
                 supports_off_zone_keyword_query,
+                OffZoneStaticSources::Known(&sources),
             );
             applicable_from_owned_gather(state, obj, effects)
         }
         OffZoneKeywordFrameLookup::Pending => {
             #[cfg(test)]
             record_off_zone_keyword_scope(|counts| counts.matched += 1);
-            let (effects, dependence) = collect_shared_active_continuous_effects_matching(
+            let sources = scoped_off_zone_static_sources(state);
+            let (effects, dependence) = collect_shared_active_continuous_effects_matching_from(
                 state,
                 supports_off_zone_keyword_query,
+                OffZoneStaticSources::Known(&sources),
             );
             match dependence {
                 GatherDependence::ContextDependent => {
@@ -909,23 +1054,20 @@ fn upsert_keyword_contribution(
     keywords: &mut Vec<OffZoneKeywordContribution>,
     contribution: OffZoneKeywordContribution,
 ) {
-    // CR 702.164b: summing keywords (Toxic) accumulate — never overwrite; push so
-    // every instance is counted by the aggregate reader (effective_total_toxic_value).
-    // Gate on the INCOMING keyword's summing flag (not a kind comparison) so a
-    // granted off-zone Toxic pushes rather than clobbering an unrelated printed
-    // keyword that shares its (Unknown) kind. Non-summing keywords keep the
-    // upsert-by-kind dedup below unchanged.
-    if !contribution.keyword.instances_must_coexist() {
-        if let Some(existing) = keywords
-            .iter_mut()
-            .find(|existing| existing.keyword.kind() == contribution.keyword.kind())
-        {
-            *existing = contribution;
-            return;
-        }
-    }
-
-    keywords.push(contribution);
+    // CR 113.2c: an object off the battlefield may have several instances of the
+    // same keyword (Dregscape Sliver's unearth {2} and Sedris's unearth {2}{B} on
+    // one graveyard card); each functions independently, so a distinct same-kind
+    // grant must not overwrite an earlier one. The shared grant policy is the
+    // battlefield's (`Keyword::grant_policy`). An exact duplicate keeps the LATER
+    // contribution, appended last, so its producing effect is the latest one and
+    // the last entry of a kind is the latest applied surviving grant (see
+    // `effective_off_zone_keyword`).
+    super::keywords::grant_keyword_instance_into(
+        keywords,
+        contribution,
+        |entry| &entry.keyword,
+        super::keywords::RedundantGrant::KeepLater,
+    );
 }
 
 #[cfg(test)]
@@ -1001,13 +1143,14 @@ mod tests {
     }
 
     /// CR 702.164b (issue #955): `upsert_keyword` must PUSH summing keywords
-    /// (Toxic) so the off-zone aggregate reader counts every instance, while
-    /// keeping the upsert-by-kind dedup for all non-summing keywords. The gate
-    /// keys on the INCOMING keyword's summing flag, not a kind comparison, so a
-    /// granted Toxic (which collapses to `KeywordKind::Unknown`) does NOT clobber
-    /// an unrelated printed keyword that happens to share that `Unknown` kind.
+    /// (Toxic) so the off-zone aggregate reader counts every instance. Distinct
+    /// Ward values coexist (CR 113.2c). Exact-value deduplication preserves the
+    /// existing keyword-list representation; it does not determine
+    /// companion-trigger multiplicity. A granted Toxic (which collapses to
+    /// `KeywordKind::Unknown`) does NOT clobber an unrelated printed keyword that
+    /// happens to share that `Unknown` kind.
     #[test]
-    fn upsert_keyword_sums_toxic_but_dedups_others() {
+    fn upsert_keyword_sums_toxic_but_dedups_identical_others() {
         use crate::types::keywords::WardCost;
 
         // Summing keyword: two Toxic(1) accumulate (push) -> len 2.
@@ -1023,31 +1166,25 @@ mod tests {
             2
         );
 
-        // Non-summing keyword sharing a distinct kind: the second Ward overwrites
-        // the first (upsert-by-kind dedup preserved) -> len 1.
-        let mut ward = Vec::new();
-        upsert_keyword(
-            &mut ward,
+        // Distinct Ward values coexist (CR 113.2c). Exact-value deduplication
+        // preserves the existing keyword-list representation.
+        let ward = |generic| {
             Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 1,
+                generic,
                 shards: vec![],
-            })),
-        );
-        upsert_keyword(
-            &mut ward,
-            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })),
-        );
-        assert_eq!(ward.len(), 1, "non-summing Ward keeps upsert-by-kind dedup");
+            }))
+        };
+        let mut wards = Vec::new();
+        upsert_keyword(&mut wards, ward(1));
+        upsert_keyword(&mut wards, ward(2));
+        upsert_keyword(&mut wards, ward(1));
         assert_eq!(
-            ward[0].keyword,
-            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })),
-            "the later Ward instance overwrites the earlier one"
+            wards
+                .iter()
+                .map(|entry| entry.keyword.clone())
+                .collect::<Vec<_>>(),
+            vec![ward(2), ward(1)],
+            "distinct Wards coexist; the duplicate Ward {{1}} survives once, as the later entry"
         );
 
         // Clobber-protection residual: an incoming Toxic grant must NOT overwrite
@@ -1923,8 +2060,10 @@ mod tests {
         );
     }
 
+    /// CR 113.2c: two grants of the same keyword kind with different payloads
+    /// both survive off the battlefield, in application order.
     #[test]
-    fn later_effect_replaces_same_keyword_kind_payload() {
+    fn distinct_same_kind_grants_coexist_off_zone() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_card(&mut state, PlayerId(0), "Think Twice", Zone::Graveyard);
         let earlier_id = create_card(&mut state, PlayerId(0), "Earlier", Zone::Battlefield);
@@ -1961,13 +2100,17 @@ mod tests {
                     }]),
             );
 
-        assert_eq!(
-            effective_off_zone_keyword(&state, target_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
-                generic: 2,
+        let flashback = |generic| {
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+                generic,
                 shards: vec![ManaCostShard::Blue],
-            })))
-        );
+            }))
+        };
+        let flashbacks: Vec<Keyword> = effective_off_zone_keywords(&state, target_id)
+            .into_iter()
+            .filter(|keyword| keyword.kind() == KeywordKind::Flashback)
+            .collect();
+        assert_eq!(flashbacks, vec![flashback(1), flashback(2)]);
     }
 
     // -- Keyword-only gather and scoped sharing --------------------------------
@@ -2779,6 +2922,164 @@ mod tests {
             "the clone lost its granting static: {cloned:?}"
         );
         assert_ne!(cloned, original_second);
+    }
+
+    use crate::game::layers::{
+        off_zone_static_source_scan_count, reset_off_zone_static_source_scan_count,
+    };
+
+    /// `sharing_board` plus a static that functions from the graveyard, granting
+    /// Dredge 4 to the first card, and a keyword transient granting flashback to
+    /// the third, so every scoped query falls open.
+    fn falling_open_board() -> (GameState, ObjectId, [ObjectId; 3]) {
+        let (mut state, source, cards) = sharing_board();
+        let anchor = create_card(&mut state, PlayerId(0), "Graveyard Anchor", Zone::Graveyard);
+        push_static(
+            &mut state,
+            anchor,
+            keyword_static(
+                TargetFilter::SpecificObject { id: cards[0] },
+                Keyword::Dredge(4),
+            )
+            .active_zones(vec![Zone::Graveyard]),
+        );
+        state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: cards[2] },
+            vec![ContinuousModification::AddKeyword {
+                keyword: flashback(),
+            }],
+            None,
+        );
+        (state, anchor, cards)
+    }
+
+    /// Falling-open queries in one scope share one off-zone source scan, with unscoped results.
+    #[test]
+    fn falling_open_scope_scans_off_zone_static_sources_once() {
+        let (state, _, cards) = falling_open_board();
+        let outside = keywords_of_each(&state, &cards);
+        assert!(
+            outside[0].contains(&Keyword::Dredge(4)),
+            "reach-guard: the graveyard-functioning static grants its keyword: {outside:?}"
+        );
+        assert!(
+            outside[2].contains(&flashback()),
+            "reach-guard: the keyword transient is live: {outside:?}"
+        );
+
+        reset_off_zone_static_source_scan_count();
+        let (inside, counts) = scoped_queries(&state, &cards);
+        assert_eq!(inside, outside);
+        assert_eq!(
+            counts.context_fall_opens, 3,
+            "reach-guard: every query falls open: {counts:?}"
+        );
+        assert_eq!(
+            off_zone_static_source_scan_count(),
+            1,
+            "one source scan per scope, not one per query"
+        );
+    }
+
+    /// A scope's source list ends with the scope: a later change is seen outside and by a new scope.
+    #[test]
+    fn off_zone_static_source_list_ends_with_its_scope() {
+        let (mut state, _, cards) = sharing_board();
+
+        reset_off_zone_static_source_scan_count();
+        with_off_zone_keyword_scope(&state, || ());
+        assert_eq!(
+            off_zone_static_source_scan_count(),
+            0,
+            "a scope that never gathers never scans"
+        );
+
+        reset_off_zone_static_source_scan_count();
+        let (before, counts) = scoped_queries(&state, &cards);
+        assert_eq!(
+            off_zone_static_source_scan_count(),
+            1,
+            "reach-guard: the structural scope scanned"
+        );
+        assert_eq!(
+            (counts.fills, counts.hits),
+            (1, 2),
+            "reach-guard: the structural scope filled: {counts:?}"
+        );
+        assert_eq!(off_zone_keyword_scope_depth(), 0);
+
+        // Same binding, so the same address as the ended scope's state.
+        let late = create_card(&mut state, PlayerId(0), "Late Anchor", Zone::Graveyard);
+        push_static(
+            &mut state,
+            late,
+            keyword_static(
+                TargetFilter::SpecificObject { id: cards[0] },
+                Keyword::Dredge(5),
+            )
+            .active_zones(vec![Zone::Graveyard]),
+        );
+        assert!(!before[0].contains(&Keyword::Dredge(5)), "{before:?}");
+        let outside = keywords_of_each(&state, &cards);
+        assert!(
+            outside[0].contains(&Keyword::Dredge(5)),
+            "an unscoped query walks the live state: {outside:?}"
+        );
+
+        reset_off_zone_static_source_scan_count();
+        let (inside, _) = scoped_queries(&state, &cards);
+        assert_eq!(inside, outside);
+        assert_eq!(
+            off_zone_static_source_scan_count(),
+            1,
+            "a new scope on the same address scans afresh"
+        );
+        assert_eq!(off_zone_keyword_scope_depth(), 0);
+    }
+
+    /// Nested scopes on two states each keep their own source list, whichever frame is innermost.
+    #[test]
+    fn nested_scopes_keep_their_own_off_zone_static_sources() {
+        let (state_a, anchor, cards) = falling_open_board();
+        let mut state_b = state_a.clone();
+        state_b.objects.get_mut(&anchor).unwrap().static_definitions = Vec::new().into();
+        let outside_a = keywords_of_each(&state_a, &cards);
+        let outside_b = keywords_of_each(&state_b, &cards);
+        assert!(
+            outside_a[0].contains(&Keyword::Dredge(4)),
+            "reach-guard: A's graveyard-functioning static grants its keyword: {outside_a:?}"
+        );
+        assert!(
+            !outside_b[0].contains(&Keyword::Dredge(4)),
+            "B lacks A's graveyard-functioning static: {outside_b:?}"
+        );
+
+        reset_off_zone_static_source_scan_count();
+        reset_off_zone_keyword_scope_counts();
+        let (a1, b, a2) = with_off_zone_keyword_scope(&state_a, || {
+            let a1 = keywords_of_each(&state_a, &cards);
+            // A is queried again while B's frame is innermost.
+            let (b, a2) = with_off_zone_keyword_scope(&state_b, || {
+                (
+                    keywords_of_each(&state_b, &cards),
+                    keywords_of_each(&state_a, &cards),
+                )
+            });
+            (a1, b, a2)
+        });
+        assert_eq!(a1, outside_a);
+        assert_eq!(b, outside_b);
+        assert_eq!(a2, outside_a);
+        let counts = off_zone_keyword_scope_counts();
+        assert_eq!(
+            counts.context_fall_opens, 9,
+            "reach-guard: every query falls open: {counts:?}"
+        );
+        assert_eq!(off_zone_static_source_scan_count(), 2, "one scan per frame");
+        assert_eq!(off_zone_keyword_scope_depth(), 0);
     }
 
     /// Same-state nesting adds no frame, another state adds one, and an unwind pops its frame.

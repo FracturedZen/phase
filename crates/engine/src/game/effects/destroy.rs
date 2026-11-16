@@ -97,8 +97,6 @@ fn deliver_destruction_zone_change(
         source_id: source,
         exile_links: ExileLinkSpec::default(),
         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-        // Destroy delivers to the graveyard — never a library placement.
-        library_placement: None,
     };
     !matches!(
         zone_pipeline::deliver(state, approved, ctx, events),
@@ -775,6 +773,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
