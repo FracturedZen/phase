@@ -1,4 +1,5 @@
-//! Test-only barriers observe real socket delivery without delaying game work.
+//! Instance-scoped barriers observe bootstrap, resync ownership and publication
+//! lease boundaries in the real socket path; unarmed hooks never delay work.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    resync: Arc<Mutex<ResyncGates>>,
 }
 
 /// One connection's real parser calls, with a frozen quota window so wire tests
@@ -143,13 +145,94 @@ impl ParserWork {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ResyncPoint {
+    Dispatch,
+    Built,
+    Enqueued,
+    ActionPreflight,
+    Encoding,
+}
+
+#[derive(Default)]
+struct ResyncGates {
+    dispatch: Option<Arc<BootstrapGate>>,
+    built: Option<Arc<BootstrapGate>>,
+    enqueued: Option<Arc<BootstrapGate>>,
+    action_preflight: Option<Arc<BootstrapGate>>,
+    encoding: Option<Arc<BootstrapGate>>,
+}
+
+impl ResyncGates {
+    fn slot(&mut self, point: ResyncPoint) -> &mut Option<Arc<BootstrapGate>> {
+        match point {
+            ResyncPoint::Dispatch => &mut self.dispatch,
+            ResyncPoint::Built => &mut self.built,
+            ResyncPoint::Enqueued => &mut self.enqueued,
+            ResyncPoint::ActionPreflight => &mut self.action_preflight,
+            ResyncPoint::Encoding => &mut self.encoding,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BootstrapGate {
     pub(crate) entered: Notify,
     pub(crate) release: Notify,
+    pub(crate) snapshot: Mutex<Option<(server_core::FullSessionKey, u64)>>,
 }
 
 impl Hooks {
+    pub(crate) fn arm_resync(&self, point: ResyncPoint) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.resync.lock().slot(point) = Some(gate.clone());
+        gate
+    }
+
+    async fn resync_boundary(
+        &self,
+        point: ResyncPoint,
+        snapshot: Option<(server_core::FullSessionKey, u64)>,
+    ) {
+        let gate = self.resync.lock().slot(point).take();
+        if let Some(gate) = gate {
+            *gate.snapshot.lock() = snapshot;
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn before_resync_dispatch(&self) {
+        self.resync_boundary(ResyncPoint::Dispatch, None).await;
+    }
+
+    pub(crate) async fn after_resync_build(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Built, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn after_resync_enqueue(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Enqueued, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn before_action_preflight(&self) {
+        self.resync_boundary(ResyncPoint::ActionPreflight, None)
+            .await;
+    }
+
+    pub(crate) async fn before_resync_encode(&self) {
+        self.resync_boundary(ResyncPoint::Encoding, None).await;
+    }
+
     pub(crate) fn arm_hello_accept(&self) -> Arc<BootstrapGate> {
         let gate = Arc::new(BootstrapGate::default());
         *self.hello_accept.lock() = Some(gate.clone());
@@ -307,6 +390,27 @@ pub(crate) fn run_async_test_with_blocking_limit<F: std::future::Future<Output =
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }
 
+/// CR 103.1: a started session rests at the game-one choice. For tests whose
+/// subject is not the choice, the contest winner elects to play first, as it
+/// did before the choice existed, and the session's revision advances for that
+/// transition as `NativeTable::keep_all` does after each action. A session
+/// not waiting on the choice is left alone.
+pub(crate) fn elect_contest_winner_to_play(session: &mut server_core::session::GameSession) {
+    let engine::types::game_state::WaitingFor::ChooseStartingPlayer { player, .. } =
+        session.state.waiting_for
+    else {
+        return;
+    };
+    let token = session.player_tokens[usize::from(player.0)].clone();
+    session
+        .handle_action(
+            &token,
+            engine::types::actions::GameAction::ChooseStartingPlayer { player },
+        )
+        .expect("the contest winner elects to play first");
+    session.advance_state_revision();
+}
+
 pub(crate) fn room_request(
     deck: server_core::protocol::DeckData,
     player_count: u8,
@@ -341,6 +445,8 @@ fn reconnect_bootstrap_precedes_a_concurrent_newer_action() {
         };
         use engine::types::actions::{GameAction, MulliganChoice};
         use engine::types::format::FormatConfig;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::player::PlayerId;
         use futures_util::SinkExt;
         use server_core::protocol::{ClientMessage, DeckData};
         use std::time::Duration;
@@ -400,11 +506,48 @@ fn reconnect_bootstrap_precedes_a_concurrent_newer_action() {
                 ))
                 .await
                 .unwrap();
+            let mut started = Vec::new();
+            for socket in [&mut host, &mut guest] {
+                started.push(loop {
+                    match recv_server_message(socket).await {
+                        ServerMessage::GameStarted { state, .. } => break state.waiting_for,
+                        ServerMessage::Error { message, .. } => panic!("start: {message}"),
+                        _ => {}
+                    }
+                });
+            }
+            // CR 103.1: the chooser elects to play first, as the roll winner did
+            // before the choice existed.
+            let WaitingFor::ChooseStartingPlayer {
+                player: chooser, ..
+            } = started[0]
+            else {
+                panic!("the start rests at the CR 103.1 choice");
+            };
+            let chooser_socket = if chooser == PlayerId(0) {
+                &mut host
+            } else {
+                &mut guest
+            };
+            chooser_socket
+                .send(Message::Text(
+                    serde_json::to_string(&ClientMessage::Action {
+                        action: GameAction::ChooseStartingPlayer { player: chooser },
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
             for socket in [&mut host, &mut guest] {
                 loop {
                     match recv_server_message(socket).await {
-                        ServerMessage::GameStarted { .. } => break,
-                        ServerMessage::Error { message, .. } => panic!("start: {message}"),
+                        ServerMessage::StateUpdate { .. } => break,
+                        ServerMessage::ActionRejected { rejection } => {
+                            panic!("choice: {rejection:?}")
+                        }
+                        ServerMessage::ActionFailed { message } => panic!("choice: {message}"),
+                        ServerMessage::Error { message, .. } => panic!("choice: {message}"),
                         _ => {}
                     }
                 }
@@ -884,7 +1027,7 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
         use crate::issue_4548_full_create_tests::{
             recv_server_message, send_test_message, spawn_full_mode_server_with_db,
         };
-        use engine::types::actions::{GameAction, MulliganChoice};
+        use engine::types::actions::GameAction;
         use server_core::protocol::{ClientMessage, DeckData};
         use std::time::Duration;
 
@@ -916,12 +1059,16 @@ fn starting_join_bootstrap_precedes_an_existing_players_action() {
             )
             .await;
             gate.entered.notified().await;
+            // The start now rests at the CR 103.1 choice, whose chooser is
+            // unknown when this action is committed. `CancelAutoPass` is an
+            // actor-scoped preference, legal in every `WaitingFor` from any
+            // seat, so the existing player's action is admissible whoever
+            // chooses, and it still advances the revision the start must
+            // publish first.
             send_test_message(
                 &mut host,
                 &ClientMessage::Action {
-                    action: GameAction::MulliganDecision {
-                        choice: MulliganChoice::Keep,
-                    },
+                    action: GameAction::CancelAutoPass,
                 },
                 false,
             )
@@ -1108,7 +1255,7 @@ fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
                 main_deck: vec!["Network Test Land".to_string(); 60],
                 ..Default::default()
             };
-            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
             let (draft_code, draft_token, key, _) = start_draft_match_with_deck(
                 &app,
                 deck,
@@ -1121,6 +1268,7 @@ fn draft_full_bootstrap_precedes_a_concurrent_full_action() {
                     .unwrap();
                 session.state.format_config = FormatConfig::freeform();
                 session.start_game(&app.db).unwrap();
+                elect_contest_winner_to_play(&mut session);
                 session.player_tokens[1].clone()
             };
             let mut draft_player = connect_and_hello(url.clone()).await;

@@ -1,8 +1,12 @@
+pub use phase_ast::types::player::*;
+
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::is_false;
+use super::card_printing::SharedPrinting;
+use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
 use super::identifiers::ObjectId;
 use super::mana::{ManaColor, ManaPool};
@@ -55,28 +59,6 @@ impl PlayerStatus {
     }
 }
 
-/// CR 122.1b: Named player counter types tracked by the engine.
-/// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
-/// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum PlayerCounterKind {
-    Poison,
-    Experience,
-    Rad,
-    Ticket,
-}
-
-impl fmt::Display for PlayerCounterKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Poison => write!(f, "poison"),
-            Self::Experience => write!(f, "experience"),
-            Self::Rad => write!(f, "rad"),
-            Self::Ticket => write!(f, "ticket"),
-        }
-    }
-}
-
 /// CR 702.139: Tracks a declared companion outside the game.
 /// The companion is not a `GameObject` until it moves to hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,18 +67,31 @@ pub struct CompanionInfo {
     pub card: DeckEntry,
     /// CR 702.139c: Whether the companion has been put into hand this game (once per game).
     pub used: bool,
+    /// CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed companion,
+    /// captured at the reveal from the source it was revealed from (display-only).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
-
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct PlayerId(pub u8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Player {
     pub id: PlayerId,
     pub life: i32,
+    /// This seat has NO life total, so `life` is meaningless for it and must not
+    /// be presented as a resource. Damage and life loss it would take are
+    /// redirected into milling its library, and it is exempt from the CR 704.5a
+    /// "0 or less life" state-based action.
+    ///
+    /// True only for the Horde seat in a `GameFormat::Horde` game (a casual
+    /// variant, hence no CR number — see `horde::player_has_no_life_total`). Set
+    /// once at deck load, since the Horde seat is fixed for the whole game.
+    ///
+    /// Engine-derived and serialized so clients can render the seat truthfully
+    /// (showing its library — the Horde's real clock, as it loses by decking out)
+    /// instead of a frozen life total, WITHOUT re-deriving "which seat is the
+    /// Horde" on the frontend.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_no_life_total: bool,
     pub mana_pool: ManaPool,
 
     // Per-player zones
@@ -129,6 +124,12 @@ pub struct Player {
     pub life_gained_this_turn: u32,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    /// CR 107.14 + CR 122.1: Energy counters this player has paid or otherwise
+    /// lost this turn. Bumped on every energy decrement in
+    /// `GameState::apply_resolved_player_edit` and reset at turn start. Read by
+    /// `QuantityRef::EnergyPaidOrLostThisTurn` (Blaster Hulk).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub energy_paid_or_lost_this_turn: u32,
     /// CR 603.4: Amount of life lost during the previous turn, snapshotted at turn start.
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
@@ -245,6 +246,7 @@ impl Default for Player {
         Player {
             id: PlayerId(0),
             life: 20,
+            has_no_life_total: false,
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),
@@ -259,6 +261,7 @@ impl Default for Player {
             energy: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
+            energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,

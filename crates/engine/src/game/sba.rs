@@ -13,12 +13,15 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::match_config::MatchPhase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
+use super::elimination::DepartureTriggers;
 use super::filter::{matches_target_filter, FilterContext};
+use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -97,7 +100,16 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    check_state_based_actions_with_waiting_triggers(state, events, &[]);
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+}
+
+/// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
+/// what is waiting to be put on the stack at its own settle.
+pub(crate) fn check_state_based_actions_in_pass(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
 }
 
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
@@ -111,6 +123,37 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
+    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+}
+
+fn run_state_based_actions(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    departures: DepartureTriggers,
+) {
+    // CR 104.1 + CR 704.3: a game that has already ended is terminal, and no
+    // player will receive priority again — so no state-based actions are
+    // performed. Without this guard the player-loss collectors below would run
+    // after the winning effect recorded `GameOver` and eliminate the player the
+    // effect just named the winner when the same resolution also set a loss
+    // condition (an empty-library draw resolving into "you win the game" —
+    // Fblthp, Impossibly Lost; issue #10451). `game_end` is the CR 104.1
+    // terminal record, written only by `elimination::end_game`; the
+    // `WaitingFor::GameOver` arm also covers a restored/terminal wait whose
+    // record predates the field. `match_phase` covers the persisted Bo3
+    // between-games boundary: `game_end` is `#[serde(skip)]`, so a restored
+    // state keeps the prior winner's serialized empty-library flag but loses
+    // the record, and the next `SubmitSideboard` would otherwise run this net
+    // against that earlier game's winner. This is the same InGame predicate
+    // `elimination::check_game_over` uses.
+    if state.game_end.is_some()
+        || state.match_phase != MatchPhase::InGame
+        || matches!(state.waiting_for, WaitingFor::GameOver { .. })
+    {
+        return;
+    }
+
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -154,6 +197,15 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
         // so the game-over check sees the true post-event living set — a draw
         // (winner: None) when all remaining players lose at once, instead of
         // crowning whichever player happened to be eliminated first.
+        // Turtle Team-Up: a Boss stage clearing (life hit zero on a non-final
+        // stage) exiles the deployed Bosses, resets Boss life, and deploys
+        // the next stage — BEFORE life losers are collected, so the reset
+        // seat is not a loser this pass. On the final stage this returns
+        // false and the normal CR 704.5a loss below proceeds (the heroes
+        // win). A clear performs game actions, so it counts as SBA progress.
+        if super::boss::maybe_clear_boss_stage(state, events) {
+            any_performed = true;
+        }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
         let mut losers: Vec<PlayerId> = collect_life_losers(state);
@@ -170,7 +222,7 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
             for &loser in &losers {
                 events.push(GameEvent::PlayerLost { player_id: loser });
             }
-            super::elimination::eliminate_players_simultaneously(state, &losers, events);
+            super::elimination::eliminate_players(state, &losers, departures, events);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
@@ -314,7 +366,13 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
             // and no chapter ability has triggered but not yet left the stack, sacrifice it.
-            check_saga_sacrifice(state, events, &mut any_performed, &battlefield_snapshot);
+            check_saga_sacrifice(
+                state,
+                events,
+                &mut any_performed,
+                &battlefield_snapshot,
+                waiting,
+            );
             if mid_resolution_entry_pauses_sba(state) {
                 return;
             }
@@ -363,6 +421,7 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
                     state,
                     events,
                     &mut any_performed,
+                    waiting,
                 ),
                 Some(crate::game::planechase::PlaneswalkResolution::Deferred)
             )
@@ -375,7 +434,12 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
         // abandoned (turned face down, put on the bottom of the scheme deck).
         // Gated on an Archenemy game.
         if state.archenemy.is_some() {
-            crate::game::archenemy::check_scheme_abandon_sba(state, events, &mut any_performed);
+            crate::game::archenemy::check_scheme_abandon_sba(
+                state,
+                events,
+                &mut any_performed,
+                waiting,
+            );
         }
 
         // CR 603.10a + CR 704.3: every SBA performed in this iteration is one
@@ -580,10 +644,10 @@ fn ascend_status_in(
 /// mirrors the `player_has_cant_gain_life` / `player_has_cant_lose_life`
 /// teammate fold in `static_abilities.rs` (CR 810.9g/810.9h siblings).
 ///
-/// `pub(crate)` so the live loop-shortcut firewall
-/// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) can reuse the same
+/// Public so the live loop-shortcut firewall
+/// (`analysis::loop_check::live_mandatory_loop_winner`, CR 101.2) and the AI can reuse the same
 /// SBA-layer predicate rather than re-deriving the can't-lose check.
-pub(crate) fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
+pub fn player_has_cant_lose(state: &GameState, player_id: PlayerId) -> bool {
     cant_lose_active_for(state, player_id)
         || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
@@ -650,15 +714,14 @@ pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
     }
 
     let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 810.8d: 10+ individually, or 15+ shared by the team.
-        // Archenemy Commander takes the individual branch for every seat —
-        // CR 904.13c keeps poison unshared even though life is shared.
+        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
+        // (ten by default), or fifteen shared by the team. Archenemy Commander
+        // takes the individual branch for every seat — CR 904.13c keeps poison
+        // unshared even though life is shared. `players::poison_loss_measure`
+        // is the shared authority (twin of `collect_poison_losers`).
         !player.is_eliminated
-            && if super::topology::has_shared_poison(state, player.id) {
-                super::players::team_poison_total(state, player.id) >= 15
-            } else {
-                player.poison_counters >= 10
-            }
+            && super::players::poison_loss_measure(state, player)
+                .is_some_and(PoisonLossMeasure::is_lethal)
             && !player_has_cant_lose(state, player.id)
     });
     if poison_loss {
@@ -750,6 +813,11 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         .players
         .iter()
         .filter(|p| !p.is_eliminated && !p.is_phased_out())
+        // Horde Magic (casual variant): the Horde seat has no life total, so it
+        // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
+        // the life-loss→mill redirect (its life never drops), but this makes
+        // "no life total" a hard guarantee independent of the redirect.
+        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
         .filter(|p| super::players::team_life_total(state, p.id) <= 0)
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -768,8 +836,9 @@ fn collect_draw_from_empty_losers(state: &GameState) -> Vec<PlayerId> {
         .collect()
 }
 
-/// CR 704.5c + CR 810.8d: A player with ten or more poison counters loses the
-/// game; in a team-based format, a team with fifteen or more shared poison
+/// CR 704.5c + CR 704.6b / CR 810.8d + CR 904.13c: A player with the format's
+/// individual threshold (ten by default) or more poison counters loses the
+/// game; where poison is shared, a team with fifteen or more shared poison
 /// counters loses instead (CR 810.10/810.10a: poison counters are shared by
 /// the team and checked via `team_poison_total`). Pure collector (see
 /// `collect_life_losers`).
@@ -779,13 +848,10 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above:
+            // Twin of the `has_pending_player_loss_sba` poison branch above,
+            // through the same authority, `players::poison_loss_measure`:
             // Archenemy Commander takes the individual branch (CR 904.13c).
-            if super::topology::has_shared_poison(state, p.id) {
-                super::players::team_poison_total(state, p.id) >= 15
-            } else {
-                p.poison_counters >= 10
-            }
+            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -1944,13 +2010,13 @@ fn check_zero_loyalty(
     zones::mark_simultaneous_departures(events, &zones::departed_subset(state, &performed_ids));
 }
 
-/// CR 704.5v + CR 603.3 + CR 704.3: is `source` the source of an ability that
-/// has triggered but not yet left the stack (on the stack or in the caller's
-/// waiting batch)? SBAs are performed before waiting triggered abilities are
-/// put on the stack, so an ability that has triggered may still be waiting in
-/// the batch the caller is about to place (CR 510.3a combat damage). Only the
-/// stack and that batch are consulted.
-fn is_source_of_ability_not_yet_left_stack(
+/// CR 704.5s + CR 704.5v + CR 704.6f + CR 603.3 + CR 704.3: is `source` the
+/// source of an ability that has triggered but not yet left the stack? SBAs are
+/// performed before waiting triggered abilities are put on the stack, so an
+/// ability that has triggered may still be waiting in the batch the caller is
+/// about to place (CR 510.3a combat damage) or parked in the deferred queue.
+/// The stack, that batch and the queue are consulted.
+pub(crate) fn is_source_of_ability_not_yet_left_stack(
     state: &GameState,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     source: ObjectId,
@@ -1963,7 +2029,11 @@ fn is_source_of_ability_not_yet_left_stack(
             StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == source
         )
     });
-    ability_on_stack || waiting.iter().any(|ctx| ctx.pending.source_id == source)
+    ability_on_stack
+        || waiting
+            .iter()
+            .chain(state.deferred_triggers.iter())
+            .any(|ctx| ctx.pending.source_id == source)
 }
 
 /// CR 704.5v + CR 704.5w: a battle with defense 0 is put into its owner's
@@ -2294,16 +2364,15 @@ fn check_battle_protector(
 }
 
 /// CR 704.5s + CR 714.4: Sacrifice Sagas that have reached their final chapter,
-/// unless a chapter ability from that Saga is still on the stack or a lore counter
-/// was just added (meaning process_triggers hasn't placed the chapter trigger yet).
+/// unless an ability of this Saga has triggered but not yet left the stack, or a
+/// lore counter was just added (its chapter trigger is not collected yet).
 fn check_saga_sacrifice(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
-    use crate::types::game_state::StackEntryKind;
-
     let to_sacrifice: Vec<_> = battlefield_snapshot
         .iter()
         .copied()
@@ -2321,14 +2390,9 @@ fn check_saga_sacrifice(
                 return false;
             }
 
-            // CR 714.4: Don't sacrifice while a chapter trigger from this Saga is on the stack.
-            let chapter_on_stack = state.stack.iter().any(|entry| {
-                matches!(
-                    &entry.kind,
-                    StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == *id
-                )
-            });
-            if chapter_on_stack {
+            // CR 714.4: not while an ability of this Saga has triggered but not
+            // yet left the stack.
+            if is_source_of_ability_not_yet_left_stack(state, waiting, *id) {
                 return false;
             }
 
@@ -2434,8 +2498,17 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
         .objects
         .iter()
         .filter(|(_, obj)| {
-            zones::token_is_outside_battlefield_and_stack(state, obj)
-                || zones::copy_of_card_outside_battlefield_and_stack(state, obj)
+            // Horde-deck-token exemption (casual Horde Magic variant): a token
+            // that IS a Horde deck card lives outside the battlefield by
+            // design (library placeholders, the Boss pile, the command zone,
+            // boss-deck graveyard instances), so it is NOT swept here. The
+            // same flag carves these tokens out of the CR 111.8 movement
+            // freeze (`zones::token_cannot_change_zones`) — boss-deck loops
+            // move them by design, while classic decks never move theirs.
+            // Not a CR-sanctioned rule; Horde Magic is casual.
+            !obj.is_horde_deck_token
+                && (zones::token_is_outside_battlefield_and_stack(state, obj)
+                    || zones::copy_of_card_outside_battlefield_and_stack(state, obj))
         })
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
@@ -2793,6 +2866,37 @@ mod tests {
         );
     }
 
+    /// CR 704.5v: a Siege whose own trigger is parked in the deferred queue
+    /// has triggered but not yet left the stack.
+    #[test]
+    fn zero_defense_siege_survives_its_own_queued_trigger() {
+        for queued in [true, false] {
+            let mut state = setup();
+            let controller = PlayerId(0);
+            let id = create_object(
+                &mut state,
+                CardId(9005),
+                controller,
+                "Test Siege".to_string(),
+                Zone::Battlefield,
+            );
+            make_zero_defense_battle(&mut state, id, PlayerId(1), true);
+            if queued {
+                state.deferred_triggers = waiting_batch_for(id, controller);
+            }
+
+            let mut events = Vec::new();
+            check_state_based_actions(&mut state, &mut events);
+
+            let expected = if queued {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            };
+            assert_eq!(state.objects[&id].zone, expected, "queued={queued}");
+        }
+    }
+
     /// CR 704.4 + CR 903.9a: the player-loss safety net runs SBAs while a
     /// resolution is paused on an opponent's prompt (Fandaniel, Telophoroi
     /// Ascian's "each opponent may sacrifice a nontoken creature" fan-out with
@@ -3019,6 +3123,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -3149,6 +3255,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     destination: Zone::Exile,
                     origin: None,
                     target: TargetFilter::SelfRef,
@@ -4626,6 +4734,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -4715,6 +4824,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::SelfRef,
@@ -4804,6 +4915,7 @@ mod tests {
             sacrifice_provenance: None,
             candidates: Vec::new(),
             search_found_candidates: Vec::new(),
+            ordering_peers: Vec::new(),
             depth: 0,
             is_optional: false,
             choice_player: None,
@@ -5423,6 +5535,30 @@ mod tests {
         assert!(state.battlefield.contains(&id));
     }
 
+    /// CR 704.5s + CR 714.4: a chapter ability parked in the deferred queue has
+    /// triggered but not yet left the stack, so its Saga is not sacrificed.
+    #[test]
+    fn saga_not_sacrificed_with_queued_chapter_trigger() {
+        for queued in [true, false] {
+            let mut state = setup();
+            let id = create_saga(&mut state, CardId(1), PlayerId(0), "Saga", 3);
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Lore, 3);
+            if queued {
+                state.deferred_triggers = waiting_batch_for(id, PlayerId(0));
+            }
+
+            let mut events = Vec::new();
+            check_state_based_actions(&mut state, &mut events);
+
+            assert_eq!(state.battlefield.contains(&id), queued, "queued={queued}");
+        }
+    }
+
     #[test]
     fn lethal_damage_prevented_by_regen_shield() {
         use crate::types::ability::{ReplacementDefinition, TargetFilter};
@@ -5505,6 +5641,55 @@ mod tests {
         check_state_based_actions(&mut state, &mut events);
 
         assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    }
+
+    /// CR 104.1 + CR 704.3: a game that has already ended never runs state-based
+    /// actions. Regression for #10451: the winning resolution draws from an empty
+    /// library (setting the CR 704.5b flag) and then wins the game; the terminal
+    /// player-loss safety net must not turn that flag into a `PlayerLost` for the
+    /// winner after `GameOver` is recorded.
+    #[test]
+    fn sba_terminal_player_loss_does_not_run_after_the_game_ended() {
+        let mut state = setup();
+        state.players[0].drew_from_empty_library = true;
+        let mut events = Vec::new();
+
+        // The win resolves while the draw flag is set: the opponent leaves and
+        // the CR 104.1 result is recorded.
+        crate::game::elimination::eliminate_players_simultaneously(
+            &mut state,
+            &[PlayerId(1)],
+            &mut events,
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::GameOver {
+                    winner: Some(PlayerId(0))
+                }
+            ),
+            "the winner is recorded before the terminal SBA net runs, got {:?}",
+            state.waiting_for
+        );
+        assert!(state.game_end.is_some());
+        let game_over_at = events
+            .iter()
+            .position(|event| matches!(event, GameEvent::GameOver { .. }))
+            .expect("the win emitted GameOver");
+
+        // The terminal player-loss safety net runs after the winning action.
+        check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.players[0].is_eliminated,
+            "the winner must not be eliminated by the empty-library flag its own win left behind"
+        );
+        assert!(
+            !events[game_over_at..].iter().any(
+                |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == PlayerId(0))
+            ),
+            "no PlayerLost for the winner after GameOver"
+        );
     }
 
     // --- CR 704.5j: Legend rule choice tests ---
@@ -7636,6 +7821,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         destination: Zone::Battlefield,
                         origin: None,
                         target: TargetFilter::SelfRef,
