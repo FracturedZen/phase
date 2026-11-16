@@ -642,9 +642,7 @@ fn carry_trigger_provenance(
     if let Some(origin) = &pending.may_trigger_origin {
         chosen.set_may_trigger_origin_recursive(origin.clone());
     }
-    if let Some(player) = pending.scoped_player {
-        chosen.set_scoped_player_recursive(player);
-    }
+    chosen.carry_player_binding_recursive(pending);
     if let Some(x) = pending.chosen_x {
         chosen.set_chosen_x_recursive(x);
     }
@@ -754,7 +752,6 @@ fn handle_triggered_mode_choice(
     };
     let target_constraints = target_constraints_from_modal(&modal);
 
-    let mut resolved = resolved;
     // CR 603.3c + CR 603.3d: the chosen modes declare only the targets chosen
     // for them.
     resolved.start_target_record_recursive();

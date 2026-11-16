@@ -8,8 +8,7 @@
 //!
 //! A candidate is **unconfirmed by construction** — it ignores targeting legality, timing
 //! windows, "may" choices, and replacement interactions — so it is a
-//! [`CandidateCycle`], deliberately **never** a [`crate::analysis::LoopCertificate`]
-//! (whose soundness invariant requires a driven board-equality proof).
+//! [`CandidateCycle`], deliberately **never** a [`crate::analysis::LoopCertificate`].
 //!
 //! Theory reference (CS, not CR): Tarjan SCC for cycle finding.
 //!
@@ -752,7 +751,28 @@ fn effect_projection(effect: &Effect) -> Projection {
             // CR 122.1: removing counters consumes the counter resource (negative).
             Some(ct) => {
                 let class = CounterClass::from_counter_type(ct);
-                let (a, _) = count_seed(count);
+                let a = match count {
+                    // "Remove all [kind] counters" carries the `Fixed{-1}` sentinel,
+                    // not an amount: it removes however many are there, so it is
+                    // recorded as one unit of consumption. Negating the sentinel
+                    // would record it as production.
+                    QuantityExpr::Fixed { value: -1 } => 1,
+                    // A printed amount removes that many.
+                    QuantityExpr::Fixed { value } => i64::from(*value),
+                    // A dynamic amount is unknown statically: it is recorded as
+                    // one unit of consumption (a consumption marks no axis
+                    // magnitude).
+                    QuantityExpr::Ref { .. }
+                    | QuantityExpr::DivideRounded { .. }
+                    | QuantityExpr::Offset { .. }
+                    | QuantityExpr::ClampMin { .. }
+                    | QuantityExpr::Multiply { .. }
+                    | QuantityExpr::Sum { .. }
+                    | QuantityExpr::UpTo { .. }
+                    | QuantityExpr::Power { .. }
+                    | QuantityExpr::Difference { .. }
+                    | QuantityExpr::Max { .. } => 1,
+                };
                 b.add_counter(
                     class,
                     default_object_class(class),
@@ -955,6 +975,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         // — a multi-card or counted conjure produces that many ETBs, and a
         // variable/X count is marked Unbounded. Any other destination has no
         // repeatable axis ⇒ Unmodeled.
+        // CR 707.13: a card copy created from a name never enters the
+        // battlefield directly (it is created to be cast), so it has no modeled
+        // axis here.
+        Effect::CreateCardCopyByName { .. } => return Projection::Unmodeled,
         Effect::Conjure {
             cards, destination, ..
         } => {
@@ -1085,6 +1109,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::TakeTheInitiative
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -1175,6 +1200,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::CopyTokenOf { .. }
         | Effect::CreateTokenCopyFromPool { .. }
         | Effect::Investigate
+        | Effect::HordePlayCard { .. } => return Projection::Unmodeled,
         | Effect::Unimplemented { .. } => return Projection::Unmodeled,
     }
     b.finish()
@@ -1185,7 +1211,7 @@ fn effect_projection(effect: &Effect) -> Projection {
 // ---------------------------------------------------------------------------
 
 /// MEDIUM-1 compile-time drift gate: an exhaustive **no-wildcard** match over all
-/// 169 [`TriggerMode`] variants. A trigger node *consumes* (requires) the event
+/// 170 [`TriggerMode`] variants. A trigger node *consumes* (requires) the event
 /// axis its mode fires on, so a producer of that axis edges into it. Takes the
 /// whole [`TriggerDefinition`] (not the bare mode) so the shared
 /// `TriggerMode::ChangesZone` encoding can disambiguate ETB vs dies vs LTB from
@@ -1264,7 +1290,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         // CR 500.7: a turn-begin trigger fires once per turn.
         TriggerMode::TurnBegin => Some(AxisKey::ExtraTurn),
         // ----- remaining modes with no modeled producer ⇒ inert (None) -----
-        TriggerMode::ChangesController
+        TriggerMode::ChangesController { .. }
         | TriggerMode::DamageReceived
         | TriggerMode::DamagePreventedOnce
         | TriggerMode::ExcessDamage
@@ -1317,6 +1343,8 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::LoyaltyAbilityActivated
         | TriggerMode::Evolve
         | TriggerMode::Evolved
+        | TriggerMode::GotchaSaid
+        | TriggerMode::Touched
         | TriggerMode::Explored
         | TriggerMode::Exploited
         | TriggerMode::Enlisted
@@ -1372,6 +1400,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::SearchedLibrary
         | TriggerMode::SeekAll
         | TriggerMode::SetInMotion
+        | TriggerMode::AsSetInMotion
         | TriggerMode::Specializes
         | TriggerMode::Stationed
         | TriggerMode::Trains
@@ -1490,6 +1519,10 @@ fn collect_effects_in_effect<'a>(
             ..
         } => collect_effects(d, out),
         Effect::CreateDelayedTrigger { effect, .. } => collect_effects(effect, out),
+        // CR 614.6: a draw replacement's substitute is a nested definition.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            collect_effects(replacement_effect, out)
+        }
         Effect::CreateBoon { trigger, .. } => {
             if let Some(execute) = trigger.execute.as_deref() {
                 collect_effects(execute, out)
@@ -1517,13 +1550,12 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(d, out);
             }
         }
-        // CR 614.1a: the heterogeneous substitute Effect installed by a draw /
+        // CR 614.1a: the heterogeneous substitute Effect installed by a
         // planeswalk replacement rides in `replacement_effect: Box<Effect>` (not an
         // `AbilityDefinition` payload), so it is invisible to the sibling recursions
         // above. Descend it too — otherwise a randomness effect nested inside a
         // replacement install escapes every `collect_effects` consumer.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             collect_effects_in_effect(replacement_effect, None, out);
         }
         _ => {}
@@ -1706,6 +1738,8 @@ fn fold_cost(acc: &mut NodeAcc, cost: &AbilityCost) {
     match cost {
         // CR 106.1: mana costs ⇒ requires Mana (R3-MANA-COLLAPSE).
         AbilityCost::Mana { cost } => sink_mana_cost(acc, cost),
+        // Un-card: saying a phrase consumes and produces nothing on any axis.
+        AbilityCost::SayPhrase { .. } => {}
         AbilityCost::ManaDynamic { .. } => acc.net.mana[COLORLESS_INDEX] -= 1,
         AbilityCost::Waterbend { cost } => sink_mana_cost(acc, cost),
         AbilityCost::NinjutsuFamily { mana_cost, .. } => sink_mana_cost(acc, mana_cost),
@@ -1856,8 +1890,7 @@ where
 /// branch pays, turning a real loop into a false negative (the candidate that a
 /// payable branch closes would be suppressed).
 ///
-/// The envelope maximizes recall (Engine A is the sound confirmer that filters
-/// any false positive that survives here):
+/// The envelope maximizes recall:
 /// - `produces` / `unbounded_production` = UNION (any branch's production is choosable)
 /// - `requires` = INTERSECTION (only the requirements unavoidable in EVERY branch)
 /// - `net` = per-axis MAX with missing-component = 0 (the most loop-favorable branch per axis)
@@ -2253,9 +2286,8 @@ pub fn build_ability_graph(nodes: Vec<AbilityNode>) -> AbilityGraph {
 // Candidate output + SCC
 // ---------------------------------------------------------------------------
 
-/// A static, **unconfirmed** candidate cycle. Deliberately NOT a
-/// [`crate::analysis::LoopCertificate`] — it has no driven board-equality proof,
-/// so naming it a certificate would violate that type's soundness invariant.
+/// A static, **unconfirmed** candidate cycle: no board was driven for it, so it is
+/// deliberately NOT a [`crate::analysis::LoopCertificate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateCycle {
     /// The definitions whose nodes form the SCC.
@@ -2520,11 +2552,80 @@ mod tests {
             counter_type: Some(CounterType::Plus1Plus1),
             count: fixed(3),
             target: default_target_filter_any(),
+            scope: crate::types::ability::EffectScope::Single,
         };
         let Projection::Modeled { vector, .. } = effect_projection(&remove) else {
             panic!("modeled")
         };
         assert_eq!(vector.counters.get(&P1P1), Some(&-3));
+    }
+
+    /// CR 122.1: "remove all fate counters from all permanents" (Oblivion Stone)
+    /// consumes fate counters. The `Fixed{-1}` "remove all" sentinel is one unit
+    /// of consumption, never production; a finite mass removal keeps its own
+    /// negative amount, and a dynamic count stays one unit of consumption.
+    #[test]
+    fn remove_all_counters_sentinel_is_consumption() {
+        use crate::types::ability::EffectScope;
+        let fate = CounterType::Generic("fate".to_string());
+        let removal = |counter_type: CounterType, count: QuantityExpr, scope: EffectScope| {
+            Effect::RemoveCounter {
+                counter_type: Some(counter_type),
+                count,
+                target: default_target_filter_any(),
+                scope,
+            }
+        };
+        let fate_key = (
+            CounterClass::from_counter_type(&fate),
+            default_object_class(CounterClass::from_counter_type(&fate)),
+        );
+        for scope in [EffectScope::All, EffectScope::Single] {
+            let Projection::Modeled {
+                vector, produces, ..
+            } = effect_projection(&removal(fate.clone(), fixed(-1), scope))
+            else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&fate_key), Some(&-1), "{scope:?}");
+            assert!(
+                !produces.contains(&AxisKey::Counter(fate_key.0, fate_key.1)),
+                "{scope:?}: removing every fate counter produces none: {produces:?}"
+            );
+        }
+
+        // "Remove two loyalty counters from each planeswalker" (Pestilent Haze).
+        let Projection::Modeled { vector, .. } =
+            effect_projection(&removal(CounterType::Loyalty, fixed(2), EffectScope::All))
+        else {
+            panic!("modeled")
+        };
+        let loyalty_key = (CounterClass::Loyalty, ObjectClass::Planeswalker);
+        assert_eq!(vector.counters.get(&loyalty_key), Some(&-2));
+
+        // A dynamic count stays one unit of consumption.
+        let dynamic = || QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::EventContextAmount,
+        };
+        for count in [
+            dynamic(),
+            QuantityExpr::UpTo {
+                max: Box::new(dynamic()),
+            },
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(dynamic()),
+            },
+        ] {
+            let Projection::Modeled { vector, .. } = effect_projection(&removal(
+                CounterType::Plus1Plus1,
+                count.clone(),
+                EffectScope::Single,
+            )) else {
+                panic!("modeled")
+            };
+            assert_eq!(vector.counters.get(&P1P1), Some(&-1), "{count:?}");
+        }
     }
 
     #[test]
@@ -2930,6 +3031,7 @@ mod tests {
             count,
             target: TargetFilter::Player, // not Controller/SelfRef ⇒ OPPONENT
             destination: Zone::Graveyard,
+            position: crate::types::ability::LibraryPosition::Top,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {
@@ -2957,6 +3059,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -2971,6 +3074,8 @@ mod tests {
     }
     fn change_zone(origin: Option<Zone>, destination: Zone) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target: default_target_filter_any(),
@@ -3092,6 +3197,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: fixed(3),
                 extra_keywords: Vec::new(),
