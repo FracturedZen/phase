@@ -118,7 +118,7 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
 /// dynamic emit a single `None` so the caller routes them to `unclassified`.
 /// `StateCondition` and `Unknown(_)` return an EMPTY result *and* the caller
 /// must NOT push such objects to `unclassified` — state triggers run through
-/// the dedicated `check_state_triggers` path, never event-driven dispatch.
+/// the dedicated `collect_state_triggers` path, never event-driven dispatch.
 ///
 /// Returns `(keys, route_to_unclassified)`:
 /// - non-empty keys → object goes into each bucket
@@ -178,6 +178,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // permanents are rare and the dedicated event keeps the consult cost
         // bounded.
         TriggerMode::Evolved => return (keys, true),
+        // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
+        TriggerMode::GotchaSaid => return (keys, true),
+        // Un-card touch: consumes the dedicated `GameEvent::ObjectTouched`; rare, so unclassified.
+        TriggerMode::Touched => return (keys, true),
         TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
@@ -467,10 +471,14 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::ElementalBend => push(TriggerEventKey::Bending),
 
         // CR 603.8: state triggers are processed by the dedicated
-        // `check_state_triggers` path, NOT by event-driven dispatch. The
+        // `collect_state_triggers` path, NOT by event-driven dispatch. The
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
+        // CR 904.9: resolved by the scan hook
+        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // through event-driven dispatch. Neither a key nor unclassified.
+        TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
         TriggerMode::Unknown(_) => return (SmallVec::new(), false),
     }
@@ -496,11 +504,18 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::ResolutionHalted { .. }
+        | GameEvent::ShortcutRepetition { .. }
         // Contests are adapted physical minigames with no triggered-ability keys.
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
+        // CR 805.4d: a fanned occurrence indexes under its phase like the
+        // production event (synthetic occurrences never enter the batch, but
+        // the key must exist if one is ever indexed).
+        GameEvent::PhaseChangedForPlayer { phase, .. } => {
+            push(TriggerEventKey::BeginningOfPhase(*phase))
+        }
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -629,15 +644,24 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         // in the `unclassified` bucket. No key of its own.
         GameEvent::SagaChapterAbilityResolved { .. } => {}
         GameEvent::Evolved { .. } => {}
+        GameEvent::UnTellPerformed { .. }
+        | GameEvent::PhraseSaid { .. }
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
             push(TriggerEventKey::TokenCreated);
         }
+        // CR 111.1 + CR 707.13: a copy of a card created from a name is not a
+        // token, so it must not fire "whenever a token is created".
+        GameEvent::CardCopyCreated { .. } => {}
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
-        GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        GameEvent::Attached { .. } | GameEvent::Unattached { .. } => {
+            push(TriggerEventKey::AttachmentChanged)
+        }
         // CR 116.2c + CR 116.1: no printed trigger condition matches "a
         // continuous effect ended". The special action doesn't use the stack, and
         // any consequential board change (a Licid reverting to a creature and
@@ -649,7 +673,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
         // "whenever ~ becomes blocked" triggers are indexed for it.
-        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlocked { .. } => push(TriggerEventKey::Blocks),
         GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
@@ -753,6 +777,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::PowerToughnessChanged { .. } => {}
         GameEvent::CascadeMissed { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::CardPredicateGuessMade { .. }
         | GameEvent::DebugActionUsed { .. }
         | GameEvent::DebugPermissionGranted { .. }
@@ -771,11 +796,6 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 /// matcher in `trigger_matchers.rs` emit keys; all others are no-ops.
 fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey)) {
     match kind {
-        // Production EffectResolved matchers — see `trigger_matchers.rs` lines
-        // 1896, 2072, 2126, 2172, 2198, 2234, 2261, 2313, 2338.
-        EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip => {
-            push(TriggerEventKey::AttachmentChanged);
-        }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
         EffectKind::GainControl | EffectKind::GainControlAll => {
             push(TriggerEventKey::ChangesController)
@@ -795,7 +815,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::StartYourEngines
+        EffectKind::Attach
+        | EffectKind::AttachAll
+        | EffectKind::Equip
+        | EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
@@ -928,6 +951,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::TakeTheInitiative
         | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
+        | EffectKind::AbandonScheme
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
         // EffectResolved-dispatching matcher. No-op here.
@@ -1000,16 +1024,18 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
-        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // off the `AttackerBecameBlocked` GameEvent (see the event→key
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure
+        | EffectKind::CreateCardCopyByName
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook
         | EffectKind::ChooseOneOf
         | EffectKind::ChooseCounterAdjustment
         | EffectKind::Specialize
+        | EffectKind::HordePlayCard
         | EffectKind::Unimplemented
         | EffectKind::Crew
         | EffectKind::Station

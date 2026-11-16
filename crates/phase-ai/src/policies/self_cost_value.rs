@@ -834,7 +834,10 @@ mod tests {
                 death_trigger_names: death_triggers,
                 ..Default::default()
             },
-            bracket_tier: bracket,
+            effective_bracket_tier: engine::game::bracket_estimate::effective_tier(
+                Some(bracket),
+                None,
+            ),
             ..DeckFeatures::default()
         }
     }
@@ -2686,6 +2689,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
