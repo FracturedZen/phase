@@ -32324,7 +32324,9 @@ fn generic_effect_is_player_continuous_transparent(effect: &Effect) -> bool {
     };
     !static_abilities.is_empty()
         && static_abilities.iter().all(|sd| {
-            sd.affected.as_ref().is_some_and(filter_is_player_continuous_scope)
+            sd.affected
+                .as_ref()
+                .is_some_and(filter_is_player_continuous_scope)
         })
 }
 

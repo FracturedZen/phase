@@ -39748,17 +39748,22 @@ fn parse_teferis_reproach_end_to_end() {
         ..
     } = &*protection.effect
     else {
-        panic!("expected protection GenericEffect, got {:?}", protection.effect);
+        panic!(
+            "expected protection GenericEffect, got {:?}",
+            protection.effect
+        );
     };
     assert!(
         protection_statics.iter().any(|s| {
             s.affected == Some(TargetFilter::ParentTargetController)
-                && s.modifications.iter().any(|m| matches!(
-                    m,
-                    ContinuousModification::AddKeyword {
-                        keyword: crate::types::keywords::Keyword::Protection(_)
-                    }
-                ))
+                && s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: crate::types::keywords::Keyword::Protection(_)
+                        }
+                    )
+                })
         }),
         "expected ParentTargetController protection-from-everything, got {protection_statics:?}"
     );
@@ -39772,7 +39777,10 @@ fn parse_teferis_reproach_end_to_end() {
         ..
     } = &*life_lock.effect
     else {
-        panic!("expected life-lock GenericEffect, got {:?}", life_lock.effect);
+        panic!(
+            "expected life-lock GenericEffect, got {:?}",
+            life_lock.effect
+        );
     };
     let lock_modes: Vec<_> = lock_statics.iter().map(|s| s.mode.clone()).collect();
     assert!(
@@ -39789,7 +39797,9 @@ fn parse_teferis_reproach_end_to_end() {
         Effect::PhaseOut { target, .. } => match target {
             TargetFilter::Typed(tf) => {
                 assert!(
-                    tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Permanent)),
+                    tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Permanent)),
                     "phase-out should include Permanent: {tf:?}"
                 );
                 assert!(

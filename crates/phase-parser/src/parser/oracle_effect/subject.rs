@@ -7634,9 +7634,7 @@ fn life_lock_scope_from_possessor(possessor_lower: &str) -> TargetFilter {
     // TargetOpponent so a Choose-target-opponent antecedent stays opponent-
     // scoped; TargetPlayer covers "Choose target player" antecedents via the
     // same Target* family at resolution.
-    if possessor_lower == "their"
-        || possessor_lower.starts_with("that player")
-    {
+    if possessor_lower == "their" || possessor_lower.starts_with("that player") {
         return TargetFilter::Typed(
             TypedFilter::default().controller(ControllerRef::TargetOpponent),
         );
