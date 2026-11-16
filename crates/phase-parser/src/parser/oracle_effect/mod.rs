@@ -56899,15 +56899,12 @@ pub(crate) fn parse_unless_mana_cost_tail(
     }
 }
 
-
 /// CR 119.4: the "and N life" conjugant that follows mana symbols in a compound
 /// unless payment (`pays {1} and 1 life`). Returns `None` when the tail is not
 /// exactly that conjugant (modulo leading whitespace and a trailing period).
 fn parse_unless_and_life_conjugant(after_cost: &str) -> Option<QuantityExpr> {
     let trimmed = after_cost.trim_start();
-    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ")
-        .parse(trimmed)
-        .ok()?;
+    let (after_and, _) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed).ok()?;
     let life_text = after_and.trim_end().trim_end_matches('.').trim_end();
     let (rest, n) = nom_primitives::parse_number(life_text).ok()?;
     let rest = rest.trim_start();
