@@ -15,6 +15,7 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { flashCompletedScry, flashInGameRolls } from "./diceContest";
+import { flashUnActionEvents } from "./unActions";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
@@ -144,7 +145,7 @@ export type BoundGameSession = {
 
 type GameSessionPreferenceAction = Extract<
   GameAction,
-  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" } | { type: "UnAction" }
 >;
 
 /** Module-level mutex — replaces useRef from the hook version. */
@@ -309,6 +310,12 @@ function releaseDispatchMutex(generation: number): void {
   }
 }
 
+/** Actions that report a physical event (an Un-card touch) rather than answer
+ *  a prompt: every submission is a separate instance. */
+function isRepeatableEvent(action: GameAction): boolean {
+  return action.type === "UnAction" && action.data.action.type === "TouchObject";
+}
+
 /** Structural equality for GameAction — action objects are small plain JSON. */
 function actionsEqual(a: GameAction, b: GameAction): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
@@ -360,6 +367,20 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
   ) {
+    return true;
+  }
+  if (next.action.type === "UnAction") {
+    // CR 400.7: an Un-card touch must target the object's exact live incarnation.
+    // A delayed touch queued across a prompt change (such as during Cloudshift)
+    // must not trigger a returned permanent that is now a new object.
+    if (next.action.data.action.type === "TouchObject") {
+      const target = next.action.data.action.data.target;
+      const { gameState } = useGameStore.getState();
+      const touchable = gameState?.un_actions?.touchable;
+      return touchable?.some(
+        (t) => t.object_id === target.object_id && t.incarnation === target.incarnation,
+      ) ?? false;
+    }
     return true;
   }
   const { gameState, legalActions, waitingFor } = useGameStore.getState();
@@ -681,6 +702,7 @@ async function processAction(
   if (!skipPresentation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 6. Normalize events into animation steps
@@ -879,8 +901,12 @@ async function dispatchActionInternal(
 
   if (isAnimating) {
     // Same action + same actor + same prompt is a duplicate. A changed prompt
-    // is a new decision even when the payload is structurally identical.
+    // is a new decision even when the payload is structurally identical. An
+    // Un-card touch is an event, not a decision: each one is its own instance,
+    // so a repeat while an earlier touch is in flight is never a duplicate.
+    const repeatable = isRepeatableEvent(submittedAction);
     if (
+      !repeatable &&
       inFlightLocalAction &&
       inFlightLocalAction.actor === actor &&
       sameBoundGameSession(inFlightLocalAction.session, session) &&
@@ -889,7 +915,7 @@ async function dispatchActionInternal(
     ) {
       return;
     }
-    for (const pending of pendingQueue) {
+    for (const pending of repeatable ? [] : pendingQueue) {
       if (
         pending.kind === "local" &&
         pending.actor === actor &&
@@ -1077,6 +1103,7 @@ async function processRemoteUpdateInner(
   if (!skipAnimation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 3. Normalize events into animation steps
