@@ -11937,6 +11937,7 @@ fn window_attr_support(attr: &QuantityRef) -> FeatureSupport {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::CountersPutThisResolution { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
