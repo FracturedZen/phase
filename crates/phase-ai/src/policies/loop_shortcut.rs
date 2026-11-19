@@ -38,30 +38,6 @@
 //! to the weight AND the temperature: `-inf * 0.1 == -inf * 0.35 == -inf`, and `exp(-inf / T) == 0`
 //! at every temperature, so no difficulty ever throws the game away.
 //!
-//! ## The three rulings the verdict encodes
-//!
-//! 1. `predicted_winner == Some(w), w != proposer` + `UntilLethal` ⇒ REJECT.
-//!    `loop_check::live_mandatory_loop_winner` partitions the living players into `fallers`
-//!    (per-cycle `delta.life < 0 || delta.poison > 0`) and `nonfallers`, and names a winner ONLY
-//!    when `nonfallers.len() == 1`. The two sets partition `living`, so a named winner other than
-//!    the proposer PROVES the proposer is a faller — a deterministic self-loss (CR 704.5a life /
-//!    CR 704.5c poison) with the other player crowned by CR 104.2a. The declare is WEAKLY
-//!    DOMINATED, not merely bad: the drive either reaches that crown, or aborts into
-//!    `until_lethal_fallback`, which restores exactly the board a decline would have left.
-//!    Loss-or-no-op — never a gain.
-//! 2. `predicted_winner == None` + `UntilLethal` ⇒ REJECT.
-//!    Only the object-growth offer carries `None`. The crown gate requires
-//!    `Some(winner) == proposal.predicted_winner`, false for every winner when the latch is `None`
-//!    ⇒ `until_lethal_fallback` full-rolls-back the board, clears `loop_detect_ring` +
-//!    `last_recast_context`, and hands priority back. Zero progress, the CR 732.2b APNAP window
-//!    burned, the re-offer signal destroyed — weakly dominated by declining.
-//! 3. `predicted_winner == Some(proposer)` + `UntilLethal` ⇒ positive (critical band).
-//!    The crown IS the win (CR 104.2a); the only other outcome is `until_lethal_fallback`, which
-//!    lands where declining lands. Dominant in outcome. (It is not costless: declaring opens the
-//!    CR 732.2b window, and an opponent's `Shorten` hands THEM a priority window they would not
-//!    get if the AI declined and kept priority. The crown is worth that risk; the phrase "no
-//!    downside" would not be true.)
-//!
 //! ## Why the `IterationCount` gate is load-bearing for the CLASS
 //!
 //! `materialize_fixed_shortcut` drives `n` whole cycles and COMMITS each atomically (an
@@ -73,11 +49,9 @@
 //! `Fixed` at the published SUGGESTION against a bounded offer — the count the offer's
 //! suggestion (`ShortcutDecisionSchema::suggestion`) drives, which is at or below the published
 //! capacity and is the same integer
-//! wherever a producer's two answers coincide — and offers `UntilLethal` only against an offer
-//! that measured no threshold; `Fixed(n)` is additionally reachable through the public
-//! `GameAction` surface. `handle_declare_shortcut` checks the declared count against the
-//! global cap and against the offer's own `deliverable_capacity`, and refuses `UntilLethal`
-//! against a bounded offer; what it
+//! wherever a producer's two answers coincide; `Fixed(n)` is additionally reachable through the
+//! public `GameAction` surface. `handle_declare_shortcut` checks the declared count against the
+//! global cap and against the offer's own `deliverable_capacity`; what it
 //! never checks is the declared shape against the schema's *suggested* `iteration_count` (the
 //! fail-closed pin firewall validates only `template` pins, and it runs against the RESOLVED
 //! template rather than the payload's: the handler shadows it with
@@ -87,11 +61,6 @@
 //! pin-validated by `declaration_conforms`. The firewall is skipped only when the payload carried
 //! none AND the offer published none — the arm that still refuses unless the proposer controls
 //! the recorded loop period).
-//!
-//! The count gate is what keeps the three rulings off the AI's own bounded candidate. Every offer
-//! the AI answers with `Fixed` is a bounded one, and every production mint of a bounded offer
-//! latches `predicted_winner: None` — ruling 2's antecedent shape, which a count-blind reject would
-//! fire on.
 //!
 //! ## Why the verdict reads `proposer` from the state, never `ctx.ai_player`
 //!
@@ -104,9 +73,7 @@
 
 use engine::analysis::decision_template::{DecisionPoint, DecisionTemplate, IterationCount};
 use engine::analysis::loop_check::LoopCertificate;
-use engine::analysis::resource::{
-    AnnouncedLead, ChargeBound, PeriodSignature, PeriodicDelta, ResourceAxis,
-};
+use engine::analysis::resource::{AnnouncedLead, ChargeBound, PeriodSignature, ResourceAxis};
 use engine::game::period_confirm::{ConfirmedPeriod, PeriodPerformance};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -118,6 +85,8 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 
 pub struct LoopShortcutPolicy;
+
+const DRAW_PROPOSAL_PREFERENCE: f64 = 1.0;
 
 impl TacticalPolicy for LoopShortcutPolicy {
     fn id(&self) -> PolicyId {
@@ -163,7 +132,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             schema,
             certificate,
             declaration,
-            road: _,
+            counted_take: _,
             period,
         } = &ctx.state.waiting_for
         else {
@@ -171,48 +140,25 @@ impl TacticalPolicy for LoopShortcutPolicy {
         };
 
         match (predicted_winner, count) {
-            // CR 704.5a / CR 704.5c + CR 104.2a: the offer's winner is somebody else. The
-            // faller/non-faller partition in `loop_check::live_mandatory_loop_winner` is total over
-            // the living players, so a named winner != proposer PROVES the proposer's per-cycle
-            // life/poison delta is a loss. Declaring `UntilLethal` runs that loop to the SBA and
-            // crowns the other player. WEAKLY DOMINATED: the alternative branch is
-            // `until_lethal_fallback` (a rollback to exactly where a decline lands), so the
-            // outcome set is {self-loss, no-op} — never a gain.
-            (Some(winner), IterationCount::UntilLethal) if winner != proposer => {
-                PolicyVerdict::reject(
-                    PolicyReason::new("loop_shortcut_declare_hands_opponent_the_win")
-                        .with_fact("proposer", i64::from(proposer.0))
-                        .with_fact("predicted_winner", i64::from(winner.0)),
-                )
-            }
-
-            // CR 732.2a + CR 104.2a: the crown gate requires `Some(winner) == predicted_winner`, so
-            // an `UntilLethal` declare on an offer whose latched winner IS the proposer is the win.
-            // Worst case the gate refuses and `until_lethal_fallback` restores the pre-drive board.
-            // Game-deciding ⇒ critical band (`PolicyVerdict::score` auto-bands the config-routed
-            // value).
-            (Some(winner), IterationCount::UntilLethal) => PolicyVerdict::score(
-                ctx.penalties().loop_shortcut_winning_declare_bonus,
-                PolicyReason::new("loop_shortcut_declare_wins")
-                    .with_fact("winner", i64::from(winner.0)),
+            // CR 732.2b: an offer naming no winner is proposed as a draw, which every
+            // other player may still shorten.
+            (None, IterationCount::WithoutEnd) => PolicyVerdict::preference(
+                DRAW_PROPOSAL_PREFERENCE,
+                PolicyReason::new("loop_shortcut_declare_draw_without_end"),
             ),
 
-            // CR 732.2a: only the object-growth offer latches `None`. The crown gate can never
-            // match it, so `UntilLethal` always ends in `until_lethal_fallback`: full board
-            // rollback, `loop_detect_ring` + `last_recast_context` cleared, priority handed back.
-            // Zero progress AND the CR 732.2b response window spent — weakly dominated by
-            // declining.
-            (None, IterationCount::UntilLethal) => {
-                PolicyVerdict::reject(PolicyReason::new("loop_shortcut_untillethal_cannot_crown"))
-            }
+            // A proposal without end names no winner, so an offer naming one is not a draw offer.
+            (Some(_), IterationCount::WithoutEnd) => PolicyVerdict::reject(PolicyReason::new(
+                "loop_shortcut_without_end_names_a_winner",
+            )),
 
             // CR 732.2a: a ZERO-repetition declaration is representable, and the engine treats
             // it as legal — `a_zero_count_declaration_validates_over_an_empty_range_but_still_
             // checks_cardinality` in `crates/engine/tests/integration/loop_shortcut.rs` pins
             // exactly that — but it commits NO cycles while still spending the CR 732.2b
             // response window. That is the same weak-domination shape the over-bound arm below
-            // and the `(None, UntilLethal)` arm above reject: the outcome set is {no-op, minus a
-            // response window}, so declining weakly dominates it.
+            // rejects: the outcome set is {no-op, minus a response window}, so declining weakly
+            // dominates it.
             //
             // ⚠ ORDER IS LOAD-BEARING: this arm MUST precede the `!schema.is_bounded() => na()`
             // arm below. `Fixed(0)` matches that guard too, so with the arms the other way round
@@ -244,12 +190,9 @@ impl TacticalPolicy for LoopShortcutPolicy {
             //
             // NOTE (tripwire, still live for the unbounded branch): a `Fixed(n)` large enough
             // to cross lethal WOULD commit a `GameOver` — and against an offer whose name is
-            // RIGHT it still does. `materialize_fixed_shortcut`'s `CrossLethal` arm now crowns
-            // only the seat `proposal.predicted_winner` names (or any seat when it names
-            // nobody), so what lets such a declare through is no longer the absence of a filter
-            // but the offer's own prediction agreeing with the drive. Such a declare by a faller
-            // proposer is a committed self-loss, exactly what the `UntilLethal` arm above
-            // rejects, and this arm is still neutral on it. On a BOUNDED offer that hazard is
+            // RIGHT it still does. The drive crowns only the seat `proposal.predicted_winner` names
+            // (or any seat when it names nobody). Such a declare by a faller
+            // proposer is a committed self-loss, and this arm is still neutral on it. On a BOUNDED offer that hazard is
             // discharged by the `loop_shortcut_declare_eliminates_proposer` arm BELOW, which asks
             // `cycles_to_proposer_elimination` of the proposer alone. It is NOT discharged by
             // `PeriodicDelta::elimination_cascade`'s contract: that cascade admits the proposer's
@@ -257,19 +200,6 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // own fatal count and a capacity-valued `Fixed` — the AI's only bounded candidate — can
             // name it. That arm's remaining limit is stated where it sits, not assumed away here.
             //
-            // ⚠ AN EARLIER FORM OF THIS ARM ALSO RESTED ON A DRIVE THAT DID NOT HONOUR THE
-            // PUBLISHED BOUND, which is why the delimiter's history is kept here. At `c6d834040`
-            // `materialize_fixed_shortcut` had no cycle delimiter for the basis-B class, so the
-            // drive ran to the beat cap and `Fixed(1)` on a bounded 3p/4p drain eliminated the
-            // whole table — the arithmetic above described a bound the drive never honoured. Fix
-            // round 1 delimits a cycle by the published `PeriodicDelta::frames_per_period` and
-            // drops any cycle whose measured delta differs from the published one.
-            //
-            // RE-MEASURED after that fix, through the production accept path (declare + APNAP
-            // accepts) at `n` = 1, 3 and AT the offered bound:
-            //   bloodloop 3p (bound 16): n=1 [20,16,16]  n=3 [20,14,14]  n=16 [20,1,1]  elim 0
-            //   bloodloop 4p (bound 16): n=1/3/16 likewise, elim 0
-            //   dina 4p      (bound 30): n=1 [50,34,30,35] … n=30 [79,5,1,6]            elim 0
             // The engine-side regression row that keeps this honest is
             // `bounded_fixed_count_commits_exactly_n_periods`, which asserts zero eliminations
             // and `committed == n × published δ` on all three fixtures.
@@ -280,8 +210,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // crosses a CR 704.5a / CR 704.5c / CR 104.3c threshold inside the proposal, which
             // is a conditional action, so the engine hands it back fail-closed with ZERO
             // committed cycles while the CR 732.2b response window is spent. Weakly dominated
-            // by declining: the outcome set is {no-op minus a response window}. Same
-            // domination shape the `(None, UntilLethal)` arm above encodes.
+            // by declining: the outcome set is {no-op minus a response window}.
             (_, IterationCount::Fixed(n)) if *n > schema.deliverable_capacity => {
                 PolicyVerdict::reject(
                     PolicyReason::new("loop_shortcut_bounded_declare_over_bound")
@@ -297,21 +226,13 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // progress whose eliminations the cascade predicted. Never the proposer — the
             // `Some(fatal)` branch below is what refuses that. Game-deciding ⇒ critical band, via the
             // auto-banding `PolicyVerdict::score` (NEVER `preference`, whose `debug_assert!`
-            // band domain panics on this field's default). Both declare kinds route through
-            // the one reused config field on purpose: the winning arm above and this one are
-            // never both scoreable at a single node — a winning offer carries
-            // `predicted_winner: Some(..)` and an unnarrowed bound (so no `Fixed` candidate is
-            // generated), and a bounded offer carries `predicted_winner: None` (so the winning
-            // arm cannot be reached). With no ordering to distort, a second tuned field would
-            // buy nothing and cost the full `UNTUNED_POLICY_PENALTY_FIELDS` protocol.
+            // band domain panics on this field's default).
             // CR 704.5a / CR 704.5c / CR 104.3c: the offered bound is derived from EVERY living
             // seat, and `PeriodicDelta::elimination_cascade` deliberately lets the PROPOSER's
             // crossing bound it — CR 732.2a's shortcut proposer "need not be the player proposing
             // the shortcut" who benefits, so the producer is right not to gate on proposer
-            // benefit (engine `game/engine.rs`, `bounded_cycle_offer` doc). That makes it the
-            // DECIDING side's job, and nothing was doing it: a bounded offer always carries
-            // `predicted_winner: None`, so the "hands somebody else the win" arm above is
-            // structurally unreachable here, and the AI's only bounded candidate is `Fixed` at
+            // benefit. That makes it the
+            // DECIDING side's job, and nothing was doing it: the AI's only bounded candidate is `Fixed` at
             // the published SUGGESTION — a count the offer's suggestion drives, at or below
             // the published capacity, which the producer carries all the way to the binding
             // seat's own crossing. A self-mill period whose binding seat is the proposer
@@ -411,7 +332,9 @@ fn buys_only_mana_and_combats(
                 | ResourceAxis::EtbTriggers
                 | ResourceAxis::LtbTriggers
                 | ResourceAxis::SacTriggers
-                | ResourceAxis::Poison(_) => false,
+                | ResourceAxis::Poison(_)
+                // CR 107.14: energy stays after the step ends, unlike mana, so a count buys it.
+                | ResourceAxis::Energy(_) => false,
             })
     })
 }
@@ -429,12 +352,13 @@ fn buys_only_mana_and_combats(
 ///   when what the earlier repetitions NETTED plus the deepest DIP inside `k` reaches the life
 ///   total. A period that pays 1 and gains 1 therefore never kills a proposer above 1 life,
 ///   and one that pays 4 and gains 3 kills a 5-life proposer in its second repetition, after
-///   netting only 1. The walk itself is `PeriodicDelta::first_life_crossing`, the engine's own
-///   authority over both numbers, so this policy's survival question and the engine's bound are
-///   one reduction by construction rather than by comment. Measured against the net-only rate this replaced, the
-///   check only tightens: each repetition's net and dip are both at least what the period
-///   itself nets off the proposer, so every declare that rate refused is still refused.
-/// - **poison**, CR 704.5c — reaching **10 or more** is the threshold.
+///   netting only 1. The crossing is `PeriodicDelta::declared_seat_life_crossing`'s, the engine's
+///   own authority over both numbers and the reader the engine's bound asks for every living
+///   seat, so this policy's survival question and the engine's bound are one reduction by
+///   construction rather than by comment. Measured against the net-only rate this replaced, the
+///   check only tightens: each repetition's net and dip are both at least what the period itself
+///   nets off the proposer, so every declare that rate refused is still refused.
+/// - **poison**, CR 704.5c / CR 704.6b — reaching the configured poison-loss threshold.
 ///
 /// **LIBRARY IS DELIBERATELY EXCLUDED, and that is the non-obvious part of this function.**
 /// CR 121.4: "A player who attempts to draw a card from a library with no cards in it loses the
@@ -499,12 +423,14 @@ fn cycles_to_proposer_elimination(
         // repetition times the count can only make it decline, never declare a fatal count.
         PeriodSignature::OneRepetition(period) => period,
     };
-    let player = state.players.get(proposer.0 as usize)?;
 
     // CR 704.3 + CR 704.5a: the first repetition inside which the proposer can reach 0 or less
-    // life, off the engine's own authority — accumulated rather than divided, because a scheduled
-    // pin may name the proposer at some repetitions and another seat at the rest. The horizon is
-    // `declared`: the question is whether the proposer dies inside the count they would declare.
+    // life, off the engine's own authority. A scheduled pin may name the proposer at some
+    // repetitions and another seat at the rest, so `declared_seat_life_crossing` carries the life
+    // netted so far across each switch point and divides only inside a stretch whose charge does
+    // not change (a round robin of two or more is still stepped one repetition at a time). The
+    // horizon is `declared`: the question is whether the proposer dies inside the count they
+    // would declare.
     //
     // `ChargeBound::Ceiling`: this policy's refusal is a VETO, so its error must land on
     // refusing a declare the proposer could have survived rather than scoring one that kills
@@ -514,8 +440,8 @@ fn cycles_to_proposer_elimination(
     // disagreement.
     //
     // No announced lead: stating one would move which declarations this veto refuses.
-    let life_fatal = PeriodicDelta::first_life_crossing(
-        period.declared_seat_life_charges(
+    let life_fatal = period
+        .declared_seat_life_crossing(
             proposer,
             declaration,
             observed,
@@ -523,21 +449,15 @@ fn cycles_to_proposer_elimination(
             state,
             ChargeBound::Ceiling,
             AnnouncedLead::None,
-        ),
-        i64::from(player.life),
-        declared,
-    )
-    .map(i64::from);
+            declared,
+        )
+        .map(i64::from);
 
-    // CR 704.5c: `headroom / rate` rounded UP, the first whole cycle at which ten poison
-    // counters is met. Written long-hand rather than with `i64::div_ceil`, which is still
-    // unstable on this toolchain (`int_roundings`). Both operands are non-negative here —
-    // `headroom` is clamped and `rate` is guarded `> 0` — so the `+ rate - 1` form is exact,
-    // with no negative-operand truncation-toward-zero trap.
-    let poison_rate = period.delta.poison.get(&proposer).copied().unwrap_or(0);
-    let poison_fatal = (poison_rate > 0)
-        .then(|| ((10 - i64::from(player.poison_counters)).max(0) + poison_rate - 1) / poison_rate)
-        .filter(|fatal| *fatal <= i64::from(declared));
+    // CR 704.5c / CR 704.6b: the first repetition inside the declared count after which the
+    // proposer's poison pool reaches its threshold, off the engine's own per-repetition authority.
+    let poison_fatal = period
+        .first_poison_crossing(state, proposer, declared)
+        .map(i64::from);
 
     // No library term — see the CR 121.4 exclusion in this function's doc comment.
     life_fatal.into_iter().chain(poison_fatal).min()
@@ -548,7 +468,7 @@ mod tests {
     use super::*;
     use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
     use crate::policies::context::SearchDepth;
-    use crate::policies::registry::STRONG_MAX;
+    use crate::policies::registry::{NUDGE_MAX, PREFERENCE_MAX, STRONG_MAX};
     use crate::search::{choose_action, score_candidates_with_session};
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
@@ -588,14 +508,21 @@ mod tests {
     }
 
     fn offer_state(predicted_winner: Option<PlayerId>) -> GameState {
+        offer_state_with(predicted_winner, ShortcutDecisionSchema::default())
+    }
+
+    fn offer_state_with(
+        predicted_winner: Option<PlayerId>,
+        schema: ShortcutDecisionSchema,
+    ) -> GameState {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::LoopShortcut {
             proposer: P0,
             predicted_winner,
             certificate: cert(),
-            schema: ShortcutDecisionSchema::default(),
+            schema,
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -622,7 +549,7 @@ mod tests {
         let config = create_config(AiDifficulty::Medium, Platform::Native);
         let decision = AiDecisionContext {
             waiting_for: state.waiting_for.clone(),
-            candidates: vec![declare(IterationCount::UntilLethal), decline()],
+            candidates: vec![declare(IterationCount::Fixed(1)), decline()],
         };
         let context = crate::context::AiContext::empty(&config.weights);
         LoopShortcutPolicy.verdict(&PolicyContext {
@@ -707,47 +634,39 @@ mod tests {
     fn declare_outside_loop_shortcut_returns_zero() {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::Priority { player: P0 };
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
+        let v = verdict_for(&state, &declare(IterationCount::Fixed(1)));
         assert_eq!(delta_of(&v), 0.0);
         assert_eq!(kind_of(&v), "loop_shortcut_na");
     }
 
-    /// Row 2 — THE BUG. The latched winner is an opponent ⇒ declaring `UntilLethal` runs a loop
-    /// whose SBA crowns them (CR 104.2a) and kills the proposer (CR 704.5a).
-    #[test]
-    fn declare_until_lethal_when_opponent_wins_is_rejected() {
-        let state = offer_state(Some(P1));
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            matches!(v, PolicyVerdict::Reject { .. }),
-            "declaring a shortcut an OPPONENT wins must be vetoed, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_declare_hands_opponent_the_win");
+    fn without_end_offer(predicted_winner: Option<PlayerId>) -> GameState {
+        offer_state_with(
+            predicted_winner,
+            ShortcutDecisionSchema {
+                iteration_count: IterationCount::WithoutEnd,
+                ..Default::default()
+            },
+        )
     }
 
-    /// Row 6 — the over-suppression guard: the proposer's OWN win must still be boosted.
+    /// CR 732.2a: an offer naming no winner is worth proposing as a draw; declining it is neutral.
     #[test]
-    fn declare_until_lethal_when_self_wins_is_critical() {
-        let state = offer_state(Some(P0));
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            delta_of(&v) > STRONG_MAX,
-            "a guaranteed CR 104.2a crown is critical-band, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_declare_wins");
+    fn a_without_end_offer_naming_no_winner_prefers_the_draw() {
+        let state = without_end_offer(None);
+        let v = verdict_for(&state, &declare(IterationCount::WithoutEnd));
+        let delta = delta_of(&v);
+        assert!(delta > NUDGE_MAX && delta <= PREFERENCE_MAX, "{v:?}");
+        assert_eq!(kind_of(&v), "loop_shortcut_declare_draw_without_end");
+        assert_eq!(delta_of(&verdict_for(&state, &decline())), 0.0);
     }
 
-    /// Row 4 — an `UntilLethal` declare on a `None`-winner (object-growth) offer can never satisfy
-    /// the crown gate, so it always full-rolls-back: zero progress, CR 732.2b window burned.
+    /// A without-end declaration on an offer naming a winner is not proposed as a draw.
     #[test]
-    fn declare_until_lethal_with_no_predicted_winner_is_rejected() {
-        let state = offer_state(None);
-        let v = verdict_for(&state, &declare(IterationCount::UntilLethal));
-        assert!(
-            matches!(v, PolicyVerdict::Reject { .. }),
-            "an UntilLethal declare that cannot crown must be vetoed, got {v:?}"
-        );
-        assert_eq!(kind_of(&v), "loop_shortcut_untillethal_cannot_crown");
+    fn a_without_end_declare_against_a_named_winner_is_rejected() {
+        let state = without_end_offer(Some(P1));
+        let v = verdict_for(&state, &declare(IterationCount::WithoutEnd));
+        assert!(matches!(v, PolicyVerdict::Reject { .. }), "{v:?}");
+        assert_eq!(kind_of(&v), "loop_shortcut_without_end_names_a_winner");
     }
 
     /// Rows 3 + 5 + 7 — THE CLASS GUARD: `materialize_fixed_shortcut` COMMITS every cycle it
@@ -775,8 +694,8 @@ mod tests {
         }
     }
 
-    /// A BOUNDED offer — the only shape `try_offer_bounded_cycle_shortcut` mints. `points`
-    /// stays empty because the engine's `Fixed` candidate generator is gated on that too.
+    /// A BOUNDED offer. `points` stays empty because the engine's `Fixed` candidate generator is
+    /// gated on that too.
     fn bounded_offer_state(bound: u32) -> GameState {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::LoopShortcut {
@@ -787,12 +706,12 @@ mod tests {
                 // BOTH halves: a fixture setting only the capacity measures nothing, so
                 // `is_bounded()` would be FALSE and every bounded row below would silently take
                 // the unbounded branch instead of its own subject.
-                measured_repetition_bound: Some(bound),
+                repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: bound,
                 ..Default::default()
             },
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -829,13 +748,13 @@ mod tests {
                 ..cert()
             },
             schema: ShortcutDecisionSchema {
-                measured_repetition_bound: Some(bound),
+                repetition_bound: engine::analysis::decision_template::RepetitionBound::Measured,
                 deliverable_capacity: bound,
                 points,
                 ..Default::default()
             },
             declaration,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -844,7 +763,6 @@ mod tests {
     /// One repetition's whole-game delta, given only the axes a test cares about.
     fn periodic(library_delta: &[(PlayerId, i64)], life: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 library_delta: library_delta.iter().copied().collect(),
                 life: life.iter().copied().collect(),
@@ -852,8 +770,14 @@ mod tests {
             },
             victim_slot: vec![],
             declarable_victims: vec![],
+            forced_aims: Vec::new(),
             seat_life_charge: vec![],
             cleanup: None,
+            instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         }
     }
 
@@ -863,15 +787,20 @@ mod tests {
     /// certificate would add an in-test hit to the CR 732.2a offer-writer census for no gain.
     fn periodic_poison(poison: &[(PlayerId, i64)]) -> PeriodicDelta {
         PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 poison: poison.iter().copied().collect(),
                 ..Default::default()
             },
             victim_slot: vec![],
             declarable_victims: vec![],
+            forced_aims: Vec::new(),
             seat_life_charge: vec![],
             cleanup: None,
+            instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         }
     }
 
@@ -921,7 +850,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         assert!(
             certificate_of(&state).per_cycle.is_some(),
@@ -994,7 +923,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         assert!(
             certificate_of(&state).per_cycle.is_some(),
@@ -1089,7 +1018,7 @@ mod tests {
     const SLOT_BOUND: u32 = 9;
 
     /// A CR 601.2c target schedule pinning each slot onto its seat at every repetition — the
-    /// TARGET-class spelling `record_trigger_target_answer` journals.
+    /// TARGET-class spelling `announced_target_pins` emits.
     fn seat_declaration(pins: &[(&DecisionSlot, PlayerId)]) -> DecisionTemplate {
         let sources: Vec<_> = pins.iter().map(|(slot, _)| slot.source.clone()).collect();
         DecisionTemplate {
@@ -1156,15 +1085,20 @@ mod tests {
         state.players[P0.0 as usize].life = 18;
         let slot = announced_slot(&mut state, CardId(1));
         let period = PeriodicDelta {
-            frames_per_period: 1,
             delta: ResourceVector {
                 life: [(P1, -2)].into_iter().collect(),
                 ..Default::default()
             },
             victim_slot: vec![(slot.clone(), 2)],
             declarable_victims: vec![P0, P1],
+            forced_aims: Vec::new(),
             seat_life_charge: vec![(P0, 2), (P1, 2)],
             cleanup: None,
+            instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
+            seat_takes: Vec::new(),
+            zero_lifetimes: Vec::new(),
         };
         let point = either_seat_point(&slot);
         let published = seat_declaration(&[(&slot, P1)]);
@@ -1205,7 +1139,7 @@ mod tests {
         assert!(
             schema_of(&state).is_bounded(),
             "REACH-GUARD: the arm under test is bounded-only; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
         let period = certificate_of(&state)
             .per_cycle
@@ -1386,6 +1320,51 @@ mod tests {
         );
     }
 
+    /// CR 704.5a + CR 704.5c + CR 732.2a: the veto reads a growing period repetition by
+    /// repetition — losing 2, 3, 4, 5, 6 life takes a 20-life proposer out at the fifth, and
+    /// poison rising 1, 2, 3, 4 reaches ten at the fourth — where the first repetition alone
+    /// would last to the tenth.
+    #[test]
+    fn loop_shortcut_declare_refuses_a_growing_period_at_its_own_crossing() {
+        let grown = |mut period: PeriodicDelta, growth: ResourceVector| {
+            period.growth = growth;
+            period
+        };
+        let life = bounded_offer_with_period(
+            10,
+            grown(
+                periodic(&[], &[(P0, -2)]),
+                ResourceVector {
+                    life: [(P0, -1)].into_iter().collect(),
+                    ..Default::default()
+                },
+            ),
+        );
+        let poison = bounded_offer_with_period(
+            10,
+            grown(
+                periodic_poison(&[(P0, 1)]),
+                ResourceVector {
+                    poison: [(P0, 1)].into_iter().collect(),
+                    ..Default::default()
+                },
+            ),
+        );
+        for (state, fatal) in [(&life, 5), (&poison, 4)] {
+            assert_eq!(
+                kind_of(&verdict_for(state, &declare(IterationCount::Fixed(fatal)))),
+                "loop_shortcut_declare_eliminates_proposer"
+            );
+            assert_ne!(
+                kind_of(&verdict_for(
+                    state,
+                    &declare(IterationCount::Fixed(fatal - 1))
+                )),
+                "loop_shortcut_declare_eliminates_proposer"
+            );
+        }
+    }
+
     /// CR 732.2a — the BOUNDED branch, both halves, on ONE schema differing only in `n`.
     ///
     /// (i) `Fixed(4)` against a published capacity of 10 ⇒ committed progress well inside every
@@ -1400,9 +1379,7 @@ mod tests {
     ///   not carried by ⓟ1.
     /// * ⓟ3 invert `ShortcutDecisionSchema::is_bounded()` to `is_none()` ⇒ the in-test schema reads
     ///   unbounded ⇒ both arms take `na()` ⇒ FAILS, and so does
-    ///   `loop_shortcut_unbounded_offer_keeps_fixed_neutral`. ⓟ3 flipping BOTH rows plus the
-    ///   engine's `until_lethal_against_a_bounded_offer_is_rejected` is the single-authority
-    ///   proof: one edit to one predicate is measurable at every caller.
+    ///   `loop_shortcut_unbounded_offer_keeps_fixed_neutral`.
     #[test]
     fn loop_shortcut_bounded_declare_scores_and_rejects_over_bound() {
         let state = bounded_offer_state(10);
@@ -1410,7 +1387,7 @@ mod tests {
             schema_of(&state).is_bounded(),
             "REACH-GUARD: every assertion below is vacuous unless the in-test schema really is \
              bounded; measured bound = {:?}",
-            schema_of(&state).measured_repetition_bound
+            schema_of(&state).repetition_bound
         );
 
         // (i) within the bound.
@@ -1505,7 +1482,7 @@ mod tests {
                 !schema_of(&state).is_bounded(),
                 "REACH-GUARD: this row is about the UNBOUNDED schema — the bounded row above \
                  already covers the other half; measured bound {:?}",
-                schema_of(&state).measured_repetition_bound
+                schema_of(&state).repetition_bound
             );
             let zero = verdict_for(&state, &declare(IterationCount::Fixed(0)));
             assert!(
@@ -1544,7 +1521,7 @@ mod tests {
                 "REACH-GUARD: this row asserts the UNBOUNDED branch, so the default schema must \
                  read unbounded — `ShortcutDecisionSchema::default()` carries \
                  no measured threshold; measured {:?}",
-                schema_of(&state).measured_repetition_bound
+                schema_of(&state).repetition_bound
             );
             let v = verdict_for(&state, &declare(IterationCount::Fixed(4)));
             assert_eq!(
@@ -1557,115 +1534,29 @@ mod tests {
         }
     }
 
-    /// E2E, HEURISTIC branch (VeryEasy: `search.enabled == false` ⇒ the tactical score is added
-    /// RAW). Without the policy the class-bonus table makes Declare (0.5) beat Decline (0.4) in
-    /// every state; with it the `Reject` drives Declare's softmax weight to `exp(-inf/T) == 0`, so
-    /// the pick is deterministic across every seed.
     #[test]
-    fn heuristic_picker_declines_a_losing_shortcut() {
+    fn a_draw_offer_is_declared_as_one() {
         let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
-        assert!(
-            !config.search.enabled,
-            "reach-guard: VeryEasy must exercise the HEURISTIC branch"
-        );
-        let state = offer_state(Some(P1));
-        assert_both_candidates_reach_the_scorer(&state, &config);
-
-        for seed in 0..32u64 {
-            let mut rng = SmallRng::seed_from_u64(seed);
-            assert_eq!(
-                choose_action(&state, P0, &config, &mut rng),
-                Some(GameAction::DeclineShortcut),
-                "seed {seed}: the AI must NOT propose a shortcut that crowns its opponent"
-            );
-        }
-    }
-
-    /// E2E, SEARCH branch (Hard). The TEETH are the two RNG-free SCORE assertions: the `-inf` must
-    /// survive the `tactical_weight` multiply (`-inf * 0.1 == -inf * 0.35 == -inf`).
-    ///
-    /// # ⚠️ DO NOT "SIMPLIFY" THIS DOWN TO THE SEED LOOP.
-    ///
-    /// The seed loop at the end is a POST-CONDITION INVARIANT (necessary, NOT discriminating). With
-    /// the policy unregistered the control Declare score here is a FINITE `-9999.925` (measured) —
-    /// which still loses the softmax to Decline — so a pick-only assertion PASSES WITH THE POLICY
-    /// DELETED. The only assertion with teeth is
-    /// `declare_score.is_infinite() && declare_score.is_sign_negative()`: that is what proves the
-    /// `Reject` (and not the beam's own continuation value) is doing the work.
-    #[test]
-    fn search_picker_declines_a_losing_shortcut() {
-        let mut config = create_config(AiDifficulty::Hard, Platform::Native);
-        assert!(
-            config.search.enabled,
-            "reach-guard: Hard must exercise the SEARCH branch"
-        );
-        // The verdict is state-only, so K determinization samples add nothing; 0 keeps the test on
-        // the deterministic core path.
-        config.search.determinization_samples = 0;
-        let state = offer_state(Some(P1));
+        let state = without_end_offer(None);
         assert_both_candidates_reach_the_scorer(&state, &config);
 
         let session = AiSession::arc_from_game(&state);
         let scored = score_candidates_with_session(&state, P0, &config, &session);
-        let declare_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclareShortcut { .. }))
-            .map(|(_, s)| *s)
-            .expect("DeclareShortcut is scored");
-        let decline_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclineShortcut))
-            .map(|(_, s)| *s)
-            .expect("DeclineShortcut is scored");
+        let score_of = |wanted: &GameAction| {
+            scored
+                .iter()
+                .find(|(a, _)| a == wanted)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(|| panic!("{wanted:?} is not scored: {scored:?}"))
+        };
+        let declare_score = score_of(&GameAction::DeclareShortcut {
+            count: IterationCount::WithoutEnd,
+            template: None,
+        });
+        let decline_score = score_of(&GameAction::DeclineShortcut);
         assert!(
-            declare_score.is_infinite() && declare_score.is_sign_negative(),
-            "the Reject must survive the tactical_weight multiply, got {declare_score}"
-        );
-        assert!(
-            decline_score.is_finite(),
-            "DeclineShortcut must stay finite (NaN safety), got {decline_score}"
-        );
-
-        // POST-CONDITION INVARIANT (necessary, NOT discriminating — see the doc comment): the
-        // `-inf` must actually reach the picker. This loop passes with the policy deleted (the
-        // control Declare score is a finite -9999.925, which also loses the softmax), so it proves
-        // the end-to-end wiring, never the policy.
-        for seed in 0..8u64 {
-            let mut rng = SmallRng::seed_from_u64(seed);
-            assert_eq!(
-                choose_action(&state, P0, &config, &mut rng),
-                Some(GameAction::DeclineShortcut),
-                "seed {seed}: the search picker must decline too"
-            );
-        }
-    }
-
-    /// The over-suppression e2e guard. VeryEasy (heuristic ⇒ UNWEIGHTED) is the branch the `8.0`
-    /// default is sized for. Do NOT rewrite this against a search-ON difficulty: there the margin
-    /// is `8.1 * 0.1 = 0.81` (or `2.835` at `w = 0.35`), both `< STRONG_MAX`, and the assertion
-    /// would be false for a CORRECT implementation.
-    #[test]
-    fn winning_shortcut_is_still_declared() {
-        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
-        let state = offer_state(Some(P0));
-        assert_both_candidates_reach_the_scorer(&state, &config);
-
-        let session = AiSession::arc_from_game(&state);
-        let scored = score_candidates_with_session(&state, P0, &config, &session);
-        let declare_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclareShortcut { .. }))
-            .map(|(_, s)| *s)
-            .expect("DeclareShortcut is scored");
-        let decline_score = scored
-            .iter()
-            .find(|(a, _)| matches!(a, GameAction::DeclineShortcut))
-            .map(|(_, s)| *s)
-            .expect("DeclineShortcut is scored");
-        assert!(
-            declare_score - decline_score > STRONG_MAX,
-            "a shortcut the proposer WINS must stay strongly preferred; declare = \
-             {declare_score}, decline = {decline_score}"
+            declare_score - decline_score > NUDGE_MAX,
+            "declare = {declare_score}, decline = {decline_score}"
         );
     }
 
@@ -1810,44 +1701,43 @@ mod tests {
         use engine::types::game_state::LoopDetectionMode;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
-            for (p1, axes, declares) in [
-                (
-                    &["Energy Field"][..],
-                    vec![ResourceAxis::CombatPhases],
-                    false,
-                ),
-                (
-                    &[][..],
-                    vec![ResourceAxis::CombatPhases, ResourceAxis::Life(P1)],
-                    true,
-                ),
-            ] {
-                let state = assault_confluence_offer(&db, mode, p1);
-                let certificate = certificate_of(&state);
+        let mode = LoopDetectionMode::Interactive;
+        for (p1, axes, declares) in [
+            (
+                &["Energy Field"][..],
+                vec![ResourceAxis::CombatPhases],
+                false,
+            ),
+            (
+                &[][..],
+                vec![ResourceAxis::CombatPhases, ResourceAxis::Life(P1)],
+                true,
+            ),
+        ] {
+            let state = assault_confluence_offer(&db, mode, p1);
+            let certificate = certificate_of(&state);
+            assert_eq!(
+                certificate
+                    .per_cycle
+                    .as_ref()
+                    .map(|signature| match signature {
+                        PeriodSignature::EveryRepetition(period)
+                        | PeriodSignature::OneRepetition(period) => {
+                            period.delta.unbounded_axes_for(P0)
+                        }
+                    }),
+                Some(axes),
+                "{mode:?} {p1:?}: the published signature"
+            );
+            for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
+                let config = create_config(difficulty, Platform::Native);
+                let mut rng = SmallRng::seed_from_u64(0);
+                let action = choose_action(&state, P0, &config, &mut rng);
                 assert_eq!(
-                    certificate
-                        .per_cycle
-                        .as_ref()
-                        .map(|signature| match signature {
-                            PeriodSignature::EveryRepetition(period)
-                            | PeriodSignature::OneRepetition(period) => {
-                                period.delta.unbounded_axes_for(P0)
-                            }
-                        }),
-                    Some(axes),
-                    "{mode:?} {p1:?}: the published signature"
+                    matches!(action, Some(GameAction::DeclareShortcut { .. })),
+                    declares,
+                    "{mode:?} {p1:?} {difficulty:?}: {action:?}"
                 );
-                for difficulty in [AiDifficulty::VeryEasy, AiDifficulty::Easy] {
-                    let config = create_config(difficulty, Platform::Native);
-                    let mut rng = SmallRng::seed_from_u64(0);
-                    let action = choose_action(&state, P0, &config, &mut rng);
-                    assert_eq!(
-                        matches!(action, Some(GameAction::DeclareShortcut { .. })),
-                        declares,
-                        "{mode:?} {p1:?} {difficulty:?}: {action:?}"
-                    );
-                }
             }
         }
     }
@@ -1955,63 +1845,62 @@ mod tests {
         use engine::types::phase::Phase;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P0, 20);
-            let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, &db);
-            let artifact = scenario.add_real_card(P0, "Power Artifact", Zone::Battlefield, &db);
-            scenario.add_real_card(P0, "Plains", Zone::Battlefield, &db);
-            scenario.add_real_card(P0, "Darksteel Colossus", Zone::Hand, &db);
-            scenario.add_real_card(P1, "Burning-Tree Shaman", Zone::Battlefield, &db);
-            scenario.with_library_top(P0, &["Wastes"; 10]);
-            scenario.with_library_top(P1, &["Wastes"; 10]);
-            let mut runner = scenario.build();
-            runner.state_mut().loop_detection = mode;
-            engine::game::effects::attach::attach_to(runner.state_mut(), artifact, monolith);
-            let abilities = [
-                activated_ability(runner.state(), monolith, true),
-                activated_ability(runner.state(), monolith, false),
-            ];
-            let state = activate_to_offer(runner, monolith, &abilities);
+        let mode = LoopDetectionMode::Interactive;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 20);
+        let monolith = scenario.add_real_card(P0, "Basalt Monolith", Zone::Battlefield, &db);
+        let artifact = scenario.add_real_card(P0, "Power Artifact", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Plains", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Darksteel Colossus", Zone::Hand, &db);
+        scenario.add_real_card(P1, "Burning-Tree Shaman", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = mode;
+        engine::game::effects::attach::attach_to(runner.state_mut(), artifact, monolith);
+        let abilities = [
+            activated_ability(runner.state(), monolith, true),
+            activated_ability(runner.state(), monolith, false),
+        ];
+        let state = activate_to_offer(runner, monolith, &abilities);
 
-            assert_eq!(
-                offer_period(&state).0.performance(),
-                Some(PeriodPerformance::UsesTheStack),
-                "{mode:?}"
+        assert_eq!(
+            offer_period(&state).0.performance(),
+            Some(PeriodPerformance::UsesTheStack),
+            "{mode:?}"
+        );
+        assert_eq!(
+            proposer_axes(&state),
+            Some(vec![ResourceAxis::Mana(ManaType::Colorless)]),
+            "{mode:?}"
+        );
+        let schema = schema_of(&state).clone();
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, schema.iteration_count.clone())
+            )),
+            "loop_shortcut_bounded_declare_progress",
+            "{mode:?}"
+        );
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, IterationCount::Fixed(schema.deliverable_capacity))
+            )),
+            "loop_shortcut_declare_eliminates_proposer",
+            "{mode:?}"
+        );
+        for action in non_searching_choices(&state) {
+            assert!(
+                matches!(
+                    &action,
+                    Some(GameAction::DeclareShortcut { count, .. })
+                        if *count == schema.iteration_count
+                ),
+                "{mode:?}: {action:?}"
             );
-            assert_eq!(
-                proposer_axes(&state),
-                Some(vec![ResourceAxis::Mana(ManaType::Colorless)]),
-                "{mode:?}"
-            );
-            let schema = schema_of(&state).clone();
-            assert_eq!(
-                kind_of(&verdict_for(
-                    &state,
-                    &offered_declare(&state, schema.iteration_count.clone())
-                )),
-                "loop_shortcut_bounded_declare_progress",
-                "{mode:?}"
-            );
-            assert_eq!(
-                kind_of(&verdict_for(
-                    &state,
-                    &offered_declare(&state, IterationCount::Fixed(schema.deliverable_capacity))
-                )),
-                "loop_shortcut_declare_eliminates_proposer",
-                "{mode:?}"
-            );
-            for action in non_searching_choices(&state) {
-                assert!(
-                    matches!(
-                        &action,
-                        Some(GameAction::DeclareShortcut { count, .. })
-                            if *count == schema.iteration_count
-                    ),
-                    "{mode:?}: {action:?}"
-                );
-            }
         }
     }
 
@@ -2027,37 +1916,176 @@ mod tests {
         use engine::types::phase::Phase;
 
         let db = integration_card_db();
-        for mode in [LoopDetectionMode::On, LoopDetectionMode::Interactive] {
+        let mode = LoopDetectionMode::Interactive;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 80);
+        let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = mode;
+        let ability = activated_ability(runner.state(), ogre, true);
+        let state = activate_to_offer(runner, ogre, &[ability]);
+
+        assert_eq!(
+            offer_period(&state).0.performance(),
+            Some(PeriodPerformance::ManaAbilitiesOnly),
+            "{mode:?}"
+        );
+        assert_eq!(
+            proposer_axes(&state),
+            Some(vec![ResourceAxis::Mana(ManaType::Red)]),
+            "{mode:?}"
+        );
+        let count = schema_of(&state).iteration_count.clone();
+        assert_eq!(
+            kind_of(&verdict_for(&state, &offered_declare(&state, count))),
+            "loop_shortcut_declare_buys_only_mana_and_combats",
+            "{mode:?}"
+        );
+        for action in non_searching_choices(&state) {
+            assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
+        }
+    }
+
+    /// CR 107.14: a period that also gains its proposer energy buys something a count keeps.
+    #[test]
+    fn a_count_that_also_gains_energy_is_not_declined_as_mana_only() {
+        use engine::game::scenario::GameScenario;
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::game_state::LoopDetectionMode;
+        use engine::types::phase::Phase;
+
+        let db = integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, 80);
+        let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
+        scenario.with_library_top(P0, &["Wastes"; 10]);
+        scenario.with_library_top(P1, &["Wastes"; 10]);
+        let mut runner = scenario.build();
+        runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+        let ability = activated_ability(runner.state(), ogre, true);
+        let state = activate_to_offer(runner, ogre, &[ability]);
+        let count = schema_of(&state).iteration_count.clone();
+        assert_eq!(
+            kind_of(&verdict_for(
+                &state,
+                &offered_declare(&state, count.clone())
+            )),
+            "loop_shortcut_declare_buys_only_mana_and_combats"
+        );
+
+        let mut gained = state.clone();
+        let WaitingFor::LoopShortcut { certificate, .. } = &mut gained.waiting_for else {
+            unreachable!("activate_to_offer stands at the offer")
+        };
+        let (PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period)) =
+            certificate
+                .per_cycle
+                .as_mut()
+                .expect("the offer carries its period");
+        period.delta.energy.insert(P0, 1);
+        assert_ne!(
+            kind_of(&verdict_for(&gained, &offered_declare(&gained, count))),
+            "loop_shortcut_declare_buys_only_mana_and_combats"
+        );
+    }
+
+    /// CR 732.5 + CR 104.4b: Worldgorger Dragon under Animate Dead loops with P1's Lightning Bolt
+    /// outside it. Driven to the engine's offer of a draw without end, two AI seats play it out:
+    /// whichever way the seats answer it, the game is a draw.
+    #[test]
+    fn ai_seats_play_an_out_only_loop_offer_to_a_draw() {
+        use crate::auto_play::{run_ai_actions_bounded, AiActionsStop};
+        use engine::game::scenario::GameScenario;
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::game_state::LoopDetectionMode;
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+        use std::collections::{HashMap, HashSet};
+
+        let db = integration_card_db();
+        for seed in [0, 1] {
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
-            scenario.with_life(P0, 80);
-            let ogre = scenario.add_real_card(P0, "Treasonous Ogre", Zone::Battlefield, &db);
-            scenario.with_library_top(P0, &["Wastes"; 10]);
-            scenario.with_library_top(P1, &["Wastes"; 10]);
-            let mut runner = scenario.build();
-            runner.state_mut().loop_detection = mode;
-            let ability = activated_ability(runner.state(), ogre, true);
-            let state = activate_to_offer(runner, ogre, &[ability]);
-
-            assert_eq!(
-                offer_period(&state).0.performance(),
-                Some(PeriodPerformance::ManaAbilitiesOnly),
-                "{mode:?}"
+            let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, &db);
+            let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, &db);
+            scenario.with_mana_pool(
+                P0,
+                (0..2)
+                    .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                    .collect(),
             );
-            assert_eq!(
-                proposer_axes(&state),
-                Some(vec![ResourceAxis::Mana(ManaType::Red)]),
-                "{mode:?}"
-            );
-            let count = schema_of(&state).iteration_count.clone();
-            assert_eq!(
-                kind_of(&verdict_for(&state, &offered_declare(&state, count))),
-                "loop_shortcut_declare_buys_only_mana_and_combats",
-                "{mode:?}"
-            );
-            for action in non_searching_choices(&state) {
-                assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
+            scenario.add_real_card(P1, "Mountain", Zone::Battlefield, &db);
+            scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, &db);
+            for seat in [P0, P1] {
+                for _ in 0..10 {
+                    scenario.add_real_card(seat, "Swamp", Zone::Library, &db);
+                }
             }
+            let mut runner = scenario.build();
+            runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+            drop(runner.cast(animate).target_object(dragon).commit());
+            for _ in 0..60 {
+                let action = match &runner.state().waiting_for {
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    },
+                    _ => break,
+                };
+                runner.act(action).expect("a legal drive action");
+            }
+            assert_eq!(
+                runner.state().waiting_for.variant_name(),
+                "LoopShortcut",
+                "seed {seed}: reach"
+            );
+
+            let mut state = runner.state().clone();
+            let session = AiSession::arc_from_game(&state);
+            let run = run_ai_actions_bounded(
+                &mut state,
+                &HashSet::from([P0, P1]),
+                &HashMap::from([(P0, AiConfig::default()), (P1, AiConfig::default())]),
+                &mut SmallRng::seed_from_u64(seed),
+                &session,
+                300,
+            );
+            assert_eq!(
+                state.waiting_for,
+                WaitingFor::GameOver { winner: None },
+                "seed {seed}"
+            );
+            assert!(
+                matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+                "seed {seed}: {:?}",
+                run.stop
+            );
         }
+    }
+
+    /// CR 704.6b: the proposer's team shares one poison pool, so the teammate's 12 plus one a
+    /// repetition reaches fifteen at the third and that count is refused; two still scores.
+    #[test]
+    fn loop_shortcut_declare_reads_the_proposers_team_poison() {
+        let mut team = GameState::new(
+            engine::types::format::FormatConfig::two_headed_giant(),
+            4,
+            0,
+        );
+        team.players[P1.0 as usize].poison_counters = 12;
+        let state =
+            bounded_offer_declaring(team, 10, periodic_poison(&[(P1, 1)]), Vec::new(), None);
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare(IterationCount::Fixed(3)))),
+            "loop_shortcut_declare_eliminates_proposer"
+        );
+        assert_eq!(
+            kind_of(&verdict_for(&state, &declare(IterationCount::Fixed(2)))),
+            "loop_shortcut_bounded_declare_progress"
+        );
     }
 }
