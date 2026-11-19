@@ -42039,6 +42039,10 @@ impl GameState {
             active_library_searches: _,
             pending_scoped_library_search: _,
             pending_library_search_delivery: _,
+            // Likewise: per-resolution counter records (CR 608.2c "this way") carry an
+            // incarnation pin, but the depth-0 chain end clears them unless the
+            // resolution is parked on a non-Priority choice.
+            counter_added_this_resolution: _,
             // Pin-bearing damage/discard pauses drain before Priority is restored;
             // see their existing classification in `_gamestate_partition_is_total`.
             pending_damage_post_loss: _,
