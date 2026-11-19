@@ -115,9 +115,10 @@ fn exile_tracking_parked_resume_preserves_source_link() {
     }));
 }
 
-/// W-R1 (red first): a Dig rest pile sent to the library bottom is an
-/// effect-owned batch. Competing Library-destination `Moved` replacements must
-/// pause before the kept tracked set is published, then re-pause safely while
+/// W-R1 (red first): a Dig rest pile sent to a zone other than the library
+/// (a card already in the library reordered within it is not a zone change,
+/// CR 701.20b) is an effect-owned batch. Competing hand-destination `Moved`
+/// replacements must pause before the kept tracked set is published, then re-pause safely while
 /// the rest pile drains.
 #[test]
 fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
@@ -139,12 +140,12 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         scenario
             .add_creature(P0, "Dig Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Dig Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -159,7 +160,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -244,8 +245,8 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
         .into_iter()
         .find(|id| !parked_order.contains(id))
         .expect("first attempted rest card is outside the parked suffix");
-    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Library);
-    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Library);
+    assert_ne!(runner.state().objects[&redirected_id].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&parked_order[0]].zone, Zone::Hand);
 }
 
 /// CR 608.2c + CR 616.1: declining an up-to Dig selection publishes its empty
@@ -266,12 +267,12 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         scenario
             .add_creature(P0, "Zero-Kept Library To Graveyard", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Zero-Kept Library To Exile", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -286,7 +287,7 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
             keep_count_expr: None,
             up_to: true,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -342,14 +343,14 @@ fn dig_zero_kept_deferred_rest_pile_publishes_an_empty_tracked_set() {
         .expect("one rest-pile card must take the configured redirect");
     let returned_rest = [rest_a, rest_b]
         .into_iter()
-        .find(|id| runner.state().objects[id].zone == Zone::Library)
-        .expect("the other rest-pile card must complete its library placement");
+        .find(|id| runner.state().objects[id].zone == Zone::Hand)
+        .expect("the other rest-pile card must complete its hand placement");
     assert_ne!(redirected_rest, returned_rest);
     assert!(
         runner.state().players[P0.0 as usize]
-            .library
+            .hand
             .contains(&returned_rest),
-        "the unredirected rest-pile card must be present in P0's library"
+        "the unredirected rest-pile card must be present in P0's hand"
     );
 
     let tracked = runner
@@ -703,12 +704,12 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect A", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Graveyard))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Graveyard))
             .id(),
         scenario
             .add_creature(P0, "Deferred Dig Library Redirect B", 0, 0)
             .as_enchantment()
-            .with_replacement_definition(redirect_moved_to(Zone::Library, Zone::Exile))
+            .with_replacement_definition(redirect_moved_to(Zone::Hand, Zone::Exile))
             .id(),
     ];
 
@@ -723,7 +724,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
             keep_count_expr: None,
             up_to: false,
             filter: TargetFilter::Any,
-            rest_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Hand),
             rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
@@ -981,6 +982,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .description("Prevent the staged mana cost move".to_string())]
     .into();
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
@@ -994,7 +996,6 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
@@ -2973,7 +2974,7 @@ fn pitch_exile_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Nourishing Shoal");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
 
     let result = runner
@@ -3059,7 +3060,7 @@ fn multi_card_exile_cost_resumes_after_each_replacement_choice() {
         })
         .expect("cast two-card pitch witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept two-card pitch cost");
     let result = runner
         .act(GameAction::SelectCards {
@@ -3132,7 +3133,7 @@ fn return_to_hand_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Daze cost witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept return-to-hand cost");
     assert!(matches!(
         runner.state().waiting_for,
@@ -4038,6 +4039,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
         repeat: None,
+        affected_object: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -4253,6 +4255,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
         repeat: None,
+        affected_object: None,
     };
 
     let paused = runner
@@ -5324,6 +5327,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .description("Prevent the staged cost move".to_string())]
     .into();
     runner.state_mut().pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed: ProposedEvent::Destroy {
             object_id: source,
             source: None,
@@ -5337,7 +5341,6 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
@@ -9771,6 +9774,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
             repeat: None,
+            affected_object: None,
         },
         None,
     )
@@ -14578,6 +14582,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -14587,6 +14592,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         let completed = runner

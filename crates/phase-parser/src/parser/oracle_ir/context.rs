@@ -92,9 +92,11 @@ impl HeadWindowProbe {
     }
 }
 
-/// The players an anaphoric controller phrase can bind to, read from the parse
-/// context (`ParseContext::player_antecedents`) or supplied by a named seed.
-/// `None` means no antecedent is in scope.
+/// The referents an anaphor in a captured clause may bind to — the players an
+/// anaphoric controller phrase names and the object a possessive-pronoun
+/// characteristic names — read from the parse context
+/// (`ParseContext::player_antecedents`) or supplied by a named seed. `None`
+/// means no antecedent is in scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PlayerAntecedents {
     /// CR 608.2c + CR 115.1a: the player the effect chain itself declared, the
@@ -108,6 +110,10 @@ pub(crate) struct PlayerAntecedents {
     pub third_person: Option<ControllerRef>,
     /// The referent of "its controller" / "their controller".
     pub object_controller: Option<ControllerRef>,
+    /// CR 608.2k + CR 608.2c: the object a possessive-pronoun characteristic
+    /// ("its power") in a where-X definition names — the characteristic twin of
+    /// `object_controller`; `None` keeps the `Source` default.
+    pub characteristic_pronoun_owner: Option<ObjectScope>,
 }
 
 impl PlayerAntecedents {
@@ -142,6 +148,18 @@ impl PlayerAntecedents {
     pub(crate) fn basic_land_type_count() -> Self {
         PlayerAntecedents {
             third_person: Some(ControllerRef::TargetPlayer),
+            ..Default::default()
+        }
+    }
+
+    /// CR 608.2k: only the characteristic rung of `ctx`'s antecedents. The
+    /// count slot's where-X binder (`oracle_util::parse_count_slot`) reads
+    /// "its power" against the trigger's "it" antecedent, but it has never
+    /// threaded the player rungs, and threading them would rebind relative
+    /// controller phrases outside this class.
+    pub(crate) fn characteristic_owner_only(ctx: &ParseContext) -> Self {
+        PlayerAntecedents {
+            characteristic_pronoun_owner: ctx.player_antecedents().characteristic_pronoun_owner,
             ..Default::default()
         }
     }
@@ -323,6 +341,44 @@ impl TriggerZoneChangeProvenance {
     pub(crate) fn as_pair(&self) -> Option<(Zone, Zone)> {
         self.0
     }
+}
+
+/// Parser-only provenance: which objects the enclosing trigger's CONDITION
+/// names, as classified from that condition's parsed `TriggerDefinition` and
+/// its text (`oracle_trigger::trigger_condition_objects`).
+///
+// CR 603.1 + CR 608.2k: a triggered ability is "[When/Whenever/At] [trigger
+// condition], [effect]", and an effect's untargeted reference to an object the
+// trigger condition referred to keeps naming that object. When the condition
+// names the ability's own object and NO other object, a bare "it" in the
+// effect can only be that object; when the condition names a second object
+// ("blocks a creature", "becomes attached to a creature", "becomes the target
+// of a spell"), "it" is ambiguous between the two and the parser must not pick
+// one. A player the condition names ("deals combat damage to a player") is
+// not an object, so it leaves the reading unambiguous.
+///
+/// A typed provenance rather than a bool: "no enclosing trigger condition was
+/// classified" (a non-trigger parse, an independent body with its own event)
+/// and "a trigger condition that is not source-only" are different facts, and
+/// consumers must match `SourceOnly` EXPLICITLY — every other value fails
+/// closed. Ordinary `Clone` preserves it (the same body continues);
+/// [`ParseContext::clone_for_independent_body`] resets it, because a reflexive
+/// or nested body has its own trigger event that this value does not describe,
+/// and [`ParseContext::enter_delayed_trigger_body`] resets it for the same
+/// reason in the body of a delayed triggered ability the chain creates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TriggerConditionObjects {
+    /// No enclosing trigger condition was classified for this parse.
+    #[default]
+    Unestablished,
+    /// The condition names the ability's own object and no other object; any
+    /// second participant it names is a player.
+    SourceOnly,
+    /// The condition names an object other than the ability's own object, or
+    /// carries a shape (an unrecognized event, a condition qualifier, a
+    /// disjunctive zone-change clause) the classifier does not prove free of
+    /// one.
+    NotSourceOnly,
 }
 
 /// CR 608.2c + CR 115.1: what a bare card-set aggregate surface (the
@@ -566,9 +622,9 @@ pub struct ParseContext {
     /// disambiguate from (Pinnacle Starcage's "put each card exiled with this
     /// artifact into its owner's graveyard, then create ... for each card put
     /// into a graveyard this way" — every exiled card lands in the SAME
-    /// graveyard pile, so the bare `TrackedSetSize` default is already
-    /// correct there). Set per effect-chain chunk from a lookback over
-    /// `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
+    /// graveyard pile, so the destination-count parse of the bare clause (the
+    /// tracked cards delivered to Graveyard, CR 614.6) applies there). Set per
+    /// effect-chain chunk from a lookback over `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
     /// by the Token "for each" dispatch (`oracle_effect::mod::try_parse_for_each_effect`)
     /// to bind a bare "card put into a/your/their graveyard this way" count to
     /// the dedicated `PutIntoGraveyard` cause only when a real Dig split
@@ -634,6 +690,16 @@ pub struct ParseContext {
     /// it into your graveyard as it resolves" is a replacement clause whose
     /// demonstrative belongs to its own grammar.
     pub demonstrative_object_ref: Option<TargetFilter>,
+    /// CR 608.2c + CR 601.2c: antecedent for a PLURAL demonstrative ("one of
+    /// those creatures") naming the set of creature targets an earlier
+    /// instruction announced. `Some(ParentTarget)` only when that set is the
+    /// chain's NEAREST earlier object referent (`chain_plural_target_antecedent`).
+    /// Same lifecycle as `chain_declared_slots`: taken before the chunk loop,
+    /// reassigned as the first statement of every iteration, restored after. A
+    /// nested chain whose builder is still empty (a delayed payload parsed as its
+    /// own chain) takes the enclosing chunk's value. `None` on every standalone
+    /// parse. Never serialized.
+    pub plural_demonstrative_object_ref: Option<TargetFilter>,
     /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
     /// Replaces thread-local oracle_warnings accumulator.
     pub diagnostics: Vec<OracleDiagnostic>,
@@ -935,6 +1001,8 @@ pub struct ParseContext {
     /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
     /// Graft's chained-referent `ParentTarget`).
     pub source_becomes_attachment_in_chain: bool,
+    /// CR 400.7j + CR 608.2c: the chain's most recent emitted instruction put a card onto the battlefield, so a following "it" can name that moved card.
+    pub prior_clause_moves_to_battlefield: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.
@@ -1126,6 +1194,16 @@ pub struct ParseContext {
     /// (`subject.rs` · `resolve_they_pronoun`). Seeded per chunk from the chain;
     /// `None` on every standalone parse.
     pub chain_prior_object_set: Option<TargetFilter>,
+    /// CR 608.2c + CR 701.26a/b: the population filter of the NEAREST earlier
+    /// clause of this chain when that clause is a mass tap/untap
+    /// (`SetTapState { scope: All }`), the instruction whose selection the
+    /// runtime snapshots before it acts (`tap_untap::selection_before_resolution`)
+    /// and publishes to a following grant on `ParentTarget`. A bare "it" that is
+    /// the affected object of the next instruction names each object of that
+    /// selection (Triton Tactics: "tap each creature … and it doesn't untap …").
+    /// Seeded per chunk from the chain; `None` on every standalone parse and in a
+    /// nested chain until its own builder holds such a clause. Never serialized.
+    pub chain_prior_mass_tap_selection: Option<TargetFilter>,
     /// True when the SAME chain's most recent producer was a self-library peek
     /// (look at the top N cards of YOUR library without exiling/moving them).
     /// The bare "from among them" cast anaphor that follows must route to the
@@ -1181,13 +1259,24 @@ pub struct ParseContext {
     /// [`Self::clone_for_independent_body`] or [`Self::clone_throwaway`]. See
     /// [`TriggerZoneChangeProvenance`].
     pub trigger_zone_change: TriggerZoneChangeProvenance,
+    /// CR 603.1 + CR 608.2k: which objects the enclosing trigger's condition
+    /// names. Set once, when the trigger body's effect context is built
+    /// (`parse_trigger_line_with_index_ir`); `Unestablished` via
+    /// `derive(Default)` everywhere else. Consumed by the kinds-census pronoun
+    /// gate (`oracle_quantity::kinds_census_pronoun_self_antecedent`), which
+    /// reads "it" as the ability's own object only under `SourceOnly`. See
+    /// [`TriggerConditionObjects`].
+    pub trigger_condition_objects: TriggerConditionObjects,
     /// CR 608.2k: the owner a possessive PRONOUN ("its"/"his"/"her"/"their")
     /// characteristic binds to while this context is active. Set ONLY by
-    /// quantity interpreters parsing a clause whose subject position is known
-    /// (`parse_where_x_quantity_expression_with_owner`, for boon-granted
-    /// "it"/"that" perpetual tails, where the pronoun names the triggering
-    /// object). `None` (the default every other caller carries) preserves the
-    /// long-standing `Source` binding. Explicit self-references ("~'s",
+    /// quantity interpreters parsing a clause whose subject position is known:
+    /// the explicit owner of `parse_where_x_quantity_expression_with_owner`
+    /// (boon-granted "it"/"that" perpetual tails, where the pronoun names the
+    /// triggering object), or the antecedent rung
+    /// `PlayerAntecedents::characteristic_pronoun_owner` (a where-X tail in a
+    /// trigger body whose "it" names the trigger event's object). `None` (the
+    /// default every other caller carries) preserves the long-standing `Source`
+    /// binding. Explicit self-references ("~'s",
     /// "this creature's") NEVER consult this field — only the four genuinely
     /// anaphoric pronoun surfaces do.
     pub characteristic_pronoun_owner: Option<ObjectScope>,
@@ -1243,6 +1332,13 @@ impl ParseContext {
                 }
                 _ => ControllerRef::ParentTargetController,
             }),
+            // CR 608.2k: "its" names the same object "it" does. Delegate to the
+            // single pronoun authority, so a nearer antecedent (a parent target,
+            // the source) keeps today's `Source` binding and only an "it" that
+            // names the trigger event's object moves the characteristic there.
+            characteristic_pronoun_owner: (crate::parser::oracle_effect::resolve_it_pronoun(self)
+                == TargetFilter::TriggeringSource)
+                .then_some(ObjectScope::EventSource),
         }
     }
 
@@ -1326,8 +1422,28 @@ impl ParseContext {
     pub fn clone_for_independent_body(&self) -> Self {
         Self {
             trigger_zone_change: TriggerZoneChangeProvenance::none(),
+            // CR 603.12: the independent body's trigger event is not the
+            // enclosing condition, so that condition's object classification
+            // does not describe it.
+            trigger_condition_objects: TriggerConditionObjects::Unestablished,
             ..self.clone()
         }
+    }
+
+    /// CR 603.7 + CR 608.2h: enter the body of a DELAYED triggered ability the
+    /// chain creates ("at the beginning of the next end step, …", "… at the
+    /// beginning of your next upkeep").
+    ///
+    /// The delayed ability resolves later, on its own trigger event, so the
+    /// enclosing trigger's condition classification no longer describes what
+    /// the body's "it" names — and by then a source that left the battlefield
+    /// is a new object (CR 400.7) whose counters ceased to exist (CR 122.2).
+    /// Resetting the classification to `Unestablished` makes every consumer
+    /// that requires `SourceOnly` (the kinds-census pronoun gate) fail closed
+    /// in the body. In place rather than a clone: the delayed body is parsed on
+    /// the chunk's own context, whose other state that chunk keeps.
+    pub fn enter_delayed_trigger_body(&mut self) {
+        self.trigger_condition_objects = TriggerConditionObjects::Unestablished;
     }
 
     /// CR 608.2c + CR 608.2k: the binding a bare "that spell" anaphor takes here.
@@ -1639,6 +1755,45 @@ mod tests {
         );
     }
 
+    /// CR 603.1 + CR 603.12: the condition-object classification defaults to
+    /// `Unestablished`, continues through an ordinary clone and a throwaway
+    /// sub-parse of the same body, and resets for an independent body, whose
+    /// own trigger event it does not describe.
+    #[test]
+    fn trigger_condition_objects_follow_the_body_they_describe() {
+        assert_eq!(
+            ParseContext::default().trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+        let ctx = ParseContext {
+            trigger_condition_objects: TriggerConditionObjects::SourceOnly,
+            ..Default::default()
+        };
+        assert_eq!(
+            ctx.clone().trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        assert_eq!(
+            ctx.clone_throwaway().trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        assert_eq!(
+            ctx.clone_for_independent_body().trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+        assert_eq!(
+            ctx.trigger_condition_objects,
+            TriggerConditionObjects::SourceOnly
+        );
+        // CR 603.7: a delayed body resolves on its own later trigger event.
+        let mut delayed_body = ctx.clone();
+        delayed_body.enter_delayed_trigger_body();
+        assert_eq!(
+            delayed_body.trigger_condition_objects,
+            TriggerConditionObjects::Unestablished
+        );
+    }
+
     fn phrase(subject: ControllerSubject, tense: ControllerTense) -> ControllerPhrase {
         ControllerPhrase {
             subject,
@@ -1771,5 +1926,114 @@ mod tests {
                 Some(expected_they)
             );
         }
+    }
+
+    /// CR 608.2k + CR 608.2c: the characteristic rung mirrors the single "it"
+    /// authority (`resolve_it_pronoun`). It names the trigger event's object
+    /// only where bare "it" does; every nearer or self antecedent leaves it
+    /// `None`, which keeps the `Source` default.
+    #[test]
+    fn characteristic_pronoun_owner_mirrors_it_pronoun() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let event_object = Some(ObjectScope::EventSource);
+        for (label, ctx, expected) in [
+            (
+                "typed creature trigger subject",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "enchanted/equipped creature trigger subject",
+                ParseContext {
+                    subject: Some(TargetFilter::AttachedTo),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            (
+                "self subject, explicit triggering-source anaphor",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+                    ..Default::default()
+                },
+                event_object,
+            ),
+            ("no subject", ParseContext::default(), None),
+            (
+                "self subject",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "any subject",
+                ParseContext {
+                    subject: Some(TargetFilter::Any),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "cost-paid anchor",
+                ParseContext {
+                    subject: Some(TargetFilter::CostPaidObject),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer self anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                None,
+            ),
+            (
+                "typed subject, nearer parent-target anaphor",
+                ParseContext {
+                    subject: Some(creature.clone()),
+                    object_pronoun_ref: Some(TargetFilter::ParentTarget),
+                    ..Default::default()
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(
+                ctx.player_antecedents().characteristic_pronoun_owner,
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    /// CR 608.2k: the count slot's seed carries only the characteristic rung;
+    /// every player rung stays empty so relative controller phrases keep their
+    /// context-free binding.
+    #[test]
+    fn characteristic_owner_only_seed_carries_only_the_rung() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ctx),
+            PlayerAntecedents {
+                characteristic_pronoun_owner: Some(ObjectScope::EventSource),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            PlayerAntecedents::characteristic_owner_only(&ParseContext::default()),
+            PlayerAntecedents::default()
+        );
     }
 }

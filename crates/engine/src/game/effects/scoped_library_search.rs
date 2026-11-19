@@ -856,6 +856,7 @@ fn deliver_collected_cards(
                     .iter()
                     .filter_map(|id| state.objects.get(id).map(|object| object.name.clone()))
                     .collect(),
+                occurrences: state.disclosed_occurrences(&card_ids),
                 card_ids,
             });
         }
@@ -1131,11 +1132,13 @@ mod tests {
         ordinary_optional.optional = true;
         ordinary_optional.set_controller_recursive(PlayerId(0));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ordinary_optional),
             trigger_event: None,
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
 
         apply_as_current(
@@ -1556,7 +1559,12 @@ mod tests {
         )
         .unwrap();
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -1594,7 +1602,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -2140,7 +2153,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,

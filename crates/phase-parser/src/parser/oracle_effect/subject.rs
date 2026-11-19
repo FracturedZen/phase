@@ -237,8 +237,10 @@ pub(super) fn try_parse_subject_predicate_ast(
     // past-participle state assignment. The contraction "it's" fuses subject +
     // copula and cannot be split by `find_predicate_start`, so intercept the
     // pattern early and lower it to `Effect::Goad` with the pronoun-resolved
-    // target. Covers Jon Irenicus, Vislor Turlough, and any future card that
-    // sets the goaded state via copula rather than the imperative "goad it".
+    // target; the plural "they're goaded <duration>" lowers to the `Goaded`
+    // graft over the anaphor's population. Covers Jon Irenicus, Vislor
+    // Turlough, Dack Fayden, Helping Hand, and any future card that sets the
+    // goaded state via copula rather than the imperative "goad it".
     if let Some(clause) = try_parse_copula_goaded_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
@@ -873,6 +875,8 @@ fn build_conditional_protection_grant_clause(
         })
         .collect();
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -938,6 +942,8 @@ fn build_additive_type_continuous_clause(
     let affected = static_affected_for_application(application);
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1023,6 +1029,8 @@ fn try_parse_compound_all_subjects_become_clause(
     }
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1769,6 +1777,8 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -1847,7 +1857,13 @@ fn try_parse_source_and_other_restriction_clause(
     let primary_clause = build_restriction_clause(primary_application.clone(), predicate)?;
     let mut secondary_clause = build_restriction_clause(secondary_application, predicate)?;
     secondary_clause.multi_target = secondary_multi;
-    let secondary_def = super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    let (secondary_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, secondary_clause);
+    // This recognizer constructs restriction clauses directly, before history capture.
+    assert!(
+        history.is_empty(),
+        "constructed restriction has no captured history"
+    );
     *ctx = tentative;
 
     Some(ClauseAst::SubjectPredicate {
@@ -2042,6 +2058,8 @@ fn try_parse_target_and_same_name_pump_clause(
         ],
     };
     let mass_clause = ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::PumpAll {
@@ -2069,7 +2087,13 @@ fn try_parse_target_and_same_name_pump_clause(
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
     };
-    let mass_def = super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    let (mass_def, history) =
+        super::ability_definition_from_clause(AbilityKind::Spell, mass_clause);
+    // The mass clause is constructed above with empty parser provenance.
+    assert!(
+        history.is_empty(),
+        "constructed pump has no captured history"
+    );
 
     Some(ClauseAst::SubjectPredicate {
         subject: Box::new(SubjectPhraseAst {
@@ -2188,6 +2212,8 @@ fn try_parse_subject_restriction_clause(
             parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2244,6 +2270,8 @@ fn try_parse_subject_restriction_clause(
                 .map(|def| def.affected(affected.clone()))
                 .collect();
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2279,6 +2307,8 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2344,6 +2374,8 @@ fn try_parse_subject_restriction_clause(
                     });
             if let Some(application) = broadcast {
                 return Some(ParsedEffectClause {
+                    history: Vec::new(),
+                    head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
                     effect: Effect::ForceAttack {
@@ -2388,6 +2420,8 @@ fn try_parse_subject_restriction_clause(
                     TargetFilter::ParentTarget
                 ) {
                     return Some(ParsedEffectClause {
+                        history: Vec::new(),
+                        head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
@@ -2422,6 +2456,8 @@ fn try_parse_subject_restriction_clause(
                 parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
             let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -2490,6 +2526,8 @@ fn try_parse_subject_restriction_clause(
             kind: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2538,6 +2576,8 @@ fn try_parse_subject_restriction_clause(
         let affected = static_affected_for_application(&application);
         let mode = StaticMode::CantBeRegenerated;
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2574,6 +2614,8 @@ fn try_parse_subject_restriction_clause(
         };
         let affected = static_affected_for_application(&application);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -2680,6 +2722,8 @@ fn try_parse_can_attack_with_defender(
         def = def.condition(condition);
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -2729,6 +2773,8 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         return None;
     }
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
@@ -2788,6 +2834,8 @@ fn try_parse_can_block_additional(
     let mode = StaticMode::ExtraBlockers { count };
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -4467,6 +4515,22 @@ fn parse_subject_application_for(
                 player_anaphor: None,
             });
         }
+        // CR 608.2c: the nearest instruction tapped or untapped a population as a
+        // whole ("tap each creature …"); the singular "it" of the affected object
+        // agrees with that distributive head and names each object it selected,
+        // which the runtime publishes to the grant on `ParentTarget`.
+        if consumer == AnaphorConsumer::AffectedObject
+            && ctx.chain_prior_mass_tap_selection.is_some()
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+                player_anaphor: None,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,
@@ -4850,6 +4914,32 @@ pub(super) fn parse_leading_subject_application(
     parse_subject_application(&subject_text, ctx)
 }
 
+/// CR 608.2c: the singular anaphor "a creature / a permanent dealt damage this
+/// way" — a back-reference to the objects the preceding damage instruction struck
+/// ("this way"), not a fresh target. The single authority for these tags, shared
+/// by the die-exile rider (`oracle_effect/mod.rs::try_parse_die_exile_rider` and
+/// `bind_die_exile_rider_antecedent`) and the regen rider
+/// ([`subject_application_for_cant_be_regenerated`]). Prefix match on already
+/// lowercased text; callers decide what must follow.
+///
+/// Returns the card-type noun the anaphor names. CR 109.2: a card type or subtype
+/// word on its own describes a permanent of that type, so "a creature dealt damage
+/// this way" is only a creature; CR 110.1: "a permanent" is anything on the
+/// battlefield and adds no type restriction (`TypeFilter::Permanent`).
+pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, TypeFilter> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag("a creature dealt damage this way"),
+        ),
+        value(
+            TypeFilter::Permanent,
+            tag("a permanent dealt damage this way"),
+        ),
+    ))
+    .parse(i)
+}
+
 /// CR 608.2c + CR 701.19c: Resolve the subject of a DAMAGE-form
 /// "[noun] dealt damage this way can't be regenerated [this turn]" clause.
 ///
@@ -4871,9 +4961,11 @@ pub(super) fn parse_leading_subject_application(
 fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectApplication> {
     let lower = subject.to_lowercase();
     let matched = all_consuming(alt((
-        tag::<_, _, OracleError<'_>>("a creature dealt damage this way"),
-        tag("creatures dealt damage this way"),
-        tag("a permanent dealt damage this way"),
+        value((), parse_dealt_damage_this_way_subject),
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("creatures dealt damage this way"),
+        ),
     )))
     .parse(lower.as_str())
     .is_ok();
@@ -5545,6 +5637,7 @@ fn try_split_pump_compound(
     // pump as a `ChooseOneOf` sub_ability keyed to the pumped creature
     // (`ParentTarget`). Non-modal remainders ("you gain 1 life") fall back to
     // the general effect-chain parse.
+    let mut history = Vec::new();
     let sub_ability = if remainder.is_empty() {
         None
     } else if let Some((choice, choice_duration)) =
@@ -5553,12 +5646,18 @@ fn try_split_pump_compound(
         duration = duration.or(choice_duration);
         Some(Box::new(choice))
     } else {
-        Some(Box::new(super::parse_effect_chain(
-            remainder,
-            AbilityKind::Spell,
-        )))
+        let lowered = super::parse_effect_chain_with_provenance(remainder, AbilityKind::Spell);
+        history.extend(lowered.history.into_iter().map(|record| {
+            crate::parser::oracle_ir::history_provenance::PendingHistory::nested(
+                record,
+                crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility,
+            )
+        }));
+        Some(Box::new(lowered.value))
     };
     Some(ParsedEffectClause {
+        history,
+        head_text: Some(pump_part.to_string()),
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -5762,6 +5861,8 @@ fn build_keyword_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -5966,6 +6067,8 @@ fn build_pt_choice_clause(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -6013,6 +6116,8 @@ fn build_continuous_clause(
     {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6070,6 +6175,8 @@ fn build_continuous_clause(
         build_defender_attack_continuous_compound(&application, predicate_text)
     {
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -6186,6 +6293,8 @@ fn build_continuous_clause(
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6225,6 +6334,8 @@ fn build_continuous_clause(
         };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -6573,6 +6684,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6605,6 +6718,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6663,6 +6778,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6800,6 +6917,8 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::BecomeCopy {
@@ -6841,6 +6960,8 @@ fn build_become_clause(
                 .unwrap_or_default();
         let recipient = copy_recipient_for_application(&application, &target);
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::BecomeCopy {
@@ -6885,6 +7006,8 @@ fn build_become_clause(
             end_cost: None,
         };
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect,
@@ -6946,6 +7069,8 @@ fn build_become_clause(
 
     let affected = static_affected_for_application(&application);
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7085,6 +7210,8 @@ fn try_parse_become_and_attack_if_able(
     };
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7194,6 +7321,8 @@ fn try_parse_set_life_total(
         .clone()
         .unwrap_or_else(|| application.affected.clone());
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::SetLifeTotal { target, amount },
@@ -7456,6 +7585,8 @@ fn try_parse_become_choice(
     )));
 
     let clause = ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::Choose {
@@ -7535,6 +7666,8 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
             .modifications(vec![ContinuousModification::AddStaticMode { mode }])
     };
     ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -7585,26 +7718,19 @@ fn build_restriction_clause(
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
     let lower = predicate.to_lowercase();
 
-    // CR 702.18a / 702.11a: a duration-scoped "can't be the target [of ...]" grant
-    // on a subject/target (Vines of Vastwood: "target creature can't be the target
-    // of spells or abilities your opponents control this turn") is Shroud / Hexproof.
-    // Emit the keyword grant so the targeting check applies the correct controller
-    // scope (Hexproof leaves the controller able to target), reusing the enforced
-    // keyword path rather than a scope-less rule static.
+    // CR 702.18a + CR 109.5: a duration-scoped "can't be the target [of ...]"
+    // grant on a subject/target (Vines of Vastwood: "target creature can't be the
+    // target of spells or abilities your opponents control this turn"). See
+    // `cant_be_targeted_effect_grant` for why the opponent-scoped form is not
+    // Hexproof.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(&lower) {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                crate::types::keywords::Keyword::Shroud
-            }
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                crate::types::keywords::Keyword::Hexproof
-            }
-        };
         let static_def = StaticDefinition::continuous()
             .affected(static_affected_for_application(&application))
-            .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+            .modifications(vec![cant_be_targeted_effect_grant(scope)])
             .description(predicate.to_string());
         return Some(ParsedEffectClause {
+            history: Vec::new(),
+            head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
             effect: Effect::GenericEffect {
@@ -7733,10 +7859,10 @@ fn build_restriction_clause(
             // Champions of Minas Tirith. Most of the remaining variants are
             // player references or event/replacement references with no
             // fixed object set at parse time, but not all — `AttachedTo`,
-            // `AmassedArmy`, `ChosenCard`, `ExiledBySource`, `LastCreated`, and
-            // `TrackedSetFiltered` are fixed object references whose
-            // fixed-vs-live adjudication for THIS branch has not been made
-            // (`TrackedSetFiltered`'s sibling `TrackedSet` sits in the fixed
+            // `AmassedArmy`, `ChosenCard`, `ExiledBySource`, `LastCreated`,
+            // `TrackedSetFiltered`, and `ChoiceAssignment { side: Objects }`
+            // are fixed object references whose fixed-vs-live adjudication
+            // for THIS branch has not been made (`TrackedSetFiltered`'s sibling `TrackedSet` sits in the fixed
             // arm above and `additive_type_subject_application` treats the two
             // identically as an anaphoric subject kind, but that does not by
             // itself settle whether this branch's freeze-vs-broadcast choice
@@ -7770,6 +7896,7 @@ fn build_restriction_clause(
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -7814,6 +7941,8 @@ fn build_restriction_clause(
                 }])
                 .description(predicate.to_string());
             return Some(ParsedEffectClause {
+                history: Vec::new(),
+                head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
                 effect: Effect::GenericEffect {
@@ -7932,6 +8061,8 @@ fn build_restriction_clause(
         .collect();
 
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
         effect: Effect::GenericEffect {
@@ -8043,6 +8174,37 @@ fn strip_leading_conjunction(segment: &str) -> &str {
     segment
 }
 
+/// CR 702.18a + CR 109.5 + CR 611.2: the modification a resolving effect grants
+/// for "<subject> can't be the target of spells or abilities [your opponents
+/// control]".
+///
+/// The blanket form is Shroud (CR 702.18a). The opponent-scoped form is NOT
+/// Hexproof: Hexproof is the permanent's own ability, so its "your" is the
+/// permanent's controller (CR 702.11b), whereas the effect's "your" is the
+/// controller of the spell or ability that created it (CR 109.5). Vines of
+/// Vastwood's ruling: cast on an opponent's creature, that player can't target
+/// their own creature. The scoped `CantBeTargeted` is grafted onto the
+/// recipient anchored to the granting controller (`layers.rs`
+/// `static_mode_needs_source_controller_anchor`).
+pub(crate) fn cant_be_targeted_effect_grant(
+    scope: crate::parser::oracle_keyword::CantBeTargetedScope,
+) -> ContinuousModification {
+    match scope {
+        crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Shroud,
+            }
+        }
+        crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                },
+            }
+        }
+    }
+}
+
 // CR 613.2 layer 6 + CR 509.1b: Combat / untap restriction modes granted
 // to a target need `AddStaticMode` so the layer system propagates them
 // onto the granted creature's `static_definitions`.
@@ -8096,11 +8258,11 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // bypass in replacement.rs::destroy_applier observes it via
             // active_static_definitions.
             | StaticMode::CantBeRegenerated
-            // CR 702.18a: CantBeTargeted (the descriptive Shroud form) is granted to
+            // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is granted to
             // a subject/target creature and must propagate onto its
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
             // observes it via active_static_definitions.
-            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeTargeted { .. }
     )
 }
 
@@ -8285,17 +8447,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             BlockFilterPhrase::Unconstrained => {}
         }
     }
-    // CR 702.18a: "can't be the target of spells or abilities" is blanket Shroud,
-    // modeled as `CantBeTargeted` (propagated onto the subject via `AddStaticMode`
-    // and enforced in `can_target`). CR 702.11a: the opponent-scoped variant is
-    // Hexproof — a keyword grant this rule-mode parser can't express, so it is
-    // handled by the keyword-grant path and deliberately not produced here, lest a
-    // bare `CantBeTargeted` over-block the controller.
-    if matches!(
-        crate::parser::oracle_keyword::classify_cant_be_targeted(lower),
-        Some(crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer)
-    ) {
-        return Some(vec![StaticMode::CantBeTargeted]);
+    // CR 702.18a / CR 702.11b / CR 109.5: "can't be the target of spells or abilities [your opponents control]"
+    // is modeled as `CantBeTargeted { who }` (propagated onto the subject via `AddStaticMode`
+    // and enforced in `can_target`).
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(lower) {
+        let who = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::statics::ProhibitionScope::AllPlayers
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::statics::ProhibitionScope::Opponents
+            }
+        };
+        return Some(vec![StaticMode::CantBeTargeted { who }]);
     }
     // CR 119.7: "can't gain life" — a player can't make their life total increase.
     if all_consuming(alt((
@@ -8461,27 +8625,44 @@ fn extract_pump_modifiers(
 /// This helper catches the pattern early and lowers it to `Effect::Goad` with the
 /// pronoun-resolved target and an optional trailing duration.
 ///
+/// The plural copula ("they're goaded <duration>" / "they are goaded
+/// <duration>") is the same state assignment over every member of the anaphor's
+/// population: it lowers to the `Goaded` graft over `ParentTarget`, and only
+/// with a stated duration. After an admitted population producer, the chain
+/// parser's grant-narrowing hook (`parse_effect_chain_ir_body`) lowers that
+/// `ParentTarget` to the producer's population form (a reveal-until's kept
+/// permanents).
+///
 /// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
-/// Vislor Turlough ("it's goaded for as long as they control it"), and the
-/// non-contracted form ("it is goaded").
+/// Vislor Turlough ("it's goaded for as long as they control it"), the
+/// non-contracted form ("it is goaded"), and Dack Fayden, Helping Hand
+/// (plural: "They're goaded for the rest of the game").
 fn try_parse_copula_goaded_clause(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    // Strip subject + copula: "it's goaded ..." / "it is goaded ..."
-    let after_subject = alt((
-        preceded(
-            tag::<_, _, OracleError<'_>>("it's "),
-            tag::<_, _, OracleError<'_>>("goaded"),
-        ),
-        preceded(tag::<_, _, OracleError<'_>>("it is "), tag("goaded")),
-    ))
+    // Strip subject + copula: "it's goaded ..." / "it is goaded ..." /
+    // "they're goaded ..." / "they are goaded ...". The pronoun's grammatical
+    // number selects the lowering below.
+    let (after_subject, number) = terminated(
+        alt((
+            value(
+                AnaphorNumber::Singular,
+                alt((tag::<_, _, OracleError<'_>>("it's "), tag("it is "))),
+            ),
+            value(
+                AnaphorNumber::Plural,
+                alt((tag("they're "), tag("they\u{2019}re "), tag("they are "))),
+            ),
+        )),
+        tag("goaded"),
+    )
     .parse(lower.as_str())
     .ok()?;
-    let remainder = after_subject.0.trim_start().trim_end_matches('.').trim();
+    let remainder = after_subject.trim_start().trim_end_matches('.').trim();
     // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
-    let duration = if remainder.is_empty() {
+    let inline_duration = if remainder.is_empty() {
         // CR 701.15a: Default goad duration is until the goading player's next turn.
         None
     } else {
@@ -8497,11 +8678,53 @@ fn try_parse_copula_goaded_clause(
         }
         Some(d)
     };
-    let target = resolve_it_pronoun(ctx);
+    let (effect, duration) = match number {
+        AnaphorNumber::Singular => (
+            Effect::Goad {
+                target: resolve_it_pronoun(ctx),
+            },
+            inline_duration,
+        ),
+        AnaphorNumber::Plural => {
+            // CR 701.15a: a plural copula with no stated duration has no printed
+            // card; decline (honest red) rather than guess the default-duration
+            // lowering.
+            let duration = inline_duration.or_else(|| ctx.stated_clause_duration.clone())?;
+            let application =
+                parse_subject_application_for("they", ctx, AnaphorConsumer::AffectedObject)?;
+            let affected = static_affected_for_application(&application);
+            // CR 608.2c: bind only the population anaphor (ParentTarget); any
+            // other referent declines.
+            if !matches!(affected, TargetFilter::ParentTarget) {
+                return None;
+            }
+            // CR 701.15a + CR 701.15b + CR 611.2a: "they're goaded <duration>" —
+            // the plural copula designates every member of the anaphor's
+            // population, goaded by the ability's controller, for the stated
+            // duration (CR 101.1: the card's duration overrides the CR 701.15a
+            // default).
+            (
+                Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(affected)
+                        .modifications(vec![ContinuousModification::AddStaticMode {
+                            mode: StaticMode::Goaded,
+                        }])
+                        .description("goaded".to_string())],
+                    duration: Some(duration.clone()),
+                    target: None,
+                    end_cost: None,
+                },
+                Some(duration),
+            )
+        }
+    };
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
-        effect: Effect::Goad { target },
+        effect,
         duration,
         sub_ability: None,
         distribute: None,
@@ -8657,6 +8880,8 @@ pub(super) fn try_parse_each_deals_damage_equal_to_power(text: &str) -> Option<P
     // returns None for this effect → no-op) and the resolver reads only the flat
     // `ability.targets` vector, never `extra_source`.
     Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
         multi_target: Some(multi_target),
         ..super::parsed_clause(Effect::EachDealsDamageEqualToPower {
             sources,
@@ -13718,6 +13943,103 @@ mod tests {
         assert!(try_parse_copula_goaded_clause("it's goaded and draws a card", &mut ctx).is_none());
     }
 
+    /// The `Goaded` graft over the anaphor's population with `duration`, the
+    /// shape the plural copula lowers to.
+    fn assert_plural_goad_graft(clause: &ParsedEffectClause, duration: Duration) {
+        match &clause.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                duration: effect_duration,
+                target: None,
+                end_cost: None,
+            } => {
+                assert_eq!(static_abilities.len(), 1, "{static_abilities:?}");
+                let grant = &static_abilities[0];
+                assert_eq!(grant.affected, Some(TargetFilter::ParentTarget));
+                assert_eq!(
+                    grant.modifications,
+                    vec![ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    }]
+                );
+                assert_eq!(effect_duration.as_ref(), Some(&duration));
+            }
+            other => panic!("expected the Goaded graft, got {other:?}"),
+        }
+        assert_eq!(clause.duration, Some(duration));
+    }
+
+    /// A3.1-u (SHAPE): CR 701.15a + CR 701.15b + CR 611.2a — every plural
+    /// copula spelling with "for the rest of the game" lowers to the `Goaded`
+    /// graft over `ParentTarget` with a permanent duration.
+    #[test]
+    fn copula_goaded_plural_lowers_to_the_population_graft() {
+        for text in [
+            "they're goaded for the rest of the game",
+            "they\u{2019}re goaded for the rest of the game",
+            "they are goaded for the rest of the game",
+        ] {
+            let mut ctx = ParseContext::default();
+            let clause = try_parse_copula_goaded_clause(text, &mut ctx)
+                .unwrap_or_else(|| panic!("{text} should parse"));
+            assert_plural_goad_graft(&clause, Duration::Permanent);
+        }
+    }
+
+    /// A3.1-u (SHAPE): the clause shell's peeled trailing duration
+    /// (`ParseContext::stated_clause_duration`) is the plural copula's duration.
+    #[test]
+    fn copula_goaded_plural_reads_the_stated_clause_duration() {
+        let mut ctx = ParseContext {
+            stated_clause_duration: Some(Duration::Permanent),
+            ..Default::default()
+        };
+        let clause =
+            try_parse_copula_goaded_clause("they're goaded", &mut ctx).expect("should parse");
+        assert_plural_goad_graft(&clause, Duration::Permanent);
+    }
+
+    /// A3.1-u: CR 701.15a — a plural copula with no stated duration, a
+    /// swallowed trailing conjunct, and a non-goad predicate are declined.
+    /// Reach-guard: the singular no-duration form still parses (the subject
+    /// axis reached the singular arm unchanged).
+    #[test]
+    fn copula_goaded_plural_declines_without_a_stated_duration() {
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause("they're goaded", &mut ctx).is_none());
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game and gain haste",
+            &mut ctx,
+        )
+        .is_none());
+        assert!(try_parse_copula_goaded_clause("they're attacking", &mut ctx).is_none());
+        let singular =
+            try_parse_copula_goaded_clause("it's goaded", &mut ctx).expect("singular parses");
+        assert!(matches!(singular.effect, Effect::Goad { .. }));
+    }
+
+    /// A3.1-u: CR 608.2c — when "they" names a player (a chosen player is in
+    /// scope), the plural copula declines rather than goad a non-population
+    /// referent. Reach-guard: the same text under a default context parses.
+    #[test]
+    fn copula_goaded_plural_declines_a_player_referent() {
+        let mut player_scope = ParseContext {
+            relative_player_scope: Some(ControllerRef::ChosenPlayer { index: 0 }),
+            ..Default::default()
+        };
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game",
+            &mut player_scope,
+        )
+        .is_none());
+        let mut ctx = ParseContext::default();
+        assert!(try_parse_copula_goaded_clause(
+            "they're goaded for the rest of the game",
+            &mut ctx
+        )
+        .is_some());
+    }
+
     // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
     // `Effect::BecomeBlocked` whose target is a Typed(creature) filter carrying
     // both FilterProp::BlockStatus { Unblocked } and FilterProp::Attacking. SHAPE test — runtime
@@ -14129,6 +14451,126 @@ mod tests {
             );
         }
     }
+
+    /// Every node of `def`'s chain (`sub_ability` and `else_ability`), in walk order.
+    fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut stack = vec![def];
+        while let Some(node) = stack.pop() {
+            out.push(node);
+            stack.extend(node.else_ability.as_deref());
+            stack.extend(node.sub_ability.as_deref());
+        }
+        out
+    }
+
+    /// The `affected` of every `CantUntap` static granted anywhere in `text`'s
+    /// parse as an Instant.
+    fn cant_untap_affected(text: &str) -> Vec<Option<TargetFilter>> {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        parsed
+            .abilities
+            .iter()
+            .flat_map(chain_nodes)
+            .filter_map(|node| match &*node.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => Some(static_abilities),
+                _ => None,
+            })
+            .flatten()
+            .filter(|def| def.mode == StaticMode::CantUntap)
+            .map(|def| def.affected.clone())
+            .collect()
+    }
+
+    /// CR 608.2c + CR 502.3: a bare "it" that is the affected object of the
+    /// instruction right after a mass tap names each object that tap selected
+    /// (`ParentTarget`, published by the runtime to the grant). A nearer clause
+    /// keeps "it" off the selection, and a non-affected-object reader (a damage
+    /// source) keeps its own binding. Synthetic texts: no printed card has these
+    /// shapes; Triton Tactics' delayed payload is the nearest printed card.
+    #[test]
+    fn bare_it_after_mass_tap_names_the_selected_population() {
+        // (a) the adjacent restriction names the population.
+        let text = "Tap each creature your opponents control and it doesn't untap during its controller's next untap step.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let head = parsed.abilities.first().expect("one ability");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "reach guard: the head is the mass tap; {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            cant_untap_affected(text),
+            vec![Some(TargetFilter::ParentTarget)],
+            "(a) \"it\" names each creature the mass tap selected"
+        );
+
+        // (b) a nearer clause is the nearer antecedent: "it" keeps its BASE binding.
+        assert_eq!(
+            cant_untap_affected(
+                "Tap each creature your opponents control. Draw a card. It doesn't untap during its controller's next untap step."
+            ),
+            vec![Some(TargetFilter::SelfRef)],
+            "(b) a non-adjacent \"it\" is not the mass selection"
+        );
+
+        // (d) a damage source is not an affected object: the rung does not reach it.
+        let damage = crate::parser::oracle::parse_oracle_text(
+            "Tap each creature your opponents control. It deals 1 damage to each opponent.",
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let head = damage.abilities.first().expect("one ability");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "reach guard: the head is the mass tap; {:?}",
+            damage.abilities
+        );
+        let rider = head
+            .sub_ability
+            .as_deref()
+            .expect("reach guard: the damage instruction follows the mass tap");
+        // `DamageEachPlayer` has no source or recipient slot that could name the
+        // mass selection: the resolver deals the damage from `ability.source_id`.
+        // The exact effect is therefore the damage source keeping its own binding,
+        // and it fails if the rider is `Unimplemented` or any other effect.
+        assert_eq!(
+            *rider.effect,
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::Opponent,
+            },
+            "(d) \"It deals 1 damage to each opponent\" parses as the spell's own damage"
+        );
+    }
 }
 
 /// CR 611.2e: the onset each clause parser stamps from the verb form it recognized. The
@@ -14410,6 +14852,68 @@ mod entry_onset_tests {
             "the animation sits in the Otherwise branch: {mode:#?}"
         );
         assert_eq!(found[0].entry_onset, WithEntry, "animation");
+    }
+
+    /// CR 611.2e + CR 613.1f: Xu-Ifit's "It's a Skeleton in addition to its other types and has
+    /// no abilities" rider removes all abilities of the returned object, with the entry. The
+    /// "loses all other abilities" arm (Hellcat) keeps its `WhenFollowed` onset.
+    #[test]
+    fn xu_ifit_has_no_abilities_rider_removes_all_abilities_with_entry() {
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::zones::Zone;
+        let strings = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let remove_all =
+            |m: &ContinuousModification| matches!(m, ContinuousModification::RemoveAllAbilities);
+
+        let xu = parse_oracle_text(
+            "{T}: Return target creature card from your graveyard to the battlefield. It's a Skeleton in addition to its other types and has no abilities. Activate only as a sorcery.",
+            "Xu-Ifit, Osteoharmonist",
+            &[],
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Wizard"]),
+        );
+        let def = xu.abilities.first().expect("the activated ability");
+        // Reach guard: the root is the graveyard return, and the Skeleton rider node exists.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            ),
+            "root effect: {def:#?}"
+        );
+        let skeleton = become_nodes(
+            def,
+            &TargetFilter::ParentTarget,
+            |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Skeleton"),
+        );
+        assert_eq!(skeleton.len(), 1, "Skeleton rider node: {def:#?}");
+        let removal = become_nodes(def, &TargetFilter::ParentTarget, remove_all);
+        assert_eq!(removal.len(), 1, "RemoveAllAbilities node: {def:#?}");
+        assert!(
+            std::ptr::eq(removal[0], skeleton[0]),
+            "the Skeleton and the removal share the rider node: {def:#?}"
+        );
+        assert_eq!(removal[0].entry_onset, WithEntry, "ability removal onset");
+
+        let hellcat = parse_oracle_text(
+            "Haste\nWhen Hellcat dies, return her to the battlefield under her owner's control with a +1/+1 counter on her. She loses all abilities and gains haste.",
+            "Hellcat, Undying Vigilante",
+            &strings(&["Haste"]),
+            &strings(&["Legendary", "Creature"]),
+            &strings(&["Human", "Hero"]),
+        );
+        let execute = hellcat
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("the dies trigger's execute chain");
+        let removal = become_nodes(execute, &TargetFilter::SelfRef, remove_all);
+        assert_eq!(removal.len(), 1, "Hellcat removal node: {execute:#?}");
+        assert_eq!(removal[0].entry_onset, WhenFollowed, "Hellcat onset");
     }
 
     /// CR 205.1b: "It's still a land" qualifies the governing "becomes"; neither it nor the

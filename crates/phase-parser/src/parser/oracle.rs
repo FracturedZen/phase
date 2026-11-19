@@ -29,7 +29,7 @@ use crate::types::ability_visit::{
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
-use crate::types::format::DeckCopyLimit;
+use crate::types::format::{DeckCopyLimit, DeckSizeOverride};
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant};
 use crate::types::phase::Phase;
@@ -80,8 +80,7 @@ use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     ability_chain_grants_chosen_color_keyword, lower_ability_ir, parse_ability_ir_standalone,
     parse_ability_ir_with_context, parse_additional_cost_instead_condition_fragment,
-    parse_effect_chain, parse_effect_chain_with_context,
-    parse_effect_chain_with_context_ability_root, parse_phase_name_set,
+    parse_effect_chain_with_context_and_provenance, parse_phase_name_set,
     parse_windowed_replacement_install_ir, rewrite_condition_keyword, target_filter_controller_ref,
     try_parse_temporal_delayed_trigger_ability,
 };
@@ -119,11 +118,13 @@ use super::oracle_modal::{
     split_short_label_prefix, strip_ability_word, strip_ability_word_with_name,
     strip_flavor_word_with_name, AnchorModeIr, OracleBlockIr, FLAVOR_WORD_COST_LABEL_MAX_WORDS,
 };
+#[cfg(test)]
+use super::oracle_replacement::parse_as_enters_one_shot_replacement;
 use super::oracle_replacement::{
     as_long_as_gate_is_unparsed, damage_prevention_fails_closed, enters_with_fails_closed,
     find_copy_verb_present, is_as_self_enters_frame, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir,
-    parse_as_enters_one_shot_replacement, parse_bidirectional_damage_prevention,
+    parse_as_enters_one_shot_replacement_with_provenance, parse_bidirectional_damage_prevention,
     parse_oneshot_damage_replacement, parse_replacement_line, parse_replacement_line_ir,
     parse_whenever_you_cast_enters_with_outcome, parse_windowed_graveyard_redirect_install,
     CastEntersWithOutcome, EntersWithGap,
@@ -461,6 +462,100 @@ pub fn is_deck_construction_copy_limit_sentence(line: &str) -> bool {
         || lower.trim() == "megalegendary"
 }
 
+/// CR 903.5a: Strip one leading "<Word> — " ability-word label ("Rulebreaker — ")
+/// from a deck-construction size sentence. The label carries no rules meaning
+/// (CR 207.2c); the dispatch loop reaches the size sentence with the label
+/// still attached, so this runs inside the size-sentence combinator rather than
+/// in the ability-word strip pass. Combinators only: `opt` backtracks when the
+/// dash tail is absent, leaving ordinary sentences untouched.
+fn strip_deck_size_label(input: &str) -> OracleResult<'_, ()> {
+    opt(terminated(
+        take_while(|c: char| c.is_alphanumeric()),
+        alt((tag(" \u{2014} "), tag(" - "))),
+    ))
+    .parse(input)
+    .map(|(rest, _)| (rest, ()))
+}
+
+/// CR 903.5a: Parse a deck-construction maximum-size sentence into ().
+/// Class A (Whtz, the Bibliophile): "a deck with this commander has no
+/// maximum deck size". Class B (Covert Blue Mage): "if <subject> is your
+/// commander, your starting deck can contain any number of cards beyond the
+/// maximum deck size" — the subject must be this face (card name or "~");
+/// a partner that merely shares the deck MUST NOT match (the hostile
+/// partner-neither-Rulebreaker row). Class C/D (companions, Rulebreaker
+/// keyword) never reach this shape. The leading ability-word label is
+/// stripped by [`strip_deck_size_label`].
+fn parse_deck_size_sentence<'a>(input: &'a str, card_name_lower: &str) -> OracleResult<'a, ()> {
+    let (input, _) = strip_deck_size_label(input)?;
+    alt((
+        // Class A: no-maximum marker (Whtz).
+        value(
+            (),
+            terminated(
+                tag("a deck with this commander has no maximum deck size"),
+                opt(tag(".")),
+            ),
+        ),
+        // Class B: beyond-maximum marker (Covert Blue Mage).
+        (|input: &'a str| {
+            let (input, subject) =
+                preceded(tag("if "), take_until(" is your commander, ")).parse(input)?;
+            if subject.trim() != card_name_lower && subject.trim() != "~" {
+                return Err(nom::Err::Error(OracleError::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+            let (input, _) = tag(" is your commander, ").parse(input)?;
+            let (input, _) = tag(
+                "your starting deck can contain any number of cards beyond the maximum deck size",
+            )
+            .parse(input)?;
+            let (input, _) = opt(tag(".")).parse(input)?;
+            Ok((input, ()))
+        }),
+    ))
+    .parse(input)
+}
+
+/// CR 903.5a: Recognize a deck-construction maximum-size sentence so the line
+/// is consumed as [`DeckSizeOverride`] metadata (see
+/// `compute_no_maximum_deck_size_from_text`, read by deck validation) instead
+/// of falling through to an unimplemented gap (see `Effect::unimplemented`).
+pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    let card_name_lower = card_name.trim().to_ascii_lowercase();
+    let mut recognize = all_consuming(|input| parse_deck_size_sentence(input, &card_name_lower));
+    recognize.parse(lower.as_str()).is_ok()
+}
+
+/// CR 903.5a: Extract the deck-construction no-maximum marker from a card's
+/// full Oracle text, scanning each line. The marker sentence is its own
+/// printed line ("Rulebreaker — A deck with this commander has no maximum
+/// deck size."), so unlike the copy-limit tail sentences no per-sentence
+/// split is needed; the same combinator both extracts the marker (for deck
+/// validation) and recognizes the line. The first match wins. Reminder text
+/// is stripped per line before matching: the Class B sentence carries its
+/// 120-card example as a parenthetical on the same printed line, which would
+/// otherwise defeat the all-consuming recognizer. Reminder-text bodies carry
+/// no size sentence of their own, so they are stripped, never scanned.
+pub fn compute_no_maximum_deck_size_from_text(
+    text: &str,
+    card_name: &str,
+) -> Option<DeckSizeOverride> {
+    for line in text.lines() {
+        let stripped = strip_reminder_text(line);
+        if stripped.is_empty() {
+            continue;
+        }
+        if is_deck_construction_size_sentence(&stripped, card_name) {
+            return Some(DeckSizeOverride::NoMaximum);
+        }
+    }
+    None
+}
+
 /// Recognizer for draft-time procedural sentences on Conspiracy / "draft
 /// matters" cards (CR 905). These instruct the booster draft itself — "Draft
 /// this card face up.", "As you draft a card, …", "During the draft, …",
@@ -585,12 +680,18 @@ fn emit_as_enters_one_shot(
     line: &str,
     card_name: &str,
 ) -> bool {
-    let Some(definition) = parse_as_enters_one_shot_replacement(line, card_name) else {
+    let Some(definition) = parse_as_enters_one_shot_replacement_with_provenance(line, card_name)
+    else {
         return false;
     };
     emitter.emit_at(
         item_line,
-        OracleNodeIr::Replacement(ReplacementIr::from_definition(line, definition)),
+        OracleNodeIr::Replacement(ReplacementIr {
+            history: definition.history,
+            definition: definition.value,
+            source_text: line.to_string(),
+            execute_ir: None,
+        }),
         OuterRoute::Replacement,
     );
     true
@@ -619,7 +720,7 @@ fn emit_enters_with_clause_gap(
 fn try_parse_opening_hand_reveal_delayed_trigger(
     line: &str,
     lower: &str,
-) -> Option<AbilityDefinition> {
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
     let (condition, rest) = nom_on_lower(line, lower, |input| {
         let (input, _) =
             tag("you may reveal this card from your opening hand. if you do, ").parse(input)?;
@@ -646,14 +747,14 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target. Keep the
     // Standalone lowering mode this builder already used.
-    let effect = crate::parser::oracle_effect::lower_ability_ir(
+    let mut lowered = crate::parser::oracle_effect::lower_ability_ir_with_provenance(
         &crate::parser::oracle_effect::parse_ability_ir_standalone_with_spell_anaphor(
             rest,
             AbilityKind::Spell,
             SpellAnaphorBinding::EventSource,
         ),
     );
-    if has_unimplemented(&effect) {
+    if has_unimplemented(&lowered.value) {
         return None;
     }
 
@@ -661,7 +762,7 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
         AbilityKind::Spell,
         Effect::CreateDelayedTrigger {
             condition,
-            effect: Box::new(effect),
+            effect: Box::new(lowered.value),
             uses_tracked_set: false,
         },
     );
@@ -675,7 +776,15 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
     .sub_ability(delayed)
     .description(line.to_string());
     def.optional = true;
-    Some(def)
+    for record in &mut lowered.history {
+        record
+            .prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::DelayedPayload);
+        record.prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+    }
+    Some(crate::parser::oracle_ir::history_provenance::Lowered {
+        value: def,
+        history: lowered.history,
+    })
 }
 
 /// CR 103.6 / CR 103.6a: Parse an "opening hand, begin the game with ~ on the
@@ -697,7 +806,10 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
 /// is near-isomorphic to Forsaken City's `optional: true` + `IfYouDo`
 /// sub-ability layout (Forsaken City proves `parse_effect_chain` handles the
 /// "exile a card from your hand" tail).
-fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition> {
+fn parse_begin_game_clause(
+    line: &str,
+    lower: &str,
+) -> Option<crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>> {
     // Closure consumes the structural prefix on the lowercased view. It returns
     // (not_starting_player, counters); the original-case remainder (mapped back
     // by `nom_on_lower`) is the "If you do, [effect]" tail — empty when absent.
@@ -777,20 +889,36 @@ fn parse_begin_game_clause(line: &str, lower: &str) -> Option<AbilityDefinition>
 
     // Optional "If you do, [effect]" dependent sub-ability. A non-empty
     // remainder means the line carried a follow-up sentence.
+    let mut history = Vec::new();
     let effect_text = effect_text.trim().trim_end_matches('.').trim();
     if !effect_text.is_empty() {
         // CR 701.13a: "exile a card from your hand" resolves to a player-choice
         // exile via `parse_effect_chain` (proven by Forsaken City's identical
         // tail). The `IfYouDo` condition gates it so it only fires when the
         // player accepted the begin-game opt-in.
-        let sub = parse_effect_chain(effect_text, AbilityKind::Spell);
-        if has_unimplemented(&sub) {
+        let mut lowered = crate::parser::oracle_effect::parse_effect_chain_with_provenance(
+            effect_text,
+            AbilityKind::Spell,
+        );
+        if has_unimplemented(&lowered.value) {
             return None;
         }
-        def = def.sub_ability(sub.condition(AbilityCondition::effect_performed()));
+        for record in &mut lowered.history {
+            record
+                .prepend(crate::parser::oracle_ir::history_provenance::InstructionStep::SubAbility);
+        }
+        history.extend(lowered.history);
+        def = def.sub_ability(
+            lowered
+                .value
+                .condition(AbilityCondition::effect_performed()),
+        );
     }
 
-    Some(def)
+    Some(crate::parser::oracle_ir::history_provenance::Lowered {
+        value: def,
+        history,
+    })
 }
 
 /// Parse the "with [N] [type] counter(s) on it" sub-clause of a begin-game line.
@@ -1929,7 +2057,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
             target_filter_uses_filter_prop(filter, pred)
         }
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter
@@ -1969,6 +2097,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -1997,7 +2126,7 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -2019,7 +2148,6 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -2910,6 +3038,7 @@ fn plain_own_graveyard_cast_grant_filter(effect: &Effect) -> Option<&TargetFilte
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: PermissionCastLimit::Unlimited,
@@ -2976,6 +3105,7 @@ fn coordinated_graveyard_permission(cast_target: &TargetFilter) -> Option<Static
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: PermissionCastLimit::Unlimited,
@@ -3952,6 +4082,7 @@ fn is_spell_resolution_instruction_line(
     ctx.diagnostics.truncate(loyalty_snap);
     if is_commander_permission_sentence(line)
         || is_deck_construction_copy_limit_sentence(line)
+        || is_deck_construction_size_sentence(line, card_name)
         || is_draft_matters_sentence(line)
         || is_loyalty
     {
@@ -4110,7 +4241,12 @@ fn is_spell_resolution_instruction_line(
     // A classification probe, not an ability-body producer. Keep the nested
     // default: the line may continue a spell with earlier target declarations.
     let snapshot = ctx.diagnostics.len();
-    let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
+    let parsed = parse_effect_chain_with_context_and_provenance(
+        &prepared.effect_text,
+        AbilityKind::Spell,
+        ctx,
+    )
+    .value;
     ctx.diagnostics.truncate(snapshot);
     !has_unimplemented(&parsed)
 }
@@ -4516,13 +4652,15 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // The match stays EXHAUSTIVE over `OracleNodeIr` (no `_` arm): it is now the
     // single place a new node variant must declare whether it consumes a printed
     // slot, an obligation `finish()` used to carry.
-    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for a lone "enchanted/
-    // equipped X" instruction that names its host without targeting it. Only the
-    // card's own spell/activated items and parsed effect-chain triggers are
-    // candidates; each records its printed-clause evidence here, and the
-    // conversion itself runs after every document relation has composed the
-    // final abilities (`convert_terminal_attachment_host_references` below), so a
-    // candidate that composition gives a follower, or folds into another
+    // CR 115.10a + CR 303.4b + CR 301.5f: candidates for an "enchanted/
+    // equipped X" instruction that names its host without targeting it, alone
+    // or followed only by instructions on that host ("it", "that land's
+    // controller"). Only the card's own spell/activated items and parsed
+    // effect-chain triggers are candidates; each records its printed-clause
+    // evidence here, and the conversion itself runs after every document
+    // relation has composed the final abilities
+    // (`convert_terminal_attachment_host_references` below), so a candidate
+    // that composition gives any other follower, or folds into another
     // ability, keeps its target.
     //
     // CR 700.2: conservatively, a document that carries a modal choice
@@ -4533,11 +4671,21 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         .items
         .iter()
         .any(|item| matches!(item.node, OracleNodeIr::Modal(_)));
+    let mut history_provenance = Vec::new();
     let mut host_reference_candidates = HostReferenceCandidates::default();
     for item in &ir.items {
         match &item.node {
             OracleNodeIr::Spell(ability_ir) => {
-                let mut def = lower_ability_ir(ability_ir);
+                let lowered =
+                    crate::parser::oracle_effect::lower_ability_ir_with_provenance(ability_ir);
+                let mut def = lowered.value;
+                history_provenance.extend(lowered.history.into_iter().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::Ability,
+                        record,
+                    }
+                }));
                 if !owns_modal_modes {
                     host_reference_candidates.abilities.push((
                         item.id,
@@ -4584,7 +4732,25 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 printed_ability_slot += 1;
             }
             OracleNodeIr::Trigger(trigger_node) => {
-                let mut def = lower_trigger_node_ir(trigger_node);
+                let lowered = match trigger_node {
+                    TriggerNodeIr::Parsed(trigger) => {
+                        crate::parser::oracle_trigger::lower_trigger_ir_with_provenance(trigger)
+                    }
+                    TriggerNodeIr::Assembled { history, .. } => {
+                        crate::parser::oracle_ir::history_provenance::Lowered {
+                            value: lower_trigger_node_ir(trigger_node),
+                            history: history.clone(),
+                        }
+                    }
+                };
+                let mut def = lowered.value;
+                history_provenance.extend(lowered.history.into_iter().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::TriggerExecute,
+                        record,
+                    }
+                }));
                 // The card's own parsed effect-chain trigger is a candidate.
                 // Recorded here, not in `lower_trigger_ir`, which also lowers
                 // triggers quoted inside a grant ("… has 'When …'"); those keep
@@ -4608,6 +4774,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 static_ids.push(item.id);
             }
             OracleNodeIr::Replacement(replacement_ir) => {
+                history_provenance.extend(replacement_ir.history.iter().cloned().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::ReplacementExecute,
+                        record,
+                    }
+                }));
                 result
                     .replacements
                     .push(lower_replacement_ir(replacement_ir));
@@ -4641,6 +4814,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
                 trigger_ids.push(item.id);
             }
             OracleNodeIr::PreLoweredSpell(def) => {
+                history_provenance.extend(item.ability_history.iter().cloned().map(|record| {
+                    crate::parser::oracle_ir::history_provenance::DocumentHistory {
+                        item: item.id,
+                        root: crate::parser::oracle_ir::history_provenance::HistoryRoot::Ability,
+                        record,
+                    }
+                }));
                 let mut def = def.clone();
                 stamp_printed_ability_slot(&mut def, printed_ability_slot);
                 result.abilities.push(def);
@@ -4669,6 +4849,16 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // → etb-exile → punisher). Order is behavior-load-bearing: the swallow audit
     // reads `result` between the player-persist and the etb-exile/punisher
     // applications.
+    let history_transports = crate::parser::oracle_ir::feature::capture_document_history(
+        &history_provenance,
+        &result,
+        &ItemIdTracks {
+            abilities: &ability_ids,
+            triggers: &trigger_ids,
+            statics: &static_ids,
+            replacements: &replacement_ids,
+        },
+    );
     apply_self_replacement_override(&mut result, &ir.relations, &mut ability_ids);
     apply_linked_choice_etb_counter(&mut result, &ir.relations, &mut replacement_ids);
     apply_linked_choice_constrained_card_type_static(
@@ -4743,12 +4933,20 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         statics: &static_ids,
         replacements: &replacement_ids,
     };
+    crate::parser::oracle_ir::feature::finish_document_history(
+        &mut history_provenance,
+        history_transports,
+        &result,
+        &tracks,
+    );
     let mut swallow_diagnostics = Vec::new();
     super::swallow_check::check_swallowed_clauses(
         &audit_items,
         &ir.source_text,
+        &ir.card_name,
         &result,
         &tracks,
+        &history_provenance,
         &mut swallow_diagnostics,
     );
     ir.diagnostics.append(&mut swallow_diagnostics);
@@ -4806,7 +5004,7 @@ struct HostReferenceCandidates {
 /// resolved through its own category's id track only: one that a relation
 /// folded into another ability (a CR 614.15 self-replacement override) or moved
 /// elsewhere is no longer there and keeps its target, and one that composition
-/// gave a follower is refused by the converter.
+/// gave a follower other than a host anaphor is refused by the converter.
 fn convert_terminal_attachment_host_references(
     result: &mut ParsedAbilities,
     candidates: &HostReferenceCandidates,
@@ -5488,6 +5686,17 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def), route)
     }
 
+    fn ability_with_provenance_at_route(
+        &mut self,
+        line: usize,
+        lowered: crate::parser::oracle_ir::history_provenance::Lowered<AbilityDefinition>,
+        route: OuterRoute,
+    ) -> OracleItemId {
+        let id = self.ability_at_route(line, lowered.value, route);
+        self.builder.set_ability_history(id, lowered.history);
+        id
+    }
+
     /// The IR seam for spell/activated bodies — Plan 05b Unit 3b, **phase B**.
     ///
     /// Every producer that reaches this method is IR-native: the `AbilityIr`
@@ -5692,7 +5901,12 @@ impl<'a> DocEmitter<'a> {
     /// stay emitted and lowering binds them by id — so nothing pops-and-rebuilds
     /// here any more. `pop_last_spell`, the wrapper that served only that fold,
     /// went with it; `take_last_spell` itself is still live beneath this method.
-    fn reemit_node(&mut self, source: &OracleUnitSource, node: OracleNodeIr) {
+    fn reemit_node(
+        &mut self,
+        source: &OracleUnitSource,
+        node: OracleNodeIr,
+        history: Vec<crate::parser::oracle_ir::history_provenance::HistoryProvenance>,
+    ) {
         let old_id = source.id().item;
         let span = source.span().clone();
         let fragment = source.fragment();
@@ -5701,6 +5915,7 @@ impl<'a> DocEmitter<'a> {
             .builder
             .emit(slot, node)
             .expect("re-emitting at the just-freed original key cannot collide");
+        self.builder.set_ability_history(new_id, history);
         if let Some(observer) = self.observer.as_deref_mut() {
             if let Some(event) = observer
                 .events
@@ -5733,13 +5948,16 @@ impl<'a> DocEmitter<'a> {
             return;
         };
         let OracleItemIr {
-            source, mut node, ..
+            source,
+            mut node,
+            ability_history,
+            ..
         } = item;
         let floor = node.spell_min_x_mut().expect(
             "`spells_emitted` holds only spell nodes, and all three spell shapes carry an X floor",
         );
         *floor = (*floor).max(min_x_value);
-        self.reemit_node(&source, node);
+        self.reemit_node(&source, node, ability_history);
     }
 
     /// Seal parse-time provenance after all retention/deduplication decisions.
@@ -6130,7 +6348,11 @@ fn parse_normalized_oracle_ir(
             // overwrite that would replace it with `source_text`.
             emitter.trigger_ir_at_route(
                 line,
-                TriggerNodeIr::from_definition(source_lines[line], trigger),
+                TriggerNodeIr::from_definition_with_history(
+                    source_lines[line],
+                    trigger.value,
+                    trigger.history,
+                ),
                 OuterRoute::Saga,
             );
         }
@@ -6152,7 +6374,11 @@ fn parse_normalized_oracle_ir(
             // invent the other from `source_text`.
             emitter.trigger_ir_at_route(
                 line,
-                TriggerNodeIr::from_definition(lines[line], trigger),
+                TriggerNodeIr::from_definition_with_history(
+                    lines[line],
+                    trigger.value,
+                    trigger.history,
+                ),
                 OuterRoute::Attraction,
             );
         }
@@ -6353,12 +6579,19 @@ fn parse_normalized_oracle_ir(
                 OuterRoute::Spacecraft,
             );
         }
-        // Post-processing runs here (pre-emit), exactly as before — the (B)
-        // tuple-return design obviates moving it inside the preprocessor.
-        for (line, mut def) in sc_abilities {
-            extract_cost_reduction_from_chain(&mut def);
-            extract_mana_spend_trigger_from_chain(&mut def);
-            emitter.ability_at_route(line, def, OuterRoute::Spacecraft);
+        for (line, mut lowered) in sc_abilities {
+            let transport =
+                crate::parser::oracle_ir::history_provenance::HistoryTransport::from_lowered(
+                    &lowered.value,
+                    lowered.history,
+                );
+            extract_cost_reduction_from_chain(&mut lowered.value);
+            extract_mana_spend_trigger_from_chain(&mut lowered.value);
+            emitter.ability_with_provenance_at_route(
+                line,
+                transport.finish(lowered.value),
+                OuterRoute::Spacecraft,
+            );
         }
         consumed
             .into_iter()
@@ -6461,10 +6694,16 @@ fn parse_normalized_oracle_ir(
         if let Some((condition, effect_text)) = super::oracle_un::split_gotcha_line(&line, &lower) {
             ctx.subject = None;
             ctx.actor = None;
-            let effect_def =
-                parse_effect_chain_with_context(effect_text.trim(), AbilityKind::Spell, &mut ctx);
-            let trigger = super::oracle_un::gotcha_trigger(condition, effect_def, &line);
-            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            let lowered = parse_effect_chain_with_context_and_provenance(
+                effect_text.trim(),
+                AbilityKind::Spell,
+                &mut ctx,
+            );
+            let trigger = super::oracle_un::gotcha_trigger(condition, lowered.value, &line);
+            emitter.trigger_ir_at(
+                item_line,
+                TriggerNodeIr::from_definition_with_history(&line, trigger, lowered.history),
+            );
             i += 1;
             continue;
         }
@@ -6788,7 +7027,9 @@ fn parse_normalized_oracle_ir(
             continue;
         }
 
-        if is_deck_construction_copy_limit_sentence(&line) {
+        if is_deck_construction_copy_limit_sentence(&line)
+            || is_deck_construction_size_sentence(&line, card_name)
+        {
             i += 1;
             continue;
         }
@@ -7402,6 +7643,7 @@ fn parse_normalized_oracle_ir(
         if let Some((attack_cost_condition, rest_original)) =
             nom_on_lower(&line, &lower, parse_attack_exert_header)
         {
+            let mut history = Vec::new();
             let mut trigger = TriggerDefinition::new(TriggerMode::Exerted)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Battlefield])
@@ -7414,11 +7656,15 @@ fn parse_normalized_oracle_ir(
                 ctx.actor = None;
                 // CR 701.43d + CR 607.2h: the linked exert-payoff trigger has its own
                 // ability body, separate from the optional attack cost.
-                trigger = trigger.execute(parse_effect_chain_with_context_ability_root(
-                    effect_rest.trim(),
-                    AbilityKind::Spell,
-                    &mut ctx,
-                ));
+                let lowered = crate::parser::oracle_effect::lower_ability_ir_with_provenance(
+                    &parse_ability_ir_with_context(
+                        effect_rest.trim(),
+                        AbilityKind::Spell,
+                        &mut ctx,
+                    ),
+                );
+                history = lowered.history;
+                trigger = trigger.execute(lowered.value);
             } else if all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
                 .parse(rest_lower.trim())
                 .is_err()
@@ -7436,7 +7682,10 @@ fn parse_normalized_oracle_ir(
             if let Some(condition) = attack_cost_condition {
                 trigger = trigger.attack_cost_condition(condition);
             }
-            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            emitter.trigger_ir_at(
+                item_line,
+                TriggerNodeIr::from_definition_with_history(&line, trigger, history),
+            );
             i += 1;
             continue;
         }
@@ -8387,7 +8636,7 @@ fn parse_normalized_oracle_ir(
         }
 
         if let Some(def) = try_parse_opening_hand_reveal_delayed_trigger(&line, &lower) {
-            emitter.ability_at(item_line, def);
+            emitter.ability_with_provenance_at_route(item_line, def, OuterRoute::ImperativeEffect);
             i += 1;
             continue;
         }
@@ -8409,7 +8658,7 @@ fn parse_normalized_oracle_ir(
         // optional "with [counters] on it" clause and the optional "If you do,
         // [effect]" dependent sub-ability.
         if let Some(def) = parse_begin_game_clause(&line, &lower) {
-            emitter.ability_at(item_line, def);
+            emitter.ability_with_provenance_at_route(item_line, def, OuterRoute::ImperativeEffect);
             i += 1;
             continue;
         }
@@ -9765,10 +10014,13 @@ fn resolve_guards_in_ability(def: &mut AbilityDefinition, parent: Option<&Effect
 /// `resolve_guards_in_ability`).
 fn resolve_guards_in_effect(effect: &mut Effect) {
     match effect {
-        // CR 614.11 / CR 614.1a: a one-shot draw or planeswalk replacement nests a
-        // substitute `Effect`, which may itself be a definition carrier.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        // CR 614.11: a one-shot draw replacement nests a substitute definition.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            resolve_guards_in_ability(replacement_effect, None)
+        }
+        // CR 614.1a: a one-shot planeswalk replacement nests a substitute
+        // `Effect`, which may itself be a definition carrier.
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             resolve_guards_in_effect(replacement_effect)
         }
         Effect::Vote {
@@ -9951,6 +10203,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -10157,6 +10410,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -10893,9 +11147,12 @@ fn demote_lifetimes_in_replacement(replacement: &mut ReplacementDefinition) {
 fn demote_lifetimes_in_effect(effect: &mut Effect) {
     match effect {
         // --- nested effect, same shape ---
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             demote_lifetimes_in_effect(replacement_effect)
+        }
+        // --- nested ability definition ---
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            demote_lifetimes_in_ability(replacement_effect)
         }
         // --- nested ability definitions ---
         Effect::Vote {
@@ -11039,6 +11296,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::ChangeSpeed { .. }
         | Effect::DealDamage { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::Draw { .. }
@@ -11246,6 +11504,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -11620,8 +11879,8 @@ fn render_ability_descriptions(def: &mut AbilityDefinition, card_name: &str) {
 /// not about `description`.)
 ///
 /// WILDCARD-FREE on purpose, for the same reason
-/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has ten
-/// variants, so the non-descending arm costs eight leaf names — not the ~206
+/// [`render_modification_descriptions`] is: `DelayedTriggerCondition` has eleven
+/// variants, so the non-descending arm costs nine leaf names — not the ~206
 /// that justify the wildcard in [`render_effect_descriptions`]. A new variant
 /// carrying a `TriggerDefinition` must be a COMPILE ERROR here, not a silent
 /// pass-through.
@@ -11642,11 +11901,12 @@ fn render_delayed_condition_descriptions(
                 render_trigger_descriptions(other, card_name);
             }
         }
-        // The remaining eight conditions are phase gates or object/filter
+        // The remaining nine conditions are phase gates or object/filter
         // matchers with no nested `TriggerDefinition`, hence no description.
         D::AtNextPhase { .. }
         | D::AtNextPhaseForPlayer { .. }
         | D::AtBeginningOfAddedPhase { .. }
+        | D::AtBeginningOfGrantedTurn { .. }
         | D::WhenLeavesPlay { .. }
         | D::WhenDies { .. }
         | D::WhenLeavesPlayFiltered { .. }
@@ -11711,8 +11971,10 @@ fn render_effect_descriptions(effect: &mut Effect, card_name: &str) {
         Effect::AddTargetReplacement { replacement, .. } => {
             render_replacement_descriptions(replacement, card_name)
         }
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            render_ability_descriptions(replacement_effect, card_name)
+        }
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             render_effect_descriptions(replacement_effect, card_name)
         }
         // CR 611.2 + CR 111.1: a resolution-time grant onto a target, and a created
@@ -14248,6 +14510,9 @@ mod has_unimplemented_wrapper_recursion_tests {
                 effect: payload("delayed"),
                 uses_tracked_set: false,
             },
+            Effect::CreateDrawReplacement {
+                replacement_effect: payload("draw_replacement"),
+            },
             Effect::RollDie {
                 count: QuantityExpr::Fixed { value: 1 },
                 sides: 6,
@@ -14313,6 +14578,7 @@ mod has_unimplemented_wrapper_recursion_tests {
                 NestedDefinitionEdge::SeparateIntoPilesUnchosen,
                 NestedDefinitionEdge::RevealFromHandOnDecline,
                 NestedDefinitionEdge::CreateDelayedTriggerEffect,
+                NestedDefinitionEdge::CreateDrawReplacementEffect,
                 NestedDefinitionEdge::RollDieResult,
                 NestedDefinitionEdge::RollDieResult,
                 NestedDefinitionEdge::FlipCoinsWin,

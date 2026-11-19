@@ -523,6 +523,7 @@ fn open_private_zone_cast_selection(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: cast-from-zone selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -532,6 +533,7 @@ fn open_private_zone_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -659,6 +661,7 @@ fn open_linked_exile_cast_selection(
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // CR 708.2a: cast-from-zone selection is not a face-down entry.
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
@@ -668,6 +671,7 @@ fn open_linked_exile_cast_selection(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
     Ok(())
 }
@@ -1755,6 +1759,7 @@ fn resolve_cast_slot_group(
     };
     window.sub_ability = None;
     window.targets = pool.into_iter().map(TargetRef::Object).collect();
+    window.declared_player_target_slots.clear();
     super::free_cast_from_zones::resolve_with_face_policy(
         state,
         &window,
@@ -2197,6 +2202,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::LastCreated
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController

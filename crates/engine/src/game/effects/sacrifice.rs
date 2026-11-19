@@ -599,6 +599,7 @@ pub fn resolve(
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
@@ -608,6 +609,7 @@ pub fn resolve(
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
