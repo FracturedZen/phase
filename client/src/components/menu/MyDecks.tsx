@@ -35,6 +35,8 @@ import {
   useFeedCacheSnapshot,
 } from "../../services/feedPersistence";
 import { FeedManagerModal } from "./FeedManagerModal";
+import { FeedAttribution } from "./FeedAttribution";
+import { FEED_REGISTRY } from "../../data/feedRegistry";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { ManaSymbol } from "../mana/ManaSymbol";
 import { useCardImage } from "../../hooks/useCardImage";
@@ -84,7 +86,6 @@ import { BracketEstimateChip, ManualBracketChip } from "../deck-builder/BracketE
 import { MenuSelect } from "../ui/MenuSelect";
 import { TextPromptDialog } from "../ui/TextPromptDialog";
 import { useBracketEstimate } from "../../hooks/useBracketEstimate";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { isCommanderFamilyFormat, type CommanderBracket } from "../../types/bracket";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
@@ -235,7 +236,8 @@ function EstimatedBracketChipForDeck({ candidate }: { candidate: DeckCatalogCand
     deck: candidate.deck,
     commanders: candidate.deck.commander ?? [],
     format: candidate.knownFormat,
-    adapter: getSharedAdapter(),
+    declaredTier: null,
+    comboDeclaration: candidate.comboDeclaration,
   });
   return <BracketEstimateChip tier={estimate?.tier ?? null} />;
 }
@@ -272,7 +274,7 @@ interface DeckTileProps {
 }
 
 const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate, actionsMenu }: DeckTileProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -678,7 +680,7 @@ export function MyDecks({
   onActiveDeckCompatChange,
   aiCatalog,
 }: MyDecksProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const effectiveOffline = useEffectiveOffline();
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);
@@ -2355,6 +2357,7 @@ function SubscriptionsView({
         const feedDecks = feed?.decks ?? [];
         const deckCount = feedDecks.length;
         const lastRefreshed = new Date(sub.lastRefreshedAt).toLocaleDateString();
+        const attribution = FEED_REGISTRY.find((source) => source.id === sub.sourceId)?.attribution;
 
         return (
           <div key={sub.sourceId}>
@@ -2372,6 +2375,7 @@ function SubscriptionsView({
                   {feed?.description} {t("subscriptions.feedMeta", { count: deckCount, date: lastRefreshed })}
                   {sub.error && <span className="ml-2 text-red-400">{t("subscriptions.error", { error: sub.error })}</span>}
                 </p>
+                {attribution && <FeedAttribution attribution={attribution} />}
               </div>
             </div>
             <div className="grid w-full gap-4 grid-cols-[repeat(auto-fill,minmax(15rem,1fr))]">

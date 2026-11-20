@@ -974,7 +974,7 @@ pub(super) fn handle_empty_blockers(
     next_blocker_or_finish_declaration(state, events)
 }
 
-fn next_blocker_or_finish_declaration(
+pub(super) fn next_blocker_or_finish_declaration(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -1020,6 +1020,7 @@ fn next_blocker_or_finish_declaration(
 mod tests {
     use super::*;
     use crate::game::combat::{AttackerInfo, CombatState};
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{StaticDefinition, TargetFilter};
     use crate::types::game_state::CombatDamageAssignmentMode;

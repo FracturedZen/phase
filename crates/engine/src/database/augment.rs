@@ -89,6 +89,7 @@ fn synthesize_augment_half(face: &mut CardFace, oracle: &str) {
             AbilityCost::Reveal {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::SelfRef),
+                shared_quality: None,
             },
         ],
     })
@@ -191,6 +192,8 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Exile,
                     target: TypedFilter::new(TypeFilter::Creature)
@@ -223,10 +226,13 @@ fn rewrite_strutting_turkey(face: &mut CardFace) {
                     filter: augment_card_filter(),
                     use_lki: false,
                     subject_slot: None,
+                    subject: crate::types::ability::ObjectScope::Target,
                 })
                 .with_else_ability(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: Some(Zone::Exile),
                         destination: Zone::Battlefield,
                         target: TargetFilter::ParentTarget,

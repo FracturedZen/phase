@@ -73,6 +73,7 @@ import {
   type DraftRunFormat,
   type DraftRunState,
 } from "../services/quickDraftPersistence";
+import { usePreferencesStore } from "./preferencesStore";
 import { useGameStore } from "./gameStore";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import type { GameFormat, MatchType } from "../adapter/types";
@@ -195,7 +196,7 @@ interface DraftStoreActions {
   removeBasicLand(name: string): void;
   autoSuggestDeck(): Promise<void>;
   autoSuggestLands(): Promise<void>;
-  submitDeck(): Promise<void>;
+  submitDeck(commanders?: string[], companion?: string | null): Promise<void>;
   setPoolSortMode(mode: PoolSortMode): void;
   togglePoolPanel(): void;
   setDifficulty(difficulty: number): void;
@@ -588,6 +589,7 @@ async function startLocalDraft(input: {
     const view = await withDraftEngineOperation((lease) => {
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       lease.loadCardDatabase(database);
+      lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       return input.initialize(lease);
     });
@@ -1020,6 +1022,8 @@ function validPersistedStage(run: DraftRunState, draftId: string): boolean {
 function validRunAuthority(run: DraftRunState): boolean {
   return (run.draft_set_codes === undefined || (Array.isArray(run.draft_set_codes)
       && run.draft_set_codes.every((code) => typeof code === "string")))
+    && (run.min_deck_size === undefined
+      || (Number.isInteger(run.min_deck_size) && run.min_deck_size > 0))
     && (run.lastOpponentSeat === undefined || (Number.isInteger(run.lastOpponentSeat)
       && run.lastOpponentSeat > 0 && Array.isArray(run.usedBotSeats)
       && run.usedBotSeats.includes(run.lastOpponentSeat)));
@@ -1111,9 +1115,15 @@ function withBoosterPackPool(
   };
 }
 
-function matchPayload(run: DraftRunState): DraftMatchPayload {
+/** The name-only payload a Quick Draft launch publishes; the solo launch consumer validates it exactly. */
+export function matchPayload(run: DraftRunState): DraftMatchPayload {
   return {
-    player: { main_deck: run.playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: run.playerDeck,
+      sideboard: [],
+      commander: [],
+      companion: run.companion ? [run.companion] : [],
+    },
     opponent: { main_deck: run.opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     booster_pack_pool: run.booster_pack_pool,
@@ -1126,17 +1136,20 @@ async function evaluateLimitedDeck(
   deck: DraftMatchPayload["player"],
   draftSetCodes: readonly string[],
   selectedMatchType: MatchType,
+  minDeckSize: number | undefined,
 ): Promise<FormatGateVerdict> {
   const selectedFormat: GameFormat = "Limited";
   const result = await getSharedAdapter().evaluateDeckFormatGate({
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
-    companion: [],
+    companion: deck.companion ?? [],
     planar_deck: [],
     scheme_deck: [],
     signature_spell: [],
     draft_set_codes: [...draftSetCodes],
+    // CR 100.2b + CR 702.139b: the session's resolved minimum, not the format's 40.
+    min_deck_size: minDeckSize,
     selected_format: selectedFormat,
     selected_match_type: selectedMatchType,
     player_count: 2,
@@ -1158,10 +1171,11 @@ async function preflightMatchPayload(
   payload: DraftMatchPayload,
   draftSetCodes: readonly string[],
   selectedMatchType: MatchType,
+  minDeckSize: number | undefined,
 ): Promise<void> {
   const results = await Promise.allSettled([
-    evaluateLimitedDeck(payload.player, draftSetCodes, selectedMatchType),
-    evaluateLimitedDeck(payload.opponent, draftSetCodes, selectedMatchType),
+    evaluateLimitedDeck(payload.player, draftSetCodes, selectedMatchType, minDeckSize),
+    evaluateLimitedDeck(payload.opponent, draftSetCodes, selectedMatchType, minDeckSize),
   ]);
   for (const result of results) {
     if (result.status === "rejected") {
@@ -1218,8 +1232,8 @@ async function selectViableOpponent(
     const opponent = { main_deck: opponentDeck, sideboard: [], commander: [] };
     if (!playerAccepted) {
       const [playerResult, opponentResult] = await Promise.allSettled([
-        evaluateLimitedDeck(player, draftSetCodes, selectedMatchType),
-        evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType),
+        evaluateLimitedDeck(player, draftSetCodes, selectedMatchType, view.min_deck_size),
+        evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType, view.min_deck_size),
       ]);
       if (!fresh()) throw new Error("Stale draft match launch");
       if (playerResult.status === "rejected") {
@@ -1239,7 +1253,9 @@ async function selectViableOpponent(
         continue;
       }
     } else {
-      const verdict = await evaluateLimitedDeck(opponent, draftSetCodes, selectedMatchType);
+      const verdict = await evaluateLimitedDeck(
+        opponent, draftSetCodes, selectedMatchType, view.min_deck_size,
+      );
       if (!fresh()) throw new Error("Stale draft match launch");
       const opponentReason = gateReason(verdict);
       if (opponentReason) {
@@ -1372,6 +1388,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         lease.loadCardDatabase(database);
+        lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         return {
           view: lease.importSession(saved.sessionJson, meta.difficulty),
@@ -1627,7 +1644,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
     });
   },
 
-  submitDeck: async () => {
+  submitDeck: async (commanders: string[] = [], companion: string | null = null) => {
     const token = admitExclusive("submit");
     if (!token) return;
     const state = get();
@@ -1644,16 +1661,22 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       && get().view === state.view && get().workspaceState === state.workspaceState;
     try {
       const verdict = await evaluateLimitedDeck(
-        { main_deck: partition.mainDeck, sideboard: [], commander: [] },
+        {
+          main_deck: partition.mainDeck,
+          sideboard: [],
+          commander: commanders,
+          companion: companion ? [companion] : [],
+        },
         draftSetCodes(state.runState, state.view),
         "Bo1",
+        state.view.min_deck_size,
       );
       const reason = gateReason(verdict);
       if (reason) throw new Error(reason);
       if (!fresh()) throw new Error("Stale draft deck submission");
       const view = await withDraftEngineOperation((lease) => {
         if (!fresh()) throw new Error("Stale draft deck submission");
-        return lease.submitDeck(partition.mainDeck, []);
+        return lease.submitDeck(partition.mainDeck, commanders, companion);
       });
       if (!isExclusive(token, "submit") || lifecycle !== lifecycleGeneration) return;
       retireExclusive(token);
@@ -1666,7 +1689,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
         },
         persistence: "schedule",
       });
-      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders: [] });
+      void autosaveDraftDeck({ view: state.view, setCode: state.selectedSet, partition, commanders, companion });
     } catch (error) {
       retireExclusive(token);
       throw error;
@@ -1737,6 +1760,18 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           };
         });
         sessionJson = prepared.sessionJson;
+        let companion: string | null = null;
+        try {
+          const parsedSession = JSON.parse(prepared.sessionJson) as {
+            submitted_decks?: Record<string, { seat: number; companion?: string | null }>;
+          };
+          const playerSubmitted = Object.values(parsedSession.submitted_decks ?? {}).find(
+            (deck) => deck.seat === 0,
+          );
+          companion = playerSubmitted?.companion ?? null;
+        } catch {
+          companion = null;
+        }
         const { botSeat, opponentDeck } = await selectViableOpponent(
           playerDeck, [], state.view, codes, selectedMatchType, fresh,
         );
@@ -1748,9 +1783,11 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
           results: [],
           playerDeck,
           opponentDeck,
+          companion,
           usedBotSeats: [botSeat],
           lastOpponentSeat: botSeat,
           draft_set_codes: codes,
+          min_deck_size: state.view.min_deck_size,
           activeMatch: {
             draftId: state.draftId,
             gameId,
@@ -1766,7 +1803,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const meta = makeMeta(localState, "playing", gameId);
       const payload = matchPayload(run);
       if (durableRun) {
-        await preflightMatchPayload(payload, codes, selectedMatchType);
+        await preflightMatchPayload(payload, codes, selectedMatchType, state.view.min_deck_size);
       }
       if (!fresh()) throw new Error("Stale draft match launch");
       publicationStarted = true;
@@ -1934,7 +1971,9 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const meta = makeMeta({ ...state, runState: run }, "playing", gameId);
       const payload = matchPayload(run);
       if (durableRun.activeMatch || runOnly || !arraysEqual(run.playerDeck, playerDeck)) {
-        await preflightMatchPayload(payload, codes, selectedMatchType);
+        await preflightMatchPayload(
+          payload, codes, selectedMatchType, run.min_deck_size ?? state.view?.min_deck_size,
+        );
       }
       if (!fresh()) return;
       await publishStagedDraftMatch({
