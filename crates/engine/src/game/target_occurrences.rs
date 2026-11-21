@@ -17,9 +17,10 @@
 //!
 //! [`declared_to_stored`] is the only bridge between them.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{ResolvedAbility, TargetRef};
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectIncarnationRef;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 
 /// A position in a node's projected (post-validation) `targets`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,11 +173,8 @@ pub fn validate_target_pin_alignment(
     ability: &ResolvedAbility,
 ) -> Result<(), TargetPinAlignmentError> {
     node_pin_alignment(ability)?;
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        validate_target_pin_alignment(sub)?;
-    }
-    if let Some(other) = ability.else_ability.as_deref() {
-        validate_target_pin_alignment(other)?;
+    for (_, child) in ability.child_links() {
+        validate_target_pin_alignment(child)?;
     }
     Ok(())
 }
@@ -251,6 +249,28 @@ impl ResolvedAbility {
             .is_none_or(|pin| pin.is_current(state))
     }
 
+    /// CR 400.7: the announced incarnation for one targeted object —
+    /// positional occurrence pins first (announced targets), then keyed pins
+    /// (delayed-trigger referents). `None` when nothing pinned the object.
+    /// First-match by id: suspension capture's fallback only. Live
+    /// characteristic reads select positionally (`target_pin_at` /
+    /// `DeclaredTargetEntry`) and never consult this.
+    pub fn occurrence_pin_for(&self, object_id: ObjectId) -> Option<ObjectIncarnationRef> {
+        if let Some(index) = self
+            .targets
+            .iter()
+            .position(|target| matches!(target, TargetRef::Object(id) if *id == object_id))
+        {
+            if let Some(pin) = self.target_pin_at(index) {
+                return Some(pin);
+            }
+        }
+        self.target_incarnations
+            .iter()
+            .find(|pin| pin.object_id == object_id)
+            .copied()
+    }
+
     /// CR 115.7 + CR 400.7: whether writing `new` at `index` changes the
     /// occurrence — a different target, or the same id whose announced
     /// incarnation is gone (so `new` names the new object).
@@ -309,6 +329,17 @@ impl ResolvedAbility {
         self.targets = targets;
         self.finish_occurrence_write(vec![None; self.targets.len()]);
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
+    }
+
+    /// CR 115.1: keep the declared player-role map aligned with the stored
+    /// occurrence vector whenever that vector is projected. A role whose
+    /// stored position is removed stops naming a target; every surviving role
+    /// follows its occurrence to the new index.
+    fn remap_declared_player_target_slots(&mut self, moved: impl Fn(usize) -> Option<usize>) {
+        for slot in &mut self.declared_player_target_slots {
+            slot.stored_position = slot.stored_position.and_then(&moved);
+        }
     }
 
     /// SOURCE INHERITANCE: copy `source`'s occurrences (targets and pins,
@@ -318,6 +349,7 @@ impl ResolvedAbility {
         self.targets = source.targets.clone();
         self.finish_occurrence_write(source.aligned_target_pins());
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
     }
 
     /// SOURCE PROJECTION: replace every occurrence with the occurrences of
@@ -352,6 +384,7 @@ impl ResolvedAbility {
             .unzip();
         self.targets = targets;
         self.finish_occurrence_write(pins);
+        self.declared_player_target_slots.clear();
     }
 
     /// The node's occurrences as `(target, pin)` pairs.
@@ -413,6 +446,9 @@ impl ResolvedAbility {
         self.finish_occurrence_write(pins);
         self.chosen_target_slots
             .remap(|slot| Some(if slot < index { slot } else { slot + 1 }));
+        self.remap_declared_player_target_slots(|slot| {
+            Some(if slot < index { slot } else { slot + 1 })
+        });
     }
 
     /// Remove every occurrence.
@@ -420,20 +456,33 @@ impl ResolvedAbility {
         self.targets.clear();
         self.finish_occurrence_write(Vec::new());
         self.chosen_target_slots.remap(|_| None);
+        self.declared_player_target_slots.clear();
     }
 
     /// CR 608.2b: storage projection of resolution validation — keep the
     /// occurrences whose verdict is stored (`Legal`, `IllegalRetained`,
     /// `PassThrough`), removing `Dropped` ones from targets and pins
     /// together. `verdicts` is aligned with the node's announced occurrences.
-    pub(crate) fn retain_target_occurrences(&mut self, verdicts: &[OccurrenceVerdict]) {
+    ///
+    /// Returns the declared-to-stored mapping the projection used, so callers
+    /// that must stamp declared positions (`stamp_declared_player_target_slots`)
+    /// never rebuild it.
+    pub(crate) fn retain_target_occurrences(
+        &mut self,
+        verdicts: &[OccurrenceVerdict],
+    ) -> Vec<Option<usize>> {
         debug_assert_eq!(verdicts.len(), self.targets.len());
-        let positions: Vec<usize> = declared_to_stored(verdicts)
-            .into_iter()
+        let stored_by_declared = declared_to_stored(verdicts);
+        let positions: Vec<usize> = stored_by_declared
+            .iter()
             .enumerate()
             .filter_map(|(declared, stored)| stored.map(|_| declared))
             .collect();
         self.project_target_occurrences(&positions);
+        stored_by_declared
+            .into_iter()
+            .map(|stored| stored.map(|StoredIndex(index)| index))
+            .collect()
     }
 
     /// Keep exactly the occurrences at `positions` (in that order), moving
@@ -454,6 +503,9 @@ impl ResolvedAbility {
         self.finish_occurrence_write(pins);
         self.chosen_target_slots
             .remap(|slot| kept.iter().position(|&index| index == slot));
+        self.remap_declared_player_target_slots(|slot| {
+            kept.iter().position(|&index| index == slot)
+        });
     }
 }
 

@@ -816,10 +816,11 @@ describe("TargetingOverlay", () => {
 
   it("keeps the expanded description collapsible when the caption stops overflowing", async () => {
     mockDescriptionOverflow(true);
-    const resizeCallbacks: ResizeObserverCallback[] = [];
+    const resizeObservers: { callback: ResizeObserverCallback; targets: Element[] }[] = [];
     class ControlledResizeObserver {
-      constructor(callback: ResizeObserverCallback) { resizeCallbacks.push(callback); }
-      observe = vi.fn();
+      private readonly targets: Element[] = [];
+      constructor(callback: ResizeObserverCallback) { resizeObservers.push({ callback, targets: this.targets }); }
+      observe = vi.fn((target: Element) => { this.targets.push(target); });
       unobserve = vi.fn();
       disconnect = vi.fn();
     }
@@ -843,10 +844,15 @@ describe("TargetingOverlay", () => {
       name: `Show the full description: ${description}`,
     }));
     expect(screen.getAllByText(description)).toHaveLength(2);
-    expect(resizeCallbacks.length).toBeGreaterThan(0);
+    // The caption line's own observer, not the prompt block's (which publishes
+    // the block's top and bottom edges for the stack panel).
+    const captionObservers = resizeObservers.filter(({ targets }) =>
+      targets.some((target) => !target.hasAttribute("data-targeting-prompt")),
+    );
+    expect(captionObservers.length).toBeGreaterThan(0);
 
     mockDescriptionOverflow(false);
-    act(() => resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    act(() => captionObservers.forEach(({ callback }) => callback([], {} as ResizeObserver)));
     fireEvent.click(screen.getByRole("button", { name: `Show less: ${description}` }));
     expect(screen.getAllByText(description)).toHaveLength(1);
     await waitFor(() => expect(screen.queryByRole("button", {
@@ -1766,6 +1772,73 @@ describe("TargetingOverlay", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  // CR 608.2d + CR 115.10a: a single-pick `ChooseObjectsSelection` (`max: 1`) is a
+  // choice made while the effect resolves, not a target. The overlay must not call
+  // it one, must offer no Cancel (the spell or ability is already resolving, so
+  // there is nothing to back out of — CR 733.1), and offers Skip only when the
+  // engine's `min` admits choosing nothing.
+  describe("single-pick object selection", () => {
+    function mountSelection(data: { min: number; max?: number }) {
+      const dispatch = vi.fn().mockResolvedValue([]);
+      const gameState = createGameState({
+        waiting_for: {
+          type: "ChooseObjectsSelection",
+          data: {
+            player: 0,
+            eligible: [{ Object: 7 }, { Player: 0 }, { Player: 1 }],
+            ...data,
+          },
+        },
+      });
+      act(() => {
+        useGameStore.setState({
+          gameState,
+          waitingFor: gameState.waiting_for,
+          dispatch,
+          legalActions: [],
+        });
+      });
+      return { dispatch, ...render(<TargetingOverlay />) };
+    }
+
+    it("names the pick as a choice, offers no Cancel or Skip, and commits a player in one click", () => {
+      const { container, dispatch } = mountSelection({ min: 1, max: 1 });
+
+      expect(screen.getByText("Choose one of the highlighted options")).toBeInTheDocument();
+      expect(container.textContent ?? "").not.toMatch(/target/i);
+      expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Choose: Opp 2" })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Choose: You" }));
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 0 } },
+      });
+    });
+
+    it("offers Skip for an up-to-one pick and dispatches an empty choice", () => {
+      const { dispatch } = mountSelection({ min: 0, max: 1 });
+
+      expect(screen.getByText("Choose up to one of the highlighted options")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: null },
+      });
+    });
+
+    it("renders nothing for a multi-pick selection, which keeps its modal", () => {
+      const { container } = mountSelection({ min: 1, max: 2 });
+
+      expect(container).toBeEmptyDOMElement();
+    });
   });
 });
 

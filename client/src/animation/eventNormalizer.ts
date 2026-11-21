@@ -18,6 +18,11 @@ import {
 
 /** Events that produce no visual output and are skipped entirely. */
 const NON_VISUAL_EVENTS = new Set([
+  // Un-card gags play out-of-band (`flashUnActionEvents` → UnActionOverlay).
+  "UnTellPerformed",
+  "PhraseSaid",
+  "GotchaSaid",
+  "ObjectTouched",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",
@@ -38,6 +43,9 @@ const NON_VISUAL_EVENTS = new Set([
   // CR 714.2: same class as StackResolved — the chapter ability's own effects
   // are what the player sees; this event exists for meta-triggers.
   "SagaChapterAbilityResolved",
+  // CR 603.2: bookkeeping for observer triggers, same class as
+  // SagaChapterAbilityResolved; the observed ability's stack entry animates.
+  "AbilityTriggered",
   "ReplacementApplied",
   "Regenerated",
   "AttackersDeclared",
@@ -52,6 +60,9 @@ const NON_VISUAL_EVENTS = new Set([
   "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
+  // Engine bookkeeping with nothing on the board to show: the repetition's own events animate.
+  "ResolutionHalted",
+  "ShortcutRepetition",
 ]);
 
 /** Whether an event produces no visual output. CR 605.3b: a mana ability's

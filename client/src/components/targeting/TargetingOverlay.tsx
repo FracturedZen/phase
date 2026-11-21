@@ -8,12 +8,14 @@ import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.t
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { useTargetingPromptStore } from "../../stores/targetingPromptStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   boardChoiceSelectedPower,
   buildBoardChoiceAction,
   canConfirmBoardChoice,
   getBoardChoiceView,
+  getWaitingForPlayerChoiceIds,
   isBoardChoiceImmediate,
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
@@ -117,7 +119,7 @@ export const TARGET_NOUN_SLUG: Record<TargetObjectCategory, TargetNounSlug> = {
 };
 
 export function TargetingOverlay() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const canActForWaitingState = useCanActForWaitingState();
   const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);
@@ -127,6 +129,7 @@ export function TargetingOverlay() {
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const targetKind = useGameStore((s) => s.gameState?.derived?.current_target_kind);
   const legalActions = useGameStore((s) => s.legalActions);
+  const allowsCancelCast = useGameStore((s) => s.gameState?.allows_cancel_cast);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
 
@@ -153,6 +156,14 @@ export function TargetingOverlay() {
   // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
+  // CR 608.2d + CR 115.10a: a single-pick resolution choice picked on the board. It is a
+  // CHOICE made while the ability resolves, not a target — so no target wording, and no
+  // Cancel: the spell or ability is already resolving (CR 608.2d), so nothing is left to
+  // reverse; `CancelCast` backs out of an incomplete cast or activation (CR 733.1).
+  // Highlights come from the engine's `eligible` via the shared click authorities.
+  const isChooseObjectsSinglePick = waitingFor?.type === "ChooseObjectsSelection" && waitingFor.data.max === 1;
+  // Skip (choose nothing) only when the engine-published `min` admits an empty selection.
+  const canSkipObjectChoice = isChooseObjectsSinglePick && waitingFor.data.min === 0;
   // CR 115.7: Name the spell/ability being retargeted (the entry the redirect
   // resolved onto), so the player knows what they are choosing a new target for.
   const retargetSpellName = isRetargetChoice
@@ -160,7 +171,7 @@ export function TargetingOverlay() {
     : undefined;
   const isTapCreatureChoice =
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
-  const boardChoice = getBoardChoiceView(waitingFor, objects);
+  const boardChoice = getBoardChoiceView(waitingFor, objects, allowsCancelCast);
   const isBoardChoice = boardChoice != null;
   // Cancel-01 scope: only the five in-scope flows gate cancel on engine
   // legalActions. Every other cancel button keeps status-quo rendering:
@@ -199,10 +210,12 @@ export function TargetingOverlay() {
   // clickable object for a player, so the overlay lists every legal player
   // target as its own control instead of relying on the seat chrome alone.
   const legalPlayerTargets = useMemo(
-    () => (selection?.current_legal_targets ?? []).flatMap((target) =>
-      "Player" in target ? [target.Player] : [],
-    ),
-    [selection],
+    () => isChooseObjectsSinglePick
+      ? getWaitingForPlayerChoiceIds(waitingFor)
+      : (selection?.current_legal_targets ?? []).flatMap((target) =>
+        "Player" in target ? [target.Player] : [],
+      ),
+    [isChooseObjectsSinglePick, selection, waitingFor],
   );
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
@@ -306,6 +319,10 @@ export function TargetingOverlay() {
             ? t("targeting.chooseReturnAsAuraTarget")
             : isChooseTokenHost
               ? t("targeting.chooseTokenHost")
+            : isChooseObjectsSinglePick
+              ? (waitingFor.data.min === 0
+                  ? t("targeting.chooseUpToOneHighlighted")
+                  : t("targeting.chooseOneHighlighted"))
             : isRetargetChoice
               ? (retargetSpellName
                   ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
@@ -335,6 +352,41 @@ export function TargetingOverlay() {
   const descriptionToggleAction = descriptionExpanded
     ? t("targeting.collapseDescription")
     : t("targeting.expandDescription");
+
+  // The stack panel docks on a layer below this overlay, so this block drawn
+  // over it hides the panel's header, which holds the only control that moves
+  // the panel to the other side of the board (#11004). The block publishes
+  // its top and bottom edges, and the panel keeps its header clear of them.
+  // Two kinds of change move the edges, so they are measured on both: every
+  // commit (the effect has no dependency list), which sees the page's
+  // `--game-targeting-prompt-top` and this block's own content, such as a new
+  // instruction or the description expanding; and every resize of the block,
+  // which sees what changes without a commit, such as the viewport width
+  // re-wrapping the instruction.
+  const setPromptEdges = useTargetingPromptStore((s) => s.setEdges);
+  const promptBlockRef = useRef<HTMLDivElement | null>(null);
+  const measurePromptEdges = useCallback(() => {
+    const block = promptBlockRef.current;
+    if (!block) return;
+    const { top, bottom } = block.getBoundingClientRect();
+    setPromptEdges({ topPx: top, bottomPx: bottom });
+  }, [setPromptEdges]);
+  useLayoutEffect(() => measurePromptEdges());
+  // A ref callback rather than an effect: the block exists only past the early
+  // returns below, and the callback's cleanup runs exactly when the block
+  // leaves the DOM, which is when the published edges must drop back to 0.
+  const attachPromptBlock = useCallback((block: HTMLDivElement) => {
+    promptBlockRef.current = block;
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(measurePromptEdges);
+    observer?.observe(block);
+    return () => {
+      observer?.disconnect();
+      promptBlockRef.current = null;
+      setPromptEdges({ topPx: 0, bottomPx: 0 });
+    };
+  }, [measurePromptEdges, setPromptEdges]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -379,7 +431,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isBoardChoice, waitingFor]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isChooseObjectsSinglePick && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -555,6 +607,8 @@ export function TargetingOverlay() {
             instruction to ONE line is what keeps it clear where it clears, not
             a number. */}
         <div
+          ref={attachPromptBlock}
+          data-targeting-prompt
           className="absolute left-0 right-0 flex flex-col items-center gap-1 px-2"
           style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
         >
@@ -771,7 +825,7 @@ export function TargetingOverlay() {
               {t("targeting.keepCurrentTarget")}
             </button>
           )}
-          {isOptionalCurrentSlot && (
+          {(isOptionalCurrentSlot || canSkipObjectChoice) && (
             <button
               onClick={handleSkip}
               className="pointer-events-auto rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"

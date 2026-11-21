@@ -3,6 +3,7 @@
 use crate::game::effects::choose_one_of;
 use crate::game::effects::gain_control;
 use crate::game::filter::matches_target_filter;
+use crate::game::filter::ReplacementDefinitionFilterExt;
 use crate::game::game_object::GameObject;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolved_object_ids_for_filter;
@@ -579,6 +580,7 @@ fn reveal_contraption(
     state.last_revealed_ids = vec![object_id];
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[object_id]),
         card_ids: vec![object_id],
         card_names: vec![card_name],
     });

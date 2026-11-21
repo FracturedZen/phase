@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
@@ -7,7 +8,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ConniveSubject, GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::proposed_event::{AppliedReplacementKey, CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{
+    AppliedReplacementKey, CounterCause, CounterPlacement, ProposedEvent,
+};
 use crate::types::zones::Zone;
 
 /// CR 701.50a: Connive — draw N cards, then discard N cards. For each nonland
@@ -282,6 +285,8 @@ pub(crate) fn add_connive_counters(
             actor: conniver_object.controller,
             object_id: conniver.object_id(),
             counter_type: CounterType::Plus1Plus1,
+            // CR 614.16: connive's counter is placed by a resolving ability.
+            cause: CounterCause::ResolvingEffect,
         },
         count,
         applied: HashSet::new(),
@@ -292,6 +297,7 @@ pub(crate) fn add_connive_counters(
                 actor,
                 object_id,
                 counter_type,
+                ..
             },
         count: final_count,
         ..

@@ -1,4 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ObjectProperty, QuantityExpr, ResolvedAbility, TargetFilter,
@@ -394,7 +395,7 @@ fn ability_with_resolved_until(
 /// `extract_target_filter_from_effect` so target-filter extraction stays
 /// in lockstep with the canonical accessor used by stack/trigger code.
 fn sub_effect_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
-    crate::game::triggers::extract_target_filter_from_effect(&sub.effect)
+    crate::types::ability::extract_target_filter_from_effect(&sub.effect)
         .map(crate::types::ability::TargetFilter::references_exiled_by_source)
         .unwrap_or(false)
 }
@@ -850,6 +851,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -975,6 +978,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -1059,6 +1064,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Graveyard,
                         target: TargetFilter::Any,
@@ -1228,6 +1235,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -1632,6 +1641,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -1839,6 +1849,7 @@ mod tests {
                     chooser: Chooser::Opponent.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     selection: CardSelectionMode::Chosen,
                     constraint: None,
@@ -2012,6 +2023,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -2089,6 +2101,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2833,6 +2847,8 @@ mod tests {
     fn hits_to_hand() -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,

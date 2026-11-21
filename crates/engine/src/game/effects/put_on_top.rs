@@ -1,6 +1,8 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
+use crate::game::effects::change_zone::publish_finalized_owner_library_subjects;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
@@ -380,6 +382,7 @@ pub fn resolve(
                 return Ok(());
             }
             state.waiting_for = WaitingFor::EffectZoneChoice {
+                performed_by: None,
                 player: choosing_player,
                 cards: eligible,
                 count: expected.min(eligible_count),
@@ -403,14 +406,17 @@ pub fn resolve(
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 // CR 708.2a: library-position selection is not a face-down entry.
                 face_down_profile: None,
+                with_entry_effect: None,
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 count_param: 0,
                 library_position: Some(position.clone()),
+                library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
                 mass_library_order: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
                 duration: None,
+                privacy_zones: None,
             };
             return Ok(());
         }
@@ -438,6 +444,7 @@ pub fn resolve(
     // than the placement count allows, prompt before auto-picking the first.
     if collected_targets.len() > expected && expected > 0 {
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: ability.controller,
             cards: collected_targets,
             count: expected,
@@ -488,14 +495,17 @@ pub fn resolve(
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(position.clone()),
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
+            privacy_zones: None,
         };
         return Ok(());
     }
@@ -605,6 +615,15 @@ pub fn resolve(
     } else {
         Vec::new()
     };
+    // CR 400.3 + CR 701.24c: Publish each moved object's owner as a library
+    // shuffle subject so a chained `Shuffle { target: ScopedPlayer }` with
+    // `TrackedSetPossessor` fans over every affected owner — e.g. Elixir of
+    // Immortality, where the artifact's owner differs from the graveyard
+    // cards' owner. Published BEFORE the move so the owners bind before
+    // replacement effects can redirect them; a no-op unless a downstream owner
+    // library shuffle consumer exists (tracked_set_publication_mode).
+    publish_finalized_owner_library_subjects(state, ability, &collected_targets);
+
     zone_pipeline::move_objects_simultaneously_then(
         state,
         requests,

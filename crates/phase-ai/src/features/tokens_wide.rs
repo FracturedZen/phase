@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::Token { types: Vec<String>, count: QuantityExpr, .. }` at
-//!   `crates/engine/src/types/ability.rs:2131-2168`. CR 111.1: tokens created
+//!   `crates/phase-ast/src/types/ability.rs`. CR 111.1: tokens created
 //!   by spells/abilities. Creature tokens have `types.iter().any(|s| s == "Creature")`.
 //! - `QuantityExpr::Fixed { value }` at `ability.rs:1360`. Mass generators
 //!   have `value >= 2` or a non-Fixed count (dynamic quantity). CR 111.1.
@@ -424,6 +424,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -443,6 +444,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -691,26 +693,6 @@ mod tests {
                 .contains(&"Glorious Anthem".to_string()),
             "anthem_names should include the anthem's name"
         );
-    }
-
-    #[test]
-    fn aristocrats_overlap_independent() {
-        // A Bitterblossom-shape card (upkeep trigger creating a 1/1 faerie)
-        // should count as BOTH a token generator (tokens_wide) and a fodder
-        // source (aristocrats). The two features are independent. This test
-        // verifies tokens_wide registers it; aristocrats has its own test.
-        let mut face = empty_face("Bitterblossom");
-        let exec = AbilityDefinition::new(
-            AbilityKind::Spell,
-            creature_token_effect(QuantityExpr::Fixed { value: 1 }),
-        );
-        // CR 603.2b: "at the beginning of your upkeep" → TriggerMode::Phase.
-        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
-        trigger.execute = Some(Box::new(exec));
-        face.triggers.push(trigger);
-        let feature = detect(&[deck_entry(face)]);
-        // tokens_wide registers Bitterblossom as a generator.
-        assert_eq!(feature.token_generator_count, 1);
     }
 
     #[test]

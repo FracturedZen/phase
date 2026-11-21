@@ -26,10 +26,12 @@
 use engine::game::combat::AttackTarget;
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
-use engine::types::actions::GameAction;
+use engine::types::ability::{
+    Effect, PreventionAmount, QuantityExpr, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
+};
+use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{GameState, ReplacementAutoChoiceIdentity, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -288,9 +290,9 @@ fn test_of_faith_puts_no_counters_when_no_damage_is_prevented() {
         .iter()
         .find(|r| r.shield_kind.is_shield())
         .expect("reach guard: the prevention shield must be installed on the bear");
-    let rider = shield
-        .runtime_execute
-        .as_ref()
+    let rider = outcome
+        .state()
+        .replacement_rider(shield)
         .expect("reach guard: the shield must carry a runtime_execute rider");
     assert_eq!(
         rider.targets,
@@ -307,6 +309,276 @@ fn test_of_faith_puts_no_counters_when_no_damage_is_prevented() {
         0,
         "no damage was prevented, so zero +1/+1 counters must be put on"
     );
+}
+
+/// PR #9867 review (HIGH: inline-rider amount stamping) — Test of Faith
+/// through a real combat-damage batch. The `Next(3)` shield accumulates its
+/// public `DamagePrevented` event into the batch aggregate, but its
+/// `runtime_execute` rider still drains inline per event; the per-event
+/// prevented amount must be stamped so the rider's `EventContextAmount`
+/// resolves. A 1/1 blocks a 6-power attacker: 3 prevented → 3 counters
+/// (4/4) with 3 marked → survives SBAs (the authoritative ruling's line:
+/// a 1/1 receiving six damage finishes 4/4 with three damage marked).
+///
+/// CR 510.2 (simultaneous combat damage) + CR 615.5 (follow-up timing) +
+/// CR 615.7 (Next(3) depletion) + CR 704.5g (lethal damage SBA).
+#[test]
+fn test_of_faith_combat_batch_stamps_inline_rider_amount() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let blocker = scenario.add_creature(P0, "Blocker", 1, 1).id();
+    let attacker = scenario.add_creature(P1, "Attacker", 6, 6).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test of Faith", true, TEST_OF_FAITH_TEXT)
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[blocker]).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "reach guard: Test of Faith must resolve to a clean priority window, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        !outcome.state().objects[&blocker]
+            .replacement_definitions
+            .as_slice()
+            .is_empty(),
+        "reach guard: the prevention shield must be installed on the targeted blocker"
+    );
+
+    runner.state_mut().active_player = P1;
+    let mut attacked = false;
+    let mut blocked = false;
+    for _ in 0..200 {
+        match runner.state().phase {
+            Phase::EndCombat | Phase::PostCombatMain => break,
+            _ => {}
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                if runner
+                    .act(GameAction::OrderTriggers { order: vec![0] })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            WaitingFor::DeclareAttackers { player, .. } if !attacked => {
+                attacked = true;
+                let a = if player == P1 {
+                    vec![(attacker, AttackTarget::Player(P0))]
+                } else {
+                    vec![]
+                };
+                if runner.declare_attackers(&a).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                if runner.declare_attackers(&[]).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareBlockers { player, .. } if !blocked => {
+                blocked = true;
+                let b = if player == P0 {
+                    vec![(blocker, attacker)]
+                } else {
+                    vec![]
+                };
+                if runner.declare_blockers(&b).is_err() {
+                    break;
+                }
+            }
+            WaitingFor::DeclareBlockers { .. } => {
+                if runner.declare_blockers(&[]).is_err() {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    runner.advance_until_stack_empty();
+    assert!(
+        attacked && blocked,
+        "reach guard: combat must have reached both declaration prompts \
+         (attacked={attacked}, blocked={blocked})"
+    );
+
+    assert_eq!(
+        damage_marked(&runner, blocker),
+        3,
+        "the Next(3) shield must prevent 3 of the 6 combat damage, leaving 3 marked"
+    );
+    assert_eq!(
+        plus1plus1_counters(&runner, blocker),
+        3,
+        "CR 615.5: one +1/+1 counter per 1 damage prevented — the inline rider must \
+         resolve EventContextAmount against the stamped per-event amount"
+    );
+    assert_eq!(
+        runner.state().objects[&blocker].zone,
+        Zone::Battlefield,
+        "the 4/4 with 3 marked damage must survive SBAs (authoritative ruling)"
+    );
+}
+
+/// CR 616.1 + CR 616.1e + CR 615.5 + CR 615.7: Test of Faith cast twice on one
+/// Bear gives two object-hosted `Next(3)` shields, each with its own rider. When
+/// Lightning Bolt would deal 3 damage to the Bear, both apply, so the Bear's
+/// controller chooses one: it prevents all 3 and puts 3 +1/+1 counters on the Bear;
+/// no damage remains, so the other is not used and keeps its 3 (CR 616.1f, CR 615.3).
+/// The CR 616.1 choice's saved-preference identity holds each shield's definition
+/// with its handle cleared and the rider by value.
+///
+/// Lightning Bolt (verbatim): "Lightning Bolt deals 3 damage to any target."
+#[test]
+fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+    let faiths = [0, 1].map(|_| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Test of Faith", true, TEST_OF_FAITH_TEXT)
+            .id()
+    });
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    let arena = runner.state().replacement_continuations.len();
+    for faith in faiths {
+        let outcome = runner.cast(faith).target_objects(&[bear]).resolve();
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "reach guard: Test of Faith resolves to a priority window, got {:?}",
+            outcome.final_waiting_for()
+        );
+    }
+    let shields = runner.state().objects[&bear]
+        .replacement_definitions
+        .as_slice()
+        .to_vec();
+    assert!(
+        shields.len() == 2
+            && shields[0].runtime_execute.is_some()
+            && shields[0].runtime_execute != shields[1].runtime_execute,
+        "reach guard: the Bear holds two shields under distinct handles: {shields:?}"
+    );
+    assert_eq!(runner.state().replacement_continuations.len(), arena + 2);
+
+    // Harness shortcut, as in `gatta_and_luzzu_prevents_through_the_real_cast_pipeline`:
+    // hand P1 priority so it can cast its Bolt this turn.
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+    }
+    let outcome = runner.cast(bolt).target_object(bear).resolve();
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        remember_identity: Some(key),
+        ..
+    } = outcome.final_waiting_for().clone()
+    else {
+        panic!(
+            "CR 616.1: both shields apply, so P0 chooses one; got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!((player, candidate_count), (P0, 2));
+    fn assert_identities(
+        state: &GameState,
+        bear: ObjectId,
+        identities: &[ReplacementAutoChoiceIdentity],
+        label: &str,
+    ) {
+        let mut indices = Vec::new();
+        for identity in identities {
+            let ReplacementAutoChoiceIdentity::Definition {
+                source,
+                index,
+                definition,
+                rider,
+            } = identity
+            else {
+                panic!("{label}: a shield identity is a definition: {identity:?}");
+            };
+            assert_eq!(source.object_id, bear, "{label}");
+            assert_eq!(definition.runtime_execute, None, "{label}: handle cleared");
+            // The saved identity's index is arch-independent u64 (R11-F2);
+            // convert back to address the live definitions vector.
+            let live = state
+                .replacement_rider(&state.objects[&bear].replacement_definitions[*index as usize]);
+            assert!(live.is_some(), "{label}: the shield names a rider");
+            assert_eq!(
+                rider.as_deref(),
+                live,
+                "{label}: the rider is held by value"
+            );
+            indices.push(*index);
+        }
+        assert!(
+            indices.len() == 2 && indices[0] != indices[1],
+            "{label}: {indices:?}"
+        );
+    }
+    assert_identities(runner.state(), bear, &key.candidates, "prompt");
+
+    runner
+        .act(GameAction::ChooseReplacementAndRemember {
+            choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
+        })
+        .expect("P0 orders the two shields and remembers the order");
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(
+        damage_marked(&runner, bear),
+        0,
+        "CR 615.7: all 3 damage prevented"
+    );
+    assert_eq!(
+        plus1plus1_counters(&runner, bear),
+        3,
+        "CR 615.5: one counter per 1 damage prevented"
+    );
+    let shields = runner.state().objects[&bear]
+        .replacement_definitions
+        .as_slice()
+        .to_vec();
+    assert_eq!(
+        shields.iter().filter(|shield| shield.is_consumed).count(),
+        1,
+        "CR 615.7: the chosen shield is used up"
+    );
+    assert!(
+        shields.iter().any(|shield| !shield.is_consumed
+            && shield.shield_kind
+                == ShieldKind::Prevention {
+                    amount: PreventionAmount::Next(3)
+                }),
+        "CR 616.1f + CR 615.3: the other shield is not used and keeps its 3"
+    );
+    let records = &runner.state().replacement_auto_choices;
+    assert_eq!(records.len(), 1);
+    assert_identities(runner.state(), bear, &records[0].key.candidates, "record");
 }
 
 /// #8777 (H-2) — Brace for Impact: real cast, targeted (`ColorCount {GE,2}`),

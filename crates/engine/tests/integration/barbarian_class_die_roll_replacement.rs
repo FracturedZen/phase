@@ -569,8 +569,8 @@ fn die_roll_replacement_is_scoped_to_its_controller() {
 }
 
 /// V11 — the aggregate "equal to the result(s)" value is summed over SURVIVING
-/// dice only (CR 706.4 + CR 706.6), and the `rolled_any == false` branch clears
-/// it rather than stamping `Some(0)`.
+/// dice only (CR 706.4 + CR 706.6), and a zero-count instruction rolls no dice
+/// and stamps `Some(0)` (the total of no results is 0; Hydradoodle's ruling).
 #[test]
 fn aggregate_die_result_covers_survivors_only() {
     let mut scenario = GameScenario::new();
@@ -591,17 +591,16 @@ fn aggregate_die_result_covers_survivors_only() {
         "CR 706.4: the aggregate must be the sum of every surviving roll"
     );
 
-    // CR 614.6 / the `rolled_any == false` branch: a zero-count instruction
-    // clears the stamp rather than leaving `Some(0)`.
+    // A zero-count instruction rolls no dice. CR 706.4 leaves the use of the
+    // results to the ability's text, and the total of no results is 0
+    // (Hydradoodle's ruling: with X = 0 no dice are rolled and it enters as a
+    // 0/0), so the stamp is `Some(0)`, not left stale or cleared.
     let (events, die_result) = resolve_roll(&mut runner, source, 0, 20, None, vec![]);
     assert!(
         die_rolls(&events).is_empty(),
         "a zero-count instruction rolls nothing"
     );
-    assert_eq!(
-        die_result, None,
-        "CR 706.6: with no surviving roll the die result must be cleared, not Some(0)"
-    );
+    assert_eq!(die_result, Some(0), "the total of zero rolled dice is 0");
 }
 
 /// V10 (runtime half) — the modifier applies ONLY to surviving dice, and the
@@ -741,6 +740,8 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         source_id: source,
         controller: P0,
         roller: P0,
+        quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 6,
         results: vec![2, 2, 6],
@@ -753,6 +754,13 @@ fn ignoring_a_non_lowest_roll_is_rejected() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: Vec::new(),
+        trigger_context: None,
+        illegal_target_slots: Vec::new(),
+        chain_root_target_pins: Vec::new(),
+        declared_capture: None,
+        local_target_pins: Vec::new(),
+        keyed_target_incarnations: Vec::new(),
+        declared_player: None,
     };
     runner.state_mut().push_die_roll_frame(pending);
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
@@ -1155,6 +1163,8 @@ fn ai_candidates_cover_every_ignore_count() {
                 source_id: source,
                 controller: P0,
                 roller: P0,
+                quantity_controller: None,
+                scoped_player: None,
                 targets: vec![],
                 sides: 6,
                 results: results.clone(),
@@ -1167,6 +1177,13 @@ fn ai_candidates_cover_every_ignore_count() {
                 rolled_any: false,
                 forced_ignored: vec![],
                 chain_root_targets: Vec::new(),
+                trigger_context: None,
+                illegal_target_slots: Vec::new(),
+                chain_root_target_pins: Vec::new(),
+                declared_capture: None,
+                local_target_pins: Vec::new(),
+                keyed_target_incarnations: Vec::new(),
+                declared_player: None,
             });
         runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
             player: P0,
@@ -1391,6 +1408,8 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             source_id: source,
             controller: P0,
             roller: P0,
+            quantity_controller: None,
+            scoped_player: None,
             targets: vec![],
             sides: 20,
             results: vec![4, 7, 7],
@@ -1404,6 +1423,13 @@ fn a_forced_lowest_roll_cannot_be_kept_by_picking_around_it() {
             // The 4 is determined; only the tied 7s were offered to the roller.
             forced_ignored: vec![0],
             chain_root_targets: Vec::new(),
+            trigger_context: None,
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_capture: None,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
+            declared_player: None,
         });
     runner.state_mut().waiting_for = WaitingFor::DieKeepChoice {
         player: P0,
