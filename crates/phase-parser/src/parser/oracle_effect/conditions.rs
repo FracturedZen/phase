@@ -15942,8 +15942,7 @@ mod tests {
         assert_eq!(cond, Some(AbilityCondition::additional_cost_paid_any()));
         // Body must still carry the named non-quantity axis verbatim.
         assert_eq!(
-            body,
-            "exile it instead of putting it into your hand.",
+            body, "exile it instead of putting it into your hand.",
             "non-quantity instead-of must remain on the body, got {body:?}"
         );
     }
