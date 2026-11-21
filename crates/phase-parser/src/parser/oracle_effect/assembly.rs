@@ -2987,9 +2987,17 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 let search_idx = defs
                     .iter()
                     .rposition(|d| matches!(*d.effect, Effect::SearchLibrary { .. }));
-                let mut trailing = match search_idx {
-                    Some(idx) => defs.split_off(idx + 1),
-                    None => Vec::new(),
+                // Identity: the parked siblings are MOVED out and back, so they keep
+                // their NodeIds. Capture the ids, let `observe` detach them as a TAIL
+                // shrink, and `reinstate` them (in order) once they are re-appended.
+                let (mut trailing, trailing_ids) = match search_idx {
+                    Some(idx) => {
+                        let ids = env.arena.ids_after(idx);
+                        let parked = defs.split_off(idx + 1);
+                        env.observe(&defs, None, NodeRole::Unknown);
+                        (parked, ids)
+                    }
+                    None => (Vec::new(), Vec::new()),
                 };
                 defs.push(def);
                 env.observe(&defs, Some(clause_ir.id), NodeRole::HandlerProduct);
@@ -3012,6 +3020,9 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 }
                 if !trailing.is_empty() {
                     defs.append(&mut trailing);
+                    for id in trailing_ids {
+                        env.arena.reinstate(id);
+                    }
                     env.observe(&defs, None, NodeRole::Unknown);
                 }
                 true
