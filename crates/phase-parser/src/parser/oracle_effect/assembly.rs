@@ -5109,6 +5109,7 @@ fn is_decline_put_one_on_bottom(def: &AbilityDefinition) -> bool {
         target,
         count,
         position: LibraryPosition::Bottom,
+        ..
     } = &*def.effect
     else {
         return false;
@@ -5202,8 +5203,8 @@ fn upgrade_prior_look_decline_choose_one_bottom(def: &mut AbilityDefinition) -> 
                 *keep_count = Some(1);
                 *destination = Some(Zone::Library);
                 *rest_destination = Some(Zone::Library);
-                // CR 608.2c: the printed decline placement owns the remainder.
                 *rest_remainder = DigRestRemainder::Route;
+                // CR 608.2c: the printed decline placement owns the remainder.
                 return true;
             }
         }
