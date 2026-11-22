@@ -13,7 +13,9 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
-use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenCharacteristics, TokenSpec};
+use crate::types::proposed_event::{
+    CounterCause, EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
+};
 use std::collections::HashSet;
 
 /// CR 701.47a: Amass [subtype] N.
@@ -113,6 +115,8 @@ pub(crate) fn continue_amass_on_army(
             object_id,
             CounterType::Plus1Plus1,
             count,
+            // CR 614.16: amass's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {
@@ -215,6 +219,7 @@ fn create_army_token(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id: ability.source_id,
@@ -222,11 +227,13 @@ fn create_army_token(
     };
 
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(spec),
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
 
@@ -300,8 +307,16 @@ mod tests {
         assert!(army.is_token);
         assert_eq!(army.power, Some(2));
         assert_eq!(army.toughness, Some(2));
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Army".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Army"));
         assert_eq!(army.color, vec![ManaColor::Black]);
         // 2 +1/+1 counters
         assert_eq!(
@@ -370,8 +385,12 @@ mod tests {
             .filter_map(|id| state.objects.get(id))
             .find(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
             .unwrap();
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Orc".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army.card_types.subtypes.iter().any(|i: &String| i == "Orc"));
     }
 
     #[test]
@@ -396,6 +415,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
                 sacrifice_at: None,
                 source_id: ObjectId(0),

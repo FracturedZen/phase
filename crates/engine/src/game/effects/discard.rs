@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use std::collections::HashSet;
 
@@ -11,6 +12,11 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::events::GameEvent;
+/// CR 701.9a vs CR 118.12 / CR 601.2h: why a card is being discarded. Defined
+/// beside the records that carry it across a chain or a pause
+/// (`SpellContext::discard_cause`, `PendingDiscardBatch::cause`) and
+/// re-exported for this layer's callers.
+pub(crate) use crate::types::game_state::DiscardCause;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
@@ -62,6 +68,7 @@ pub(crate) fn complete_discard_to_graveyard(
     // it through the pipeline so `Moved` redirects (Rest in Peace class) get
     // their consult. A plain discard previously moved raw and never saw them.
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from: Zone::Hand,
         to: Zone::Graveyard,
@@ -70,15 +77,21 @@ pub(crate) fn complete_discard_to_graveyard(
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_attacking: false,
         enter_with_counters: Vec::new(),
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {
@@ -91,8 +104,6 @@ pub(crate) fn complete_discard_to_graveyard(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                // Discard delivers to the graveyard — no library placement.
-                None,
                 events,
             );
         }
@@ -169,12 +180,15 @@ pub(crate) fn hand_off_recruit_discard_result(
 /// for "this batch paused" — both selection modes park through it, so the two
 /// cannot drift on what a parked batch means.
 ///
-/// Deliberately private and called ONLY from `resolve`, the effect layer. The
-/// cost layer owns its own typed cursor (`PendingCostMoveResume::
+/// Deliberately private and called ONLY from `resolve`. The batch states its
+/// own [`DiscardCause`]: the resolving node's cause on the specific-card path
+/// (a CR 118.12 unless-cost delivery node discards as a cost), and the effect
+/// cause on the paths that discard as the effect does. The drain discards the
+/// remaining cards with that same cause, so a pause never turns a cost payment
+/// into an effect discard or the reverse. The cost layer's random unless-discard
+/// still owns its own typed cursor (`PendingCostMoveResume::
 /// RandomDiscardUnlessPayment`), because it additionally owes an unless-payment
-/// this carrier knows nothing about; sharing one carrier across the two would
-/// launder a cost payment into an effect, which is exactly what [`DiscardCause`]
-/// exists to make unrepresentable.
+/// this carrier knows nothing about.
 #[allow(clippy::too_many_arguments)]
 fn park_discard_batch(
     state: &mut GameState,
@@ -184,6 +198,7 @@ fn park_discard_batch(
     effect_kind: EffectKind,
     paused_card: ObjectIncarnationRef,
     discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    cause: DiscardCause,
     events: &mut Vec<GameEvent>,
     events_before_self: usize,
     completion: crate::types::game_state::PendingDiscardBatchCompletion,
@@ -197,6 +212,7 @@ fn park_discard_batch(
         effect_kind,
         paused_card,
         discard_frame,
+        cause,
         // The `player_scope` driver installs the fan-out remainder, if any,
         // as it unwinds — this layer only knows about one seat.
         fan_out: None,
@@ -258,14 +274,16 @@ pub fn resolve(
     // the upper-bound expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
     // player may discard 0..=count.
-    let (num_cards, up_to, unless_filter, target_filter, random) = match &ability.effect {
-        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false),
+    let (num_cards, up_to, unless_filter, target_filter, random, card_filter) = match &ability
+        .effect
+    {
+        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false, None),
         Effect::Discard {
             count,
             unless_filter,
             target,
             selection,
-            ..
+            filter,
         } => {
             let (inner, up_to) = count.peel_up_to();
             (
@@ -280,9 +298,10 @@ pub fn resolve(
                 unless_filter.clone(),
                 target.clone(),
                 selection.is_random(),
+                filter.clone(),
             )
         }
-        _ => (1, false, None, TargetFilter::Any, false),
+        _ => (1, false, None, TargetFilter::Any, false, None),
     };
 
     // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
@@ -308,96 +327,40 @@ pub fn resolve(
         return Ok(());
     }
 
-    // Check if targets specify specific cards to discard. Parent chain
-    // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
-    // damage recipient) — those must not short-circuit the hand-choice path.
-    //
-    // Issue #3257: A bounce head's chosen graveyard creatures are propagated onto
-    // a trailing "discard a card" sub-ability for chain context, but they are NOT
-    // discard targets. Once the bounce moves them to hand they must not bypass the
-    // interactive DiscardChoice path via this fast path — only a *declared* targeted
-    // discard (Oracle uses "target") may consume `ability.targets` here.
-    // Partially-stale case: the all-stale case already returned above, so this
-    // substitution only ever drops individual dead referents from a list that
-    // still has at least one live member — it cannot empty the list and so
-    // cannot reach the generic-path fallback the guard above protects.
-    let live_targets = ability.live_object_targets(state);
-    let specific_targets: Vec<_> = live_targets
-        .iter()
-        .filter_map(|t| {
-            let TargetRef::Object(obj_id) = t else {
-                return None;
-            };
-            let obj = state.objects.get(obj_id)?;
-            if obj.zone == Zone::Hand {
-                Some(*obj_id)
-            } else {
-                None
+    if let Some(specific_targets) = specific_discard_cards(state, ability) {
+        // CR 608.2c: Apply `card_filter` to object-bound / declared-target hand
+        // discards before proposing any discard. Done inside this branch so a
+        // live hand-object target that fails `card_filter` resolves as a no-op
+        // instead of emptying `specific_targets` before the branch gate and
+        // falling through to the generic player-hand path.
+        let specific_targets: Vec<_> = match &card_filter {
+            Some(filter) => {
+                // CR 608.2c: "their hand" in the filter is the hand the card is
+                // in — its owner's (CR 400.3) — so bind each card's owner.
+                let filtered: Vec<_> = specific_targets
+                    .into_iter()
+                    .filter(|id| {
+                        state.objects.get(id).is_some_and(|obj| {
+                            discard_card_filter_matches(
+                                state,
+                                &discard_filter_scope(ability, obj.owner),
+                                *id,
+                                filter,
+                            )
+                        })
+                    })
+                    .collect();
+                if filtered.is_empty() && !up_to {
+                    state.cost_payment_failed_flag = true;
+                }
+                filtered
             }
-        })
-        .collect();
-
-    // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
-    let declared_target_discard =
-        crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
-    // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
-    // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
-    // object id must still be discarded. Controller-scoped "discard a card"
-    // (Macabre Waltz) must not consume propagated bounce targets (issue #3257).
-    let object_bound_discard = ability.effect.target_filter().is_some_and(|t| {
-        matches!(
-            t,
-            TargetFilter::ParentTarget
-                | TargetFilter::ParentTargetSlot { .. }
-                | TargetFilter::LastRevealed
-                | TargetFilter::LastZoneChanged
-                | TargetFilter::SelfRef
-                | TargetFilter::TriggeringSource
-                | TargetFilter::LastCreated
-                | TargetFilter::AttachedTo
-                | TargetFilter::CostPaidObject
-        )
-    });
-
-    // Issue #4950 (Thoughtseize) — corrected root cause: `declared_target_discard`
-    // and `object_bound_discard` say nothing about whether the discard's
-    // target *filter* resolves to an OBJECT (a specific card) or a PLAYER
-    // (whose hand a card gets chosen from separately, at resolution time).
-    // Both shapes can leave `specific_targets` empty:
-    //   - Thoughtseize: `DiscardCard{target: ParentTarget}` forwards the card
-    //     CHOSEN by the preceding reveal-choice. When that choice's eligible
-    //     set was empty (no nonland card), CR 608.2c says there is nothing to
-    //     choose — this must be a hard no-op.
-    //   - Tinybones/Chain of Smog/Skullscorch/Archon: `Discard{target: Player}`
-    //     ("target player discards a card[/two/at random]") is a *declared*
-    //     target (CR 115.1d, hence `declared_target_discard`), but the target
-    //     IS the player, not a card — which specific card(s) get discarded is
-    //     decided generically below (interactive choice or at random).
-    //   - Sonic Shrieker: "they discard a card" forwards the damaged PLAYER
-    //     via `ParentTarget` (hence `object_bound_discard`), not a chosen
-    //     card — same as the Player case above, just via a different filter.
-    // The ORIGINAL (pre-#4950) code gated on `!specific_targets.is_empty()`,
-    // which correctly sent all four shapes above to the generic path — but
-    // that ALSO sent Thoughtseize's empty-reveal case there, force-discarding
-    // an unrelated card whenever hand size happened to equal the discard
-    // count. The one bit those four PLAYER-scoped shapes never carry, and
-    // that Thoughtseize's empty-reveal case DOES, is a
-    // `parent_target_missing_reason` of `RevealHandChoice` — stamped at a
-    // parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)
-    // immediately after a `RevealHand`
-    // reveal-choice whose eligible set was empty (see
-    // `GameState::last_parent_target_missing_reason`). So: enter the specific-
-    // targets loop (a no-op when `specific_targets` is empty, which IS the
-    // desired Thoughtseize behavior) whenever either the original condition
-    // holds, OR the parent reveal-choice explicitly found nothing to choose.
-    // Any OTHER empty-`specific_targets`, declared/object-bound discard falls
-    // through to the generic hand-choice/random path below, exactly as
-    // before #4950's broken fix.
-    let parent_reveal_choice_found_nothing =
-        ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
-    if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
-        || (object_bound_discard && parent_reveal_choice_found_nothing)
-    {
+            None => specific_targets,
+        };
+        // CR 701.9a vs CR 118.12: this node's own discard cause. Only the
+        // CR 118.12 unless-cost delivery node (`scoped_discard_delivery_node`)
+        // carries `Cost`; every other discard is the resolving effect's.
+        let cause = ability.context.discard_cause;
         // Discard specific targeted cards
         for (index, obj_id) in specific_targets.iter().copied().enumerate() {
             let obj = state
@@ -411,13 +374,19 @@ pub fn resolve(
 
             // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
             // opponent's spell or ability can't force the protected player to
-            // discard ANY card, regardless of which one.
-            if crate::game::static_abilities::forced_action_muzzled(
-                state,
-                ability.controller,
-                player_id,
-                crate::types::ability::CostCategory::Discards,
-            ) {
+            // discard ANY card, regardless of which one. CR 118.12: a cost
+            // discard is the payment the payer already chose. Whether a
+            // Tamiyo-class static lets them choose it is decided at the choice
+            // (Tamiyo's ruling: "you can't choose to sacrifice or discard"; the
+            // gate is missing, #11091), so delivery does not re-read the muzzle.
+            if cause == DiscardCause::Effect
+                && crate::game::static_abilities::forced_action_muzzled(
+                    state,
+                    ability.controller,
+                    player_id,
+                    crate::types::ability::CostCategory::Discards,
+                )
+            {
                 continue;
             }
 
@@ -425,7 +394,7 @@ pub fn resolve(
                 player_id,
                 object_id: obj_id,
                 source_id: Some(ability.source_id),
-                caused_by_effect: true,
+                caused_by_effect: cause == DiscardCause::Effect,
                 discard_frame,
                 applied: HashSet::new(),
             };
@@ -469,6 +438,7 @@ pub fn resolve(
                                     EffectKind::from(&ability.effect),
                                     pin_paused_occurrence(state, obj_id),
                                     discard_frame,
+                                    cause,
                                     events,
                                     events_before_self,
                                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -492,7 +462,6 @@ pub fn resolve(
                                 None,
                                 false,
                                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                None,
                                 events,
                             );
                             if discard_frame.is_none() {
@@ -529,6 +498,7 @@ pub fn resolve(
                         EffectKind::from(&ability.effect),
                         pin_paused_occurrence(state, obj_id),
                         discard_frame,
+                        cause,
                         events,
                         events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -546,51 +516,34 @@ pub fn resolve(
         // the wrong hand. `resolve_player_for_context_ref` skips `ability.targets`
         // when the filter is a context-ref and falls back to `ability.controller`.
         // CR 608.2b: a declared player whose target was illegal discards nothing.
-        let Some(discard_player) =
-            super::resolve_player_for_context_ref(state, ability, &target_filter)
-        else {
-            // CR 608.2b: a missing player discards nothing; the completion marker is what publishes the zero count.
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(());
-        };
-
-        // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
-        // opponent's spell or ability can't force the protected player to
-        // discard ANY card, regardless of which one. Treated as an impossible
-        // action for that player: a mandatory discard is a failed no-op
-        // (mirrors the empty-hand mandatory-discard path below), an "up to"
-        // discard simply discards zero.
-        if crate::game::static_abilities::forced_action_muzzled(
-            state,
-            ability.controller,
-            discard_player,
-            crate::types::ability::CostCategory::Discards,
-        ) {
-            if !up_to {
-                state.cost_payment_failed_flag = true;
-            }
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::from(&ability.effect),
-                source_id: ability.source_id,
-                subject: None,
-            });
-            return Ok(());
-        }
-
-        // CR 701.9b: Player chooses which card(s) to discard (not "at random").
-        let hand_cards: Vec<ObjectId> = state
-            .players
-            .iter()
-            .find(|p| p.id == discard_player)
-            .ok_or(EffectError::PlayerNotFound)?
-            .hand
-            .iter()
-            .copied()
-            .collect();
+        let (discard_player, hand_cards) =
+            match player_hand_discard_pool(state, ability, &target_filter, card_filter.as_ref())? {
+                PlayerHandDiscardPool::Eligible { player, cards } => (player, cards),
+                PlayerHandDiscardPool::NoPlayer => {
+                    // CR 608.2b: a missing player discards nothing; the completion marker is what publishes the zero count.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::from(&ability.effect),
+                        source_id: ability.source_id,
+                        subject: None,
+                    });
+                    return Ok(());
+                }
+                // CR 701.9a + CR 609.3 + CR 118.12: a muzzled player is treated as
+                // unable to discard: a mandatory discard that requires cards fails (as
+                // below), a discard requiring zero cards is paid in full, and an "up to"
+                // discard simply discards zero.
+                PlayerHandDiscardPool::Muzzled => {
+                    if !up_to && num_cards > 0 {
+                        state.cost_payment_failed_flag = true;
+                    }
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::from(&ability.effect),
+                        source_id: ability.source_id,
+                        subject: None,
+                    });
+                    return Ok(());
+                }
+            };
 
         // CR 701.9b: For "up to N" discards, present the full N to the player.
         // The available cards list naturally constrains actual selection.
@@ -600,8 +553,14 @@ pub fn resolve(
             (num_cards as usize).min(hand_cards.len())
         };
         if count == 0 && !up_to {
-            // CR 608.2c: Effect resolved as no-op (empty hand) — veto downstream IfYouDo.
-            state.cost_payment_failed_flag = true;
+            // CR 118.12 + CR 118.3: "If you do" checks whether the player chose to pay an
+            // optional cost or started to pay a mandatory one. A discard that requires
+            // cards when none can be discarded never started, so veto downstream
+            // IfYouDo / WhenYouDo. A discard requiring zero cards — "discard your hand"
+            // with an empty hand (Moonveil Regent ruling) — is paid in full.
+            if num_cards > 0 {
+                state.cost_payment_failed_flag = true;
+            }
         } else if random {
             // CR 701.9a: this is a resolving effect, so Library-of-Leng-class
             // replacements DO apply — `DiscardCause::Effect`.
@@ -641,6 +600,7 @@ pub fn resolve(
                     EffectKind::from(&ability.effect),
                     paused_card,
                     discard_frame,
+                    DiscardCause::Effect,
                     events,
                     events_before_self,
                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -682,6 +642,7 @@ pub fn resolve(
                         // CR 400.7: the pause parks the pre-move occurrence.
                         pin_paused_occurrence(state, *obj_id),
                         discard_frame,
+                        DiscardCause::Effect,
                         events,
                         events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
@@ -715,6 +676,235 @@ pub fn resolve(
     Ok(())
 }
 
+/// The cards a specific-card discard names: `Some` exactly when [`resolve`]
+/// takes its specific-card branch (a declared, object-bound or parent-reveal
+/// discard), `None` when it discards from a player's hand through
+/// [`player_hand_discard_pool`].
+fn specific_discard_cards(state: &GameState, ability: &ResolvedAbility) -> Option<Vec<ObjectId>> {
+    // Check if targets specify specific cards to discard. Parent chain
+    // propagation can inherit non-hand object targets (e.g. Traumatic Critique's
+    // damage recipient) — those must not short-circuit the hand-choice path.
+    //
+    // Issue #3257: A bounce head's chosen graveyard creatures are propagated onto
+    // a trailing "discard a card" sub-ability for chain context, but they are NOT
+    // discard targets. Once the bounce moves them to hand they must not bypass the
+    // interactive DiscardChoice path via this fast path — only a *declared* targeted
+    // discard (Oracle uses "target") may consume `ability.targets` here.
+    // Partially-stale case: both callers check the all-stale case first
+    // (`resolve`'s early return, the feasibility predicate's undecided answer),
+    // so this substitution only ever drops individual dead referents from a list
+    // that still has at least one live member — it cannot empty the list and so
+    // cannot reach the generic-path fallback that guard protects.
+    let live_targets = ability.live_object_targets(state);
+    let specific_targets: Vec<_> = live_targets
+        .iter()
+        .filter_map(|t| {
+            let TargetRef::Object(obj_id) = t else {
+                return None;
+            };
+            let obj = state.objects.get(obj_id)?;
+            if obj.zone == Zone::Hand {
+                Some(*obj_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
+    let declared_target_discard =
+        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
+    // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
+    // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
+    // object id must still be discarded. Controller-scoped "discard a card"
+    // (Macabre Waltz) must not consume propagated bounce targets (issue #3257).
+    let object_bound_discard = ability.effect.target_filter().is_some_and(|t| {
+        matches!(
+            t,
+            TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
+                | TargetFilter::SelfRef
+                | TargetFilter::TriggeringSource
+                | TargetFilter::LastCreated
+                | TargetFilter::AttachedTo
+                | TargetFilter::CostPaidObject
+        )
+    });
+
+    // Issue #4950 (Thoughtseize) — corrected root cause: `declared_target_discard`
+    // and `object_bound_discard` say nothing about whether the discard's
+    // target *filter* resolves to an OBJECT (a specific card) or a PLAYER
+    // (whose hand a card gets chosen from separately, at resolution time).
+    // Both shapes can leave `specific_targets` empty:
+    //   - Thoughtseize: `DiscardCard{target: ParentTarget}` forwards the card
+    //     CHOSEN by the preceding reveal-choice. When that choice's eligible
+    //     set was empty (no nonland card), CR 608.2c says there is nothing to
+    //     choose — this must be a hard no-op.
+    //   - Tinybones/Chain of Smog/Skullscorch/Archon: `Discard{target: Player}`
+    //     ("target player discards a card[/two/at random]") is a *declared*
+    //     target (CR 115.1d, hence `declared_target_discard`), but the target
+    //     IS the player, not a card — which specific card(s) get discarded is
+    //     decided generically (interactive choice or at random).
+    //   - Sonic Shrieker: "they discard a card" forwards the damaged PLAYER
+    //     via `ParentTarget` (hence `object_bound_discard`), not a chosen
+    //     card — same as the Player case above, just via a different filter.
+    // The ORIGINAL (pre-#4950) code gated on `!specific_targets.is_empty()`,
+    // which correctly sent all four shapes above to the generic path — but
+    // that ALSO sent Thoughtseize's empty-reveal case there, force-discarding
+    // an unrelated card whenever hand size happened to equal the discard
+    // count. The one bit those four PLAYER-scoped shapes never carry, and
+    // that Thoughtseize's empty-reveal case DOES, is a
+    // `parent_target_missing_reason` of `RevealHandChoice` — stamped at a
+    // parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)
+    // immediately after a `RevealHand`
+    // reveal-choice whose eligible set was empty (see
+    // `GameState::last_parent_target_missing_reason`). So: enter the specific-
+    // targets loop (a no-op when `specific_targets` is empty, which IS the
+    // desired Thoughtseize behavior) whenever either the original condition
+    // holds, OR the parent reveal-choice explicitly found nothing to choose.
+    // Any OTHER empty-`specific_targets`, declared/object-bound discard falls
+    // through to the generic hand-choice/random path (`None`), exactly as
+    // before #4950's broken fix.
+    let parent_reveal_choice_found_nothing =
+        ability.parent_target_missing_reason == Some(ParentTargetMissingReason::RevealHandChoice);
+    ((!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
+        || (object_bound_discard && parent_reveal_choice_found_nothing))
+        .then_some(specific_targets)
+}
+
+/// CR 701.9a: the cards a player-hand discard can move — the discarding
+/// player's hand, narrowed by the recipient-scoped card filter — or why there
+/// is no pool.
+pub(super) enum PlayerHandDiscardPool {
+    /// CR 608.2b: no discarding player resolves (an illegal declared player).
+    NoPlayer,
+    /// CR 701.9a + CR 609.3: an opponent's spell or ability can't force this
+    /// player to discard (Tamiyo, Collector of Tales class).
+    Muzzled,
+    /// The discarding player and every card of theirs the instruction can
+    /// discard.
+    Eligible {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+}
+
+/// The single authority on which hand cards a player-hand discard can move,
+/// shared by [`resolve`] and [`optional_discard_is_infeasible`].
+pub(super) fn player_hand_discard_pool(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    card_filter: Option<&TargetFilter>,
+) -> Result<PlayerHandDiscardPool, EffectError> {
+    let Some(discard_player) = super::resolve_player_for_context_ref(state, ability, target_filter)
+    else {
+        return Ok(PlayerHandDiscardPool::NoPlayer);
+    };
+
+    // CR 701.9a + CR 609.3: Tamiyo, Collector of Tales class — an
+    // opponent's spell or ability can't force the protected player to
+    // discard ANY card, regardless of which one.
+    if crate::game::static_abilities::forced_action_muzzled(
+        state,
+        ability.controller,
+        discard_player,
+        crate::types::ability::CostCategory::Discards,
+    ) {
+        return Ok(PlayerHandDiscardPool::Muzzled);
+    }
+
+    // CR 701.9b: Player chooses which card(s) to discard (not "at random").
+    let hand = &state
+        .players
+        .iter()
+        .find(|p| p.id == discard_player)
+        .ok_or(EffectError::PlayerNotFound)?
+        .hand;
+    // CR 608.2c + CR 201.2a: "discards a card with that name" restricts which
+    // cards in the hand can satisfy the instruction. A player with no such
+    // card can't discard, so the instruction does nothing (the empty pool
+    // takes the same no-op path as an empty hand).
+    let cards = match card_filter {
+        Some(filter) => {
+            let scoped = discard_filter_scope(ability, discard_player);
+            hand.iter()
+                .copied()
+                .filter(|id| discard_card_filter_matches(state, &scoped, *id, filter))
+                .collect()
+        }
+        None => hand.iter().copied().collect(),
+    };
+    Ok(PlayerHandDiscardPool::Eligible {
+        player: discard_player,
+        cards,
+    })
+}
+
+/// CR 118.12 + CR 118.3 + CR 608.2d: "you may discard N cards. If you do, …" is
+/// a cost the player can only choose to pay in full; with fewer eligible cards
+/// than N it is an impossible option, so neither its "If you do" rider nor a
+/// reflexive "When you do" (Ill-Timed Explosion, CR 603.12) can follow from it.
+/// "Up to N" is never impossible, and neither is "discard your hand" (it requires
+/// exactly the cards in that hand, so zero cards pays it in full) unless the player
+/// is muzzled against it while holding cards. Shapes this can't decide here
+/// (per-player fan-outs, repeats, specific-card discards, an unresolvable
+/// discarding player) answer `false`, so the prompt is offered.
+pub(crate) fn optional_discard_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let Effect::Discard {
+        count,
+        target,
+        filter,
+        ..
+    } = &ability.effect
+    else {
+        return false;
+    };
+    let (inner, up_to) = count.peel_up_to();
+    if up_to
+        || ability.optional_for.is_some()
+        || ability.repeat_for.is_some()
+        || ability.player_scope.is_some()
+        || ability.pinned_object_targets_all_stale(state)
+        || specific_discard_cards(state, ability).is_some()
+    {
+        return false;
+    }
+    // CR 107.1b: a negative count discards zero cards.
+    let required = resolve_quantity_with_targets(state, inner, ability).max(0) as usize;
+    match player_hand_discard_pool(state, ability, target, filter.as_ref()) {
+        Ok(PlayerHandDiscardPool::Eligible { cards, .. }) => cards.len() < required,
+        Ok(PlayerHandDiscardPool::Muzzled) => required > 0,
+        Ok(PlayerHandDiscardPool::NoPlayer) | Err(_) => false,
+    }
+}
+
+/// CR 608.2c + CR 109.5: bind the discarding player as the scoped "they" for a
+/// discard's card filter. "Target player discards a card with the greatest mana
+/// value among cards in their hand" (Draconic Fealty, Intruder's Inquisition)
+/// compares against the DISCARDING player's hand, not the caster's; the
+/// controller stays the ability's controller, so "you" is unchanged.
+fn discard_filter_scope(ability: &ResolvedAbility, discard_player: PlayerId) -> ResolvedAbility {
+    let mut scoped = ability.clone();
+    scoped.scoped_player = Some(discard_player);
+    scoped
+}
+
+/// CR 608.2c + CR 201.2a: whether `card` satisfies the discard's card filter
+/// ("a card with that name", "a nonland card with the greatest mana value ...")
+/// evaluated against the recipient-scoped ability from [`discard_filter_scope`].
+fn discard_card_filter_matches(
+    state: &GameState,
+    scoped: &ResolvedAbility,
+    card: ObjectId,
+    filter: &TargetFilter,
+) -> bool {
+    let ctx = crate::game::filter::FilterContext::from_ability(scoped);
+    crate::game::filter::matches_target_filter(state, card, filter, &ctx)
+}
+
 /// CR 207.2c + CR 118.12a: Discard a card as part of an ability cost (Channel).
 /// Routes through the replacement pipeline so Madness (CR 702.35) etc. can intercept.
 pub(crate) fn discard_as_cost(
@@ -746,33 +936,27 @@ pub(crate) fn discard_caused_by_effect_with_source(
     source_id: Option<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> DiscardOutcome {
-    discard_caused_by_effect_with_source_and_frame(
+    let outcome = discard_caused_by_effect_with_source_and_frame(
         state, object_id, player, source_id, None, events,
-    )
-}
-
-/// Resolving-effect discard with optional operation-owned provenance.
-/// CR 701.9a vs CR 118.12 / CR 601.2h: WHY a card is being discarded.
-///
-/// This is the `caused_by_effect` axis of `route_discard`, surfaced as a type
-/// rather than a bool because it is load-bearing and silently mis-set: it gates
-/// `ReplacementCondition::EffectCausedDiscard`. Library of Leng replaces a
-/// discard caused by a spell or ability, and must NOT touch a discard made to
-/// pay a cost — the boundary `library_of_leng_does_not_apply_to_discard_cost`
-/// pins.
-///
-/// Callers must state which one they are; there is deliberately no default. A
-/// shared discard helper that hard-codes one of these silently launders a cost
-/// payment into an effect (or vice versa), which is exactly the bug this enum
-/// exists to make unrepresentable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DiscardCause {
-    /// A resolving spell or ability discards the card (CR 701.9a).
-    /// Library-of-Leng-class replacements gate on this.
-    Effect,
-    /// The discard IS the payment of a cost (CR 118.12 unless-cost,
-    /// CR 601.2h additional cost). Effect-caused replacements must not apply.
-    Cost,
+    );
+    // CR 400.7: a replacement choice (a CR 616.1 choice among two or more
+    // applicable effects, or a single optional "you may ... instead"
+    // replacement's apply-or-decline choice) paused this frameless discard with
+    // the card still in hand. Pin that occurrence so the resume can record the
+    // discard (CR 701.9a + CR 614.6) -- the resumed zone-change delivery
+    // records only provenance-framed discards. Batch paths call `_and_frame`
+    // and park `PendingDiscardBatch` themselves, so they never reach this
+    // install and the two carriers cannot coexist.
+    if matches!(outcome, DiscardOutcome::NeedsReplacementChoice(_)) {
+        debug_assert!(state.pending_single_discard.is_none());
+        state.pending_single_discard =
+            Some(Box::new(crate::types::game_state::PendingSingleDiscard {
+                paused_card: pin_paused_occurrence(state, object_id),
+                player,
+                source_id,
+            }));
+    }
+    outcome
 }
 
 /// One game-selected discard batch: who, how many, from what pool, and why.
@@ -915,25 +1099,15 @@ pub(crate) fn discard_at_random(
         // `route_discard` is the shared tail; only the `caused_by_effect` flag
         // differs, and it is exactly what Library-of-Leng-class replacements
         // gate on.
-        let outcome = match cause {
-            DiscardCause::Effect => discard_caused_by_effect_with_source_and_frame(
-                state,
-                obj_id,
-                player,
-                Some(source_id),
-                discard_frame,
-                events,
-            ),
-            DiscardCause::Cost => route_discard(
-                state,
-                obj_id,
-                player,
-                Some(source_id),
-                false,
-                discard_frame,
-                events,
-            ),
-        };
+        let outcome = discard_with_cause_and_frame(
+            state,
+            obj_id,
+            player,
+            Some(source_id),
+            cause,
+            discard_frame,
+            events,
+        );
         if let DiscardOutcome::NeedsReplacementChoice(chooser) = outcome {
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(chooser, state);
@@ -971,6 +1145,34 @@ pub(crate) fn discard_caused_by_effect_with_source_and_frame(
         player,
         source_id,
         true,
+        discard_frame,
+        events,
+    )
+}
+
+/// CR 701.9a vs CR 118.12: discard `object_id` with the stated cause. The
+/// single dispatch from [`DiscardCause`] to `route_discard`'s
+/// `caused_by_effect` flag, so a caller that carries a cause (a parked batch, a
+/// resolving node) never re-derives it.
+pub(crate) fn discard_with_cause_and_frame(
+    state: &mut GameState,
+    object_id: ObjectId,
+    player: PlayerId,
+    source_id: Option<ObjectId>,
+    cause: DiscardCause,
+    discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
+    events: &mut Vec<GameEvent>,
+) -> DiscardOutcome {
+    let caused_by_effect = match cause {
+        DiscardCause::Effect => true,
+        DiscardCause::Cost => false,
+    };
+    route_discard(
+        state,
+        object_id,
+        player,
+        source_id,
+        caused_by_effect,
         discard_frame,
         events,
     )
@@ -1080,7 +1282,6 @@ fn route_discard(
                     None,
                     false,
                     crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                    None,
                     events,
                 );
                 if discard_frame.is_none() {
@@ -1563,10 +1764,10 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, DiscardedCardResult,
-        EffectOutcomeSignal, LibraryPosition, QuantityExpr, ReplacementCondition,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
-        TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CardSelectionMode, ChosenAttribute,
+        ControllerRef, DiscardedCardResult, EffectOutcomeSignal, LibraryPosition, QuantityExpr,
+        ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -1617,13 +1818,13 @@ mod tests {
             .as_mut()
             .expect("test grandchild exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         direct_child
             .else_ability
             .as_mut()
             .expect("test else branch exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         let continuation = PendingContinuation::new(Box::new(direct_child), &state);
         state.park_ability_continuation(continuation);
 
@@ -1632,6 +1833,7 @@ mod tests {
         state.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: None,
+            awaiting_batch: None,
         });
         assert!(
             !hand_off_recruit_discard_result(&mut state, discard_frame),
@@ -1680,6 +1882,7 @@ mod tests {
                     target: TargetFilter::ParentTarget,
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Top,
+                    arranger: None,
                 },
             ))
     }
@@ -1693,6 +1896,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
@@ -1724,6 +1929,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -1899,6 +2106,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -2033,6 +2242,8 @@ mod tests {
         replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Hand),
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -2714,6 +2925,339 @@ mod tests {
         );
     }
 
+    /// CR 118.12 + CR 118.3: "discard your hand" requires exactly the cards in
+    /// that hand, so with an empty hand it requires zero cards and is paid in
+    /// full — its "If you do" stays on (Moonveil Regent ruling). The control is
+    /// the same empty hand under "discard a card", which requires a card it
+    /// cannot discard and still vetoes.
+    #[test]
+    fn whole_hand_discard_of_empty_hand_completes_without_veto() {
+        use crate::types::ability::{PlayerScope, QuantityRef};
+
+        let discard = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count,
+                    target: TargetFilter::Controller,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let mut state = GameState::new_two_player(42);
+        assert!(state.players[0].hand.is_empty(), "P0 starts empty-handed");
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &discard(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "discarding an empty hand is paid in full and must not veto its rider"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "an empty hand offers no discard choice"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the whole-hand discard publishes its completion marker"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { .. })),
+            "an empty hand discards no card"
+        );
+
+        // Control: the same empty hand under "discard a card" still vetoes.
+        let mut control = GameState::new_two_player(42);
+        let mut control_events = Vec::new();
+        resolve(
+            &mut control,
+            &discard(QuantityExpr::Fixed { value: 1 }),
+            &mut control_events,
+        )
+        .unwrap();
+        assert!(
+            control.cost_payment_failed_flag,
+            "a discard requiring a card it cannot discard must still veto"
+        );
+    }
+
+    /// CR 701.9a + CR 609.3 + CR 118.12: a player muzzled against an opponent's
+    /// discards (Tamiyo, Collector of Tales class) who holds no cards faces a
+    /// whole-hand discard requiring zero cards, which is paid in full and must
+    /// not veto its rider. The control on the same muzzled board requires a card
+    /// the muzzled player can't discard, so it still fails.
+    #[test]
+    fn muzzled_whole_hand_discard_of_empty_hand_completes_without_veto() {
+        use crate::types::ability::{
+            CostCategory, PlayerScope, QuantityRef, StaticDefinition, TargetRef,
+        };
+        use crate::types::statics::{ProhibitionScope, StaticMode};
+
+        // "Target player discards ...", controlled by the protected player's
+        // opponent: the muzzle protects only against opponents' effects.
+        let opponents_discard = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count,
+                    target: TargetFilter::Player,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+                vec![TargetRef::Player(PlayerId(0))],
+                ObjectId(100),
+                PlayerId(1),
+            )
+        };
+        let muzzled_board = || {
+            let mut state = GameState::new_two_player(42);
+            let ward = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Ward Host".into(),
+                Zone::Battlefield,
+            );
+            let protection = StaticDefinition::new(StaticMode::CantCauseForcedAction {
+                cause: ProhibitionScope::Opponents,
+                actions: vec![CostCategory::Discards, CostCategory::SacrificesPermanent],
+            });
+            let obj = state.objects.get_mut(&ward).unwrap();
+            obj.static_definitions.push(protection.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(protection);
+            // CR 604.1: the muzzle's presence gate reads the post-layers index.
+            crate::game::layers::evaluate_layers(&mut state);
+            // Reach guard: both fixtures take the `Muzzled` arm, not the
+            // eligible-pool path below it.
+            assert!(
+                crate::game::static_abilities::forced_action_muzzled(
+                    &state,
+                    PlayerId(1),
+                    PlayerId(0),
+                    CostCategory::Discards,
+                ),
+                "the fixture's player must be muzzled against the opponent's discard"
+            );
+            state
+        };
+
+        let mut state = muzzled_board();
+        assert!(state.players[0].hand.is_empty(), "P0 starts empty-handed");
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &opponents_discard(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a muzzled discard requiring zero cards is paid in full and must not veto"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the muzzled discard publishes its completion marker"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { .. })),
+            "an empty hand discards no card"
+        );
+
+        // Control: the same muzzled board, requiring a card P0 holds but can't
+        // discard. Only the muzzle explains the veto and the untouched hand.
+        let mut control = muzzled_board();
+        let held = create_object(
+            &mut control,
+            CardId(2),
+            PlayerId(0),
+            "Held".into(),
+            Zone::Hand,
+        );
+        let mut control_events = Vec::new();
+        resolve(
+            &mut control,
+            &opponents_discard(QuantityExpr::Fixed { value: 1 }),
+            &mut control_events,
+        )
+        .unwrap();
+        assert!(
+            control.cost_payment_failed_flag,
+            "a muzzled discard that requires a card must still fail"
+        );
+        assert!(
+            control.players[0].hand.contains(&held),
+            "the muzzled player keeps the card"
+        );
+        assert!(
+            !matches!(control.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "a muzzled player is offered no discard choice"
+        );
+    }
+
+    /// CR 118.12 + CR 701.9a + CR 609.3: the rider-visible half of the muzzled
+    /// zero-card discard, through real combat → trigger → prompt → resolve. The
+    /// victim may "discard" an empty hand while muzzled, since that discards no
+    /// card, so the "If they do" follows. With a card in hand the option can't be
+    /// taken (Tamiyo, Collector of Tales ruling 2019-05-03), so neither the
+    /// prompt nor the rider happens. The protection line is Tamiyo's verbatim.
+    /// The trigger is a synthetic twin of Miss Highwater's "they may discard
+    /// their hand. If they do, they draw seven cards ...", whose printed text
+    /// doesn't fully parse yet.
+    #[test]
+    fn muzzled_may_discard_hand_rider_follows_only_for_an_empty_hand() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::phase::Phase;
+
+        const TAMIYO_STATIC: &str = "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.";
+        const TRIGGER_TWIN: &str = "Whenever this creature deals combat damage to a player, they may discard their hand. If they do, they draw two cards.";
+        const LIBRARY: [&str; 2] = ["Top", "Second"];
+
+        let hit_muzzled_player = |held: bool| -> GameRunner {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(P0, "Ward Host", 2, 2, TAMIYO_STATIC);
+            if held {
+                scenario.add_card_to_hand(P0, "Held");
+            }
+            scenario.with_library_top(P0, &LIBRARY);
+            // The attacker's own hand keeps a count that read the wrong player
+            // from coinciding with the victim's empty hand.
+            scenario.add_card_to_hand(P1, "Attacker's Card");
+            let attacker = scenario
+                .add_creature_from_oracle(P1, "Synthetic Twin", 3, 3, TRIGGER_TWIN)
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = P1;
+            runner.state_mut().priority_player = P1;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+                .expect("declare the attack");
+            // The drive stops at the block prompt, then runs on to the trigger.
+            runner.combat_damage();
+            runner.declare_blockers(&[]).expect("declare no blocks");
+            runner.combat_damage();
+            runner
+        };
+
+        let mut empty = hit_muzzled_player(false);
+        assert!(
+            matches!(
+                empty.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            ),
+            "an empty hand can be discarded, so the victim is offered the option, got {:?}",
+            empty.state().waiting_for
+        );
+        empty
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept discarding the empty hand");
+        empty.advance_until_stack_empty();
+        assert_eq!(
+            empty.state().players[0].hand.len(),
+            LIBRARY.len(),
+            "the zero-card discard is paid in full, so the rider draws two cards"
+        );
+
+        let held = hit_muzzled_player(true);
+        assert!(
+            !matches!(
+                held.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "a muzzled player with a card in hand can't take the option"
+        );
+        assert_eq!(
+            held.state().players[0].hand.len(),
+            1,
+            "the card stays in hand"
+        );
+        assert!(held.state().players[0].graveyard.is_empty());
+        assert_eq!(held.state().players[0].library.len(), LIBRARY.len());
+    }
+
+    /// CR 118.12: a discard whose count resolves to zero requires
+    /// no card, so it is paid in full without touching the hand.
+    #[test]
+    fn zero_count_discard_is_paid_in_full() {
+        let mut state = GameState::new_two_player(42);
+        let held = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Held".into(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a zero-card discard is paid in full"
+        );
+        assert!(
+            state.players[0].hand.contains(&held),
+            "a zero-card discard leaves the hand alone"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the zero-card discard publishes its completion marker"
+        );
+    }
+
     #[test]
     fn controller_filter_ignores_inherited_non_hand_object_targets() {
         // CR 115.1 regression — Traumatic Critique: damage target is an
@@ -3139,5 +3683,82 @@ mod tests {
             "the land must be left alone"
         );
         assert_eq!(state.players[0].life, 18);
+    }
+
+    #[test]
+    fn object_bound_discard_applies_card_filter_without_player_hand_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Shock".into()));
+
+        let p0_shock = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".into(),
+            Zone::Hand,
+        );
+        let p1_opt = create_object(&mut state, CardId(2), PlayerId(1), "Opt".into(), Zone::Hand);
+        let p1_shock = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Shock".into(),
+            Zone::Hand,
+        );
+
+        // Object-bound discard pointing at `p1_opt` (which does NOT match "Shock"):
+        // must discard nothing and set `cost_payment_failed_flag` rather than
+        // discarding `p1_opt` or falling through to a player-hand discard.
+        let miss = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_opt)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &miss, &mut events).unwrap();
+        assert!(state.players[0].hand.contains(&p0_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[1].hand.contains(&p1_shock));
+        assert!(state.cost_payment_failed_flag);
+
+        // Object-bound discard pointing at `p1_shock` (which DOES match "Shock"):
+        // must discard `p1_shock`.
+        state.cost_payment_failed_flag = false;
+        let hit = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_shock)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &hit, &mut events).unwrap();
+        assert!(!state.players[1].hand.contains(&p1_shock));
+        assert!(state.players[1].graveyard.contains(&p1_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[0].hand.contains(&p0_shock));
     }
 }

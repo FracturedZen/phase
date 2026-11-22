@@ -648,24 +648,21 @@ fn private_look_ends_when_no_parked_prior_look_reader_remains() {
         &["Top Card 0", "Top Card 1", "Deep 0", "Deep 1", "Deep 2"],
     );
     // Mana for the fused PayCost ({2}{G}{G}).
-    scenario.with_mana_pool(
-        P0,
-        {
-            let mut mana = Vec::new();
-            for _ in 0..2 {
-                mana.push(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
-            }
-            for _ in 0..2 {
-                mana.push(ManaUnit::new(
-                    ManaType::Colorless,
-                    ObjectId(0),
-                    false,
-                    vec![],
-                ));
-            }
-            mana
-        },
-    );
+    scenario.with_mana_pool(P0, {
+        let mut mana = Vec::new();
+        for _ in 0..2 {
+            mana.push(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
+        }
+        for _ in 0..2 {
+            mana.push(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+        }
+        mana
+    });
     let mut runner = scenario.build();
     advance_to_upkeep_of(&mut runner, P0);
 

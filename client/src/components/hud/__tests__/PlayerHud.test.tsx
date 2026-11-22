@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, createRef } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,16 @@ describe("PlayerHud", () => {
     expect(screen.getByLabelText("Speed 3")).toBeInTheDocument();
     expect(screen.getByText("Speed: 3")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
+  });
+
+  it("hands its root to a ref and marks the Manual / Undo column for the action rail", () => {
+    // ActionRailStatusRow measures this root and this column to keep its
+    // status chips clear of the plate on short landscape screens (#11010).
+    const ref = createRef<HTMLDivElement>();
+    render(<PlayerHud ref={ref} />);
+
+    expect(ref.current).toHaveAttribute("data-player-hud", "0");
+    expect(ref.current?.querySelector("[data-player-hud-side-controls]")).not.toBeNull();
   });
 
   it("hides local zero poison counters", () => {
@@ -189,6 +199,34 @@ describe("PlayerHud", () => {
         type: "ChooseTarget",
         data: { target: { Player: 0 } },
       });
+    });
+
+    // CR 608.2d + CR 115.10a: a single-pick resolution choice ("a creature or
+    // player", no "target") is answered by a HUD click; the identical payload as a
+    // multi-pick selection (no `max`) keeps its modal, so the seat stays inert.
+    it("offers the seat for a single-pick ChooseObjectsSelection", () => {
+      const { dispatch } = mount({
+        type: "ChooseObjectsSelection",
+        data: { player: 0, eligible: legal([0]), min: 1, max: 1 },
+      });
+
+      expect(plateTag()).toBe("BUTTON");
+      fireEvent.click(document.querySelector("[data-hud-plate]")!);
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 0 } },
+      });
+    });
+
+    it("does not offer the seat for a multi-pick ChooseObjectsSelection", () => {
+      const { dispatch } = mount({
+        type: "ChooseObjectsSelection",
+        data: { player: 0, eligible: legal([0]), min: 1 },
+      });
+
+      expect(plateTag()).toBe("DIV");
+      fireEvent.click(document.querySelector("[data-hud-plate]")!);
+      expect(dispatch).not.toHaveBeenCalled();
     });
 
     // The negative sibling of the shared TargetSelection arm: the engine offers a

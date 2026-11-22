@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     CastingPermission, Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetFilter,
     TargetRef,
@@ -497,6 +498,12 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent, not to a new object built from its card.
     copy.reset_for_battlefield_exit();
 
+    // CR 707.2 + CR 722.3c: a Prepare copy acquires the prepare spell's
+    // characteristics, not the donor's live resolution effects. Face writers
+    // preserve those effects for same-object changes, so clear them here at the
+    // distinct-object construction boundary before installing the copied face.
+    copy.replacement_definitions.clear();
+
     // CR 707.2 + CR 110.5: status (tapped, flipped, face down, phased out),
     // counters and stickers are not copied.
     copy.tapped = false;
@@ -541,10 +548,13 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // re-seed an exile object, so they would otherwise describe the permanent
     // instead of the prepare-face characteristics installed afterwards.
     copy.granted_abilities_from = None;
+    copy.protection_provenance.clear();
+    copy.protection_start_grants.clear();
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
     copy.copied_prepare_face = None;
+    copy.double_faced_token_alternative = None;
     copy.base_name_origin = None;
 
     // CR 707.2: the choices made while casting are copied only from an object
@@ -560,6 +570,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.cast_cost_paid_object = None;
     copy.fused_split_spell = false;
     copy.cast_occurrence = None;
+    copy.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
 
     // CR 903.3 + CR 903.9a: the commander designation is an attribute of the
     // card itself, not of a copy, so the copy in exile is never a commander
@@ -1408,6 +1419,8 @@ mod tests {
         });
         obj.damage_marked = 3;
         obj.dealt_deathtouch_damage = true;
+        // Reach-guard: the clone carries a non-empty damage-kind latch in.
+        assert!(obj.dealt_damage_kinds.record(true));
         obj.attachments.push(ObjectId(77));
         obj.attached_to = Some(AttachTarget::Object(ObjectId(78)));
         obj.paired_with = Some(ObjectId(79));
@@ -1443,6 +1456,10 @@ mod tests {
         obj.prepared_copy_source = Some(ObjectId(80));
         obj.loyalty_activations_this_turn = 1;
         obj.extra_loyalty_activations_this_turn = 2;
+        obj.double_faced_token_alternative = Some(crate::game::game_object::BackFaceData {
+            name: "Jump".to_string(),
+            ..Default::default()
+        });
 
         strip_non_copiable_state(&mut obj);
 
@@ -1450,6 +1467,8 @@ mod tests {
         assert!(obj.stickers.is_empty());
         assert_eq!(obj.damage_marked, 0);
         assert!(!obj.dealt_deathtouch_damage);
+        // CR 400.7 + CR 120.2a: the damage-kind history is the permanent's.
+        assert!(obj.dealt_damage_kinds.is_empty());
         assert!(obj.attachments.is_empty());
         assert_eq!(obj.attached_to, None);
         assert_eq!(obj.paired_with, None);
@@ -1483,6 +1502,59 @@ mod tests {
         assert_eq!(obj.prepared_copy_source, None);
         assert_eq!(obj.loyalty_activations_this_turn, 0);
         assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
+        assert_eq!(obj.double_faced_token_alternative, None);
+    }
+
+    /// CR 400.7 + CR 707.2 + CR 722.3c: the prepared copy of a permanent that
+    /// dealt combat damage is born in exile with no damage history (the
+    /// damage-kind latch belongs to the permanent, and `eval_source_has_dealt_damage`
+    /// reads it in any zone), while the source keeps its own latch and Any-set
+    /// entry. A prepare face is an Instant or Sorcery (CR 722.3c), so the copy
+    /// never reaches the battlefield; the entry-reset leg below is a
+    /// function-level pin only, not a production path.
+    #[test]
+    fn prepared_copy_of_damaged_source_has_no_damage_history() {
+        use crate::types::ability::DamageKindFilter;
+
+        let mut state = GameState::new_two_player(42);
+        let source = setup_creature(&mut state);
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.back_face = Some(BackFaceForTest::prepare());
+            obj.monstrous = true;
+            assert!(obj.dealt_damage_kinds.record(true));
+        }
+        state.objects_that_dealt_damage.insert(source);
+
+        prepare_object(&mut state, source, &mut Vec::new());
+
+        let copy_id = linked_prepared_copy_id(&state, source).expect("prepare creates the copy");
+        let copy = &state.objects[&copy_id];
+        // Reach-guards: this is the synthesized prepared copy, in exile, and
+        // the strip ran (`monstrous` is cleared only by the exit reset here).
+        assert!(copy.is_copy);
+        assert_eq!(copy.prepared_copy_source, Some(source));
+        assert_eq!(copy.zone, Zone::Exile);
+        assert!(!copy.monstrous);
+        assert!(state.objects[&source].monstrous);
+
+        // Discriminating: the copy carries no latch.
+        assert!(
+            copy.dealt_damage_kinds.is_empty(),
+            "the prepared copy must not inherit the source's damage-kind latch"
+        );
+        // Reach-sanity, not discriminating (the copy id is fresh).
+        assert!(!state.objects_that_dealt_damage.contains(&copy_id));
+        // Multi-authority: the source keeps its own history.
+        assert!(state.objects[&source]
+            .dealt_damage_kinds
+            .has(DamageKindFilter::CombatOnly));
+        assert!(state.objects_that_dealt_damage.contains(&source));
+
+        // Function-level pin: entry reset does not re-arm the latch.
+        let mut entered = state.objects[&copy_id].clone();
+        entered.reset_for_battlefield_entry(1, 1);
+        assert!(entered.dealt_damage_kinds.is_empty());
     }
 
     #[test]
@@ -2888,7 +2960,7 @@ mod tests {
                 effect.target_filter(),
                 Some(&TargetFilter::TriggeringSource)
             );
-            assert!(crate::game::triggers::extract_target_filter_from_effect(&effect).is_none());
+            assert!(crate::types::ability::extract_target_filter_from_effect(&effect).is_none());
             let slots = build_target_slots(
                 &state,
                 &ResolvedAbility::new(effect.clone(), vec![], source, PlayerId(0)),
@@ -2899,7 +2971,7 @@ mod tests {
 
         let typed = mass_prepare(EffectScope::Single);
         assert_eq!(
-            crate::game::triggers::extract_target_filter_from_effect(&typed),
+            crate::types::ability::extract_target_filter_from_effect(&typed),
             Some(&creatures_you_control())
         );
     }
