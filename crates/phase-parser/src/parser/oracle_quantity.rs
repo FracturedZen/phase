@@ -5470,10 +5470,16 @@ mod tests {
                 assert_eq!(qty, expected, "{phrase:?}");
             }
         }
-        // Reach-guard: object-set "this way" clauses stay on TrackedSetSize.
+        // Reach-guard: object-set "this way" clauses stay on the tracked-set
+        // count (CR 614.6: only cards that actually reached a graveyard), never
+        // the numeric PreviousEffectAmount look-back.
         assert_eq!(
             parse_for_each_clause("card put into a graveyard this way"),
-            Some(QuantityRef::TrackedSetSize)
+            Some(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Card))),
+                caused_by: None,
+                destination: Some(Zone::Graveyard),
+            })
         );
     }
 
