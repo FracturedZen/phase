@@ -16004,7 +16004,7 @@ mod tests {
     #[test]
     fn preferred_selection_optional_compound_cost_and_decline_choose_one() {
         let def = parse_effect_chain(
-            "look at the top two cards of your library. You may sacrifice this enchantment and              pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put              one of those cards on the bottom of your library.",
+            "look at the top two cards of your library. You may sacrifice this enchantment and pay {2}{G}{G}. If you do, put one of those cards into your hand. If you don't, put one of those cards on the bottom of your library.",
             AbilityKind::Spell,
         );
 
