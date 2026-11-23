@@ -647,24 +647,23 @@ fn private_look_ends_when_no_parked_prior_look_reader_remains() {
         P0,
         &["Top Card 0", "Top Card 1", "Deep 0", "Deep 1", "Deep 2"],
     );
-    // Mana for the fused PayCost ({2}{G}{G}).
-    scenario.with_mana_pool(P0, {
-        let mut mana = Vec::new();
-        for _ in 0..2 {
-            mana.push(ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]));
-        }
-        for _ in 0..2 {
-            mana.push(ManaUnit::new(
-                ManaType::Colorless,
-                ObjectId(0),
-                false,
-                vec![],
-            ));
-        }
-        mana
-    });
     let mut runner = scenario.build();
     advance_to_upkeep_of(&mut runner, P0);
+    // Mana for the fused PayCost ({2}{G}{G}), added once the upkeep trigger is
+    // pending: CR 500.4 empties mana pools between steps, so mana seeded in the
+    // main phase would be gone by upkeep.
+    {
+        let state = runner.state_mut();
+        for mana_type in [
+            ManaType::Green,
+            ManaType::Green,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ] {
+            let _ =
+                state.add_mana_to_pool(P0, ManaUnit::new(mana_type, ObjectId(0), false, vec![]));
+        }
+    }
 
     for _ in 0..8 {
         match runner.state().waiting_for {
