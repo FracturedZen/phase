@@ -43583,6 +43583,8 @@ impl GameState {
                 is_suspected: _,
                 was_prepared: _,
                 departure: _,
+                // CR 702.167a: a player id, not an incarnation pin; nothing to rank.
+                craft_activator: _,
             } = record;
             let minted_by = *object_id;
             attachment_incarnations(attachments, incarnations);
