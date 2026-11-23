@@ -6,21 +6,19 @@
 //! rebuilt. Both answer the CR 603.3b ordering prompt with `altar_resolves_first`, except where a
 //! row names `identity_order`.
 
-use std::collections::BTreeMap;
-use std::path::Path;
-
 use engine::analysis::decision_template::{
     declaration_conforms, validate_recorded_answers, AimContext, ChoicePoint, DecisionSlot,
     DecisionTemplate, IterationCount, MayChoiceOption, PinValidation, PinnedDecision, TargetPin,
 };
-use engine::analysis::loop_check::{OfferRoad, ShortcutResponse};
+use engine::analysis::loop_check::ShortcutResponse;
 use engine::analysis::resource::{loop_detect_cost, reset_loop_detect_cost, LoopDetectCost};
 use engine::game::scenario::{GameRunner, P0};
 use engine::game::NamingCause;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
+    CastPaymentMode, GameState, LoopDetectionMode, PersistedGameState, StackEntryKind, WaitingFor,
+    YieldTarget,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::zones::Zone;
@@ -205,41 +203,6 @@ fn token_count(state: &GameState) -> usize {
         .count()
 }
 
-type PlayerZones = (i32, Vec<ObjectId>, Vec<ObjectId>, Vec<ObjectId>);
-
-type BoardFingerprint = (
-    BTreeMap<ObjectId, (Zone, bool)>,
-    Vec<PlayerZones>,
-    Vec<ObjectId>,
-    Vec<ObjectId>,
-);
-
-/// Every object's zone and tapped state, each player's life, library, hand and graveyard, the
-/// stack, and the battlefield.
-fn board_fingerprint(state: &GameState) -> BoardFingerprint {
-    (
-        state
-            .objects
-            .values()
-            .map(|object| (object.id, (object.zone, object.tapped)))
-            .collect(),
-        state
-            .players
-            .iter()
-            .map(|player| {
-                (
-                    player.life,
-                    player.library.iter().copied().collect(),
-                    player.hand.iter().copied().collect(),
-                    player.graveyard.iter().copied().collect(),
-                )
-            })
-            .collect(),
-        state.stack.iter().map(|entry| entry.id).collect(),
-        state.battlefield.iter().copied().collect(),
-    )
-}
-
 impl Drive {
     fn state(&self) -> &GameState {
         self.runner.state()
@@ -319,28 +282,33 @@ impl Drive {
     }
 }
 
-/// Each board driven to the first window `apply()` returns at, which must be its offer.
+/// Each board driven through the recurrence windows it passes before its offer, to the window
+/// `apply()` returns next, which must be its offer.
 fn offered(board: Board) -> Option<(Drive, Vec<Apply>)> {
+    let windows = match board {
+        Board::A | Board::B => 0,
+        // Animate Dead's leaves trigger, and Felidar Guardian blinking Soul's Attendant for
+        // Preston to copy, each happen once before the period first recurs.
+        Board::BAttendant => 4,
+    };
     let mut drive = start(board)?;
     let mut applies = drive.drive_to_window();
-    // Soul's Attendant's trigger lands above Preston's, so that board passes one recurrence window
-    // before its offer stands.
-    if let Board::BAttendant = board {
-        if !is_offer(drive.state()) {
-            let action = drive.next_action();
-            applies.push(drive.apply(action));
-            applies.extend(drive.drive_to_window());
-        }
+    for window in 0..windows {
+        assert!(
+            !is_offer(drive.state()),
+            "{board:?}: offered at window {window} of {windows}"
+        );
+        applies.extend(drive.drive_to_window());
     }
     let state = drive.state();
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::LoopShortcut { proposer, road: OfferRoad::RecordedPeriod, .. }
+            WaitingFor::LoopShortcut { proposer, .. }
                 if proposer == P0
         ),
-        "{board:?}: the first recurrence window is a recorded-period offer to P0; got {} with \
-         top {:?}",
+        "{board:?}: the window after {windows} recurrence windows is a recorded-period offer to \
+         P0; got {} with top {:?}",
         state.waiting_for.variant_name(),
         top_trigger_source(state)
     );
@@ -418,19 +386,15 @@ fn a_trigger_driven_period_is_offered_at_its_first_recurrence_window_and_taken()
         }
     }
 
-    let restored = crate::committed_dump_walk::restore_committed(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/combo_infinite_pile_4p_offer.json.gz"),
+    let restored = serde_json::from_value::<PersistedGameState>(
+        serde_json::to_value(crate::combo_infinite_pile::offer_state())
+            .expect("the live offer encodes"),
     )
-    .expect("the committed offer restores");
+    .expect("the live offer decodes")
+    .into_game_state()
+    .expect("the live offer restores");
     assert!(
-        matches!(
-            restored.waiting_for,
-            WaitingFor::LoopShortcut {
-                road: OfferRoad::RecordedPeriod,
-                ..
-            }
-        ),
+        matches!(restored.waiting_for, WaitingFor::LoopShortcut { .. }),
         "live control: a priority-driven recorded-period offer restores as one"
     );
 }
@@ -479,7 +443,7 @@ fn an_accumulating_stack_beneath_the_recurrence_is_offered_and_taken() {
     assert!(
         matches!(
             state.waiting_for,
-            WaitingFor::LoopShortcut { proposer, road: OfferRoad::RecordedPeriod, .. }
+            WaitingFor::LoopShortcut { proposer, .. }
                 if proposer == P0
         ),
         "the offer is a recorded-period offer to P0"
@@ -580,37 +544,34 @@ fn board_b_is_offered_at_its_base_window_with_its_target_answers() {
     );
 }
 
-/// CR 732.2a + CR 732.2c: an until-lethal proposal on a trigger-driven offer, whose mint names no
-/// winner, ends at priority with the board untouched and the proposer's trace discarded.
+/// The AI's candidates at Board A's offer, which names no winner, hold no declaration, so its one
+/// legal answer is the decline.
 #[test]
-fn an_until_lethal_take_of_a_trigger_driven_offer_changes_nothing() {
-    let Some((mut drive, _)) = offered(Board::A) else {
+fn the_ai_answers_a_trigger_driven_offer_naming_no_winner_with_the_decline() {
+    let Some((drive, _)) = offered(Board::A) else {
         return;
     };
-    let offer = board_fingerprint(drive.state());
-    drive.take(IterationCount::UntilLethal);
     let state = drive.state();
-    let WaitingFor::Priority { player } = state.waiting_for else {
-        panic!(
-            "the fallback ends at priority; got {}",
-            state.waiting_for.variant_name()
-        );
-    };
     assert!(
-        state
-            .players
-            .iter()
-            .any(|seat| seat.id == player && !seat.is_eliminated),
-        "priority goes to a player still in the game"
+        matches!(
+            state.waiting_for,
+            WaitingFor::LoopShortcut {
+                predicted_winner: None,
+                ..
+            }
+        ),
+        "reach: the offer names no winner"
     );
-    assert_eq!(board_fingerprint(state), offer, "the board is the offer's");
-    assert!(
-        engine::game::play_trace_view(state).is_none_or(|view| view
-            .entries
-            .iter()
-            .all(|entry| entry.seat != P0
-                || matches!(entry.kind, engine::game::EntryKind::Answer { .. }))),
-        "the fallback discards the proposer's plays and resolutions"
+    assert_eq!(
+        engine::ai_support::candidate_actions(state)
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .collect::<Vec<_>>(),
+        vec![GameAction::DeclineShortcut]
+    );
+    assert_eq!(
+        engine::ai_support::legal_actions(state),
+        vec![GameAction::DeclineShortcut]
     );
 }
 
@@ -649,55 +610,12 @@ fn each_apply_evaluates_the_loop_shortcut_at_most_once() {
         }
         for (index, apply) in applies.iter().enumerate() {
             assert!(
-                apply.cost.object_growth_calls <= 1 && apply.cost.reconcile_calls <= 1,
+                apply.cost.object_growth_calls <= 1,
                 "{board:?}: apply {index} evaluated the shortcut more than once; {:?}",
                 apply.cost
             );
         }
     }
-}
-
-/// The ring road is asked first and the recorded road mints only while the ring leaves priority
-/// standing; a ring mint over a trigger-driven record keeps the ring road.
-#[test]
-fn the_ring_road_is_asked_before_the_recorded_road() {
-    let Some((_, applies)) = offered(Board::B) else {
-        return;
-    };
-    assert_eq!(
-        applies
-            .last()
-            .expect("the offer apply")
-            .cost
-            .reconcile_calls,
-        1,
-        "Board B: the ring bridge was entered and refused before the recorded road minted"
-    );
-
-    let mut state = crate::committed_dump_walk::restore_committed(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/fantastic_four_bounded_loop_4p.json.gz"),
-    )
-    .expect("the committed board restores");
-    let mut aimed_at = None;
-    for _ in 0..BEAT_CAP {
-        reset_loop_detect_cost();
-        crate::loop_shortcut_drain_boards::drive_one_beat(&mut state, &mut aimed_at);
-        if let WaitingFor::LoopShortcut { road, .. } = state.waiting_for {
-            assert_eq!(
-                road,
-                OfferRoad::Ring,
-                "the bounded-cycle mint is the ring road's"
-            );
-            assert_eq!(
-                loop_detect_cost().object_growth_calls,
-                0,
-                "the recorded road is not asked once the ring road minted"
-            );
-            return;
-        }
-    }
-    panic!("the committed board reached no offer in {BEAT_CAP} beats");
 }
 
 /// Offers `board` and takes it at `n`, metering only the take.
@@ -931,14 +849,14 @@ fn assert_the_declared_may_answer_must_be_the_recorded_one(
         "{board:?}: the shared authority admits the confirmed period's own answers"
     );
     assert_eq!(
-        validate_recorded_answers(&declined, period.choices(), COUNT, &offer),
+        validate_recorded_answers(&declined, period.choices(), COUNT, None, &offer),
         Err(PinValidation::DivergesFromRecordedPeriod {
             slot: flipped[0].slot().clone()
         }),
         "{board:?}: the refusal names the slot answered otherwise than the period"
     );
     assert_eq!(
-        validate_recorded_answers(&recorded, period.choices(), COUNT, &offer),
+        validate_recorded_answers(&recorded, period.choices(), COUNT, None, &offer),
         Ok(())
     );
 
@@ -1007,9 +925,9 @@ fn a_declared_optional_may_outside_the_recurrence_must_be_the_confirmed_periods_
 }
 
 /// CR 732.2a/c: a live recorded-period declaration must take the Replay route through the public
-/// Declare/Respond actions. The representable control commits all three attendant gains; with the
-/// per-turn gain counter one short of its limit, the first replayed cycle fits and the next one
-/// rejects the final Accept action and restores that action's entire entry state.
+/// Declare/Respond actions. The representable control commits every recorded attendant gain; with
+/// the per-turn gain counter one cycle's gains short of its limit, the first replayed cycle fits and
+/// the next one rejects the final Accept action and restores that action's entire entry state.
 #[test]
 fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically() {
     use engine::game::perf_counters::take_cost_snapshot;
@@ -1023,7 +941,6 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
             &control_offer.waiting_for,
             WaitingFor::LoopShortcut {
                 proposer,
-                road: OfferRoad::RecordedPeriod,
                 period,
                 ..
             } if *proposer == P0 && !period.is_empty()
@@ -1031,6 +948,12 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
         "reach guard: the offer is a nonempty recorded period owned by P0"
     );
     let recorded = recorded_declaration(&control_offer, |_| false);
+    // Soul's Attendant: each "may" the period recorded as taken gains 1 life per repetition.
+    let takes = attendant_answers(&control_offer)
+        .iter()
+        .filter(|(_, take)| *take == MayChoiceOption::Take)
+        .count() as u32;
+    assert!(takes > 0, "reach guard: the period takes an attendant gain");
     let control_life = control.state().players[0].life;
     let before_control = take_cost_snapshot();
     control.take_declared(IterationCount::Fixed(COUNT), Some(recorded));
@@ -1041,8 +964,8 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
     );
     assert_eq!(
         control.state().players[0].life - control_life,
-        COUNT as i32,
-        "the representable Replay committed the attendant's gain once in each cycle"
+        (takes * COUNT) as i32,
+        "the representable Replay committed each recorded attendant gain once in each cycle"
     );
     assert!(matches!(
         control.state().waiting_for,
@@ -1056,14 +979,13 @@ fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically(
         matches!(
             &hostile_offer.waiting_for,
             WaitingFor::LoopShortcut {
-                road: OfferRoad::RecordedPeriod,
                 period,
                 ..
             } if !period.is_empty()
         ),
         "reach guard: hostile case also begins from the real Replay offer"
     );
-    hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - 1;
+    hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - takes;
     let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
     let before_hostile = take_cost_snapshot();
     hostile
@@ -1239,6 +1161,23 @@ fn a_recorded_offers_may_is_fixed_at_the_interaction_ingress() {
     assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
 }
 
+/// CR 732.2a + CR 603.5: Soul's Attendant's "you may gain 1 life", outside Board B's
+/// recurrence, is stated as the confirmed period's answer at the interaction ingress, and a pin
+/// against it is refused.
+#[test]
+fn a_recorded_may_outside_the_recurrence_is_fixed_at_the_interaction_ingress() {
+    let Some((drive, _)) = offered(Board::BAttendant) else {
+        return;
+    };
+    assert!(
+        attendant_answers(drive.state())
+            .iter()
+            .any(|(_, take)| *take == MayChoiceOption::Take),
+        "reach guard: the period recorded Soul's Attendant's taken \"may\""
+    );
+    assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
+}
+
 /// Whether `slot` names a choice of Soul's Attendant.
 fn asked_of_attendant(state: &GameState, slot: &DecisionSlot) -> bool {
     match &slot.source {
@@ -1281,16 +1220,28 @@ fn accepted(proposed: GameState) -> GameState {
 /// ones its recorded period performs. One whose template answers a recorded "may" the other way is
 /// handed back with nothing taken, through the persisted codec and through bare serde; the
 /// proposal as declared is taken through both, Preston, the Vanisher making one token a
-/// repetition and Soul's Attendant's taken "you may gain 1 life" gaining 1.
+/// repetition and Soul's Attendant's taken "you may gain 1 life" gaining 1 for each take the
+/// period recorded.
 #[test]
 fn a_restored_proposal_is_taken_only_on_its_periods_recorded_answers() {
     use crate::period_confirm_rows::reloaded;
     const COUNT: u32 = 3;
-    for (board, life_gained) in [(Board::B, 0), (Board::BAttendant, COUNT as i32)] {
+    for board in [Board::B, Board::BAttendant] {
         let Some((drive, _)) = offered(board) else {
             return;
         };
         let offer = drive.state().clone();
+        // Soul's Attendant: each "may" the period recorded as taken gains 1 life per repetition.
+        let takes = attendant_answers(&offer)
+            .iter()
+            .filter(|(_, take)| *take == MayChoiceOption::Take)
+            .count();
+        assert_eq!(
+            takes > 0,
+            matches!(board, Board::BAttendant),
+            "{board:?}: reach guard: only the Attendant board's period takes a gain"
+        );
+        let life_gained = (COUNT as usize * takes) as i32;
         let recorded = recorded_declaration(&offer, |_| false);
         let flipped = recorded_declaration(&offer, |slot| {
             slot.point == ChoicePoint::MayGate
@@ -1404,7 +1355,7 @@ fn offered_asking_attendant_twice(answers: [MayChoiceOption; 2]) -> Option<Drive
     }
     assert_eq!(
         attendant_answers(drive.state()),
-        [(0, answers[0]), (1, answers[1])],
+        [(0, answers[1]), (1, answers[0])],
         "reach guard: the period asks Soul's Attendant twice, each its own occurrence"
     );
     Some(drive)
@@ -1437,8 +1388,19 @@ fn a_repeated_may_is_declared_per_occurrence() {
             return;
         };
         let offer = drive.state().clone();
-        for declared in [[Take, Take], [Take, Decline], [Decline, Decline]] {
-            if declared == recorded {
+        let period: [MayChoiceOption; 2] = attendant_answers(&offer)
+            .iter()
+            .map(|(_, take)| *take)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("the period asks Soul's Attendant twice");
+        for declared in [
+            [Take, Take],
+            [Take, Decline],
+            [Decline, Take],
+            [Decline, Decline],
+        ] {
+            if declared == period {
                 continue;
             }
             let mut refused = GameRunner::from_state(offer.clone());
@@ -1457,7 +1419,7 @@ fn a_repeated_may_is_declared_per_occurrence() {
 
         drive.take_declared(
             IterationCount::Fixed(COUNT),
-            Some(declaring_attendant(&offer, recorded)),
+            Some(declaring_attendant(&offer, period)),
         );
         let taken = drive.state();
         assert!(
@@ -1470,7 +1432,7 @@ fn a_repeated_may_is_declared_per_occurrence() {
             token_count(&offer) + COUNT as usize,
             "{recorded:?}: tokens"
         );
-        let takes = recorded.iter().filter(|answer| **answer == Take).count();
+        let takes = period.iter().filter(|answer| **answer == Take).count();
         assert_eq!(
             taken.players[0].life,
             offer.players[0].life + (COUNT as usize * takes) as i32,

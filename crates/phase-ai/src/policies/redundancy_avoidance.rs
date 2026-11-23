@@ -346,6 +346,7 @@ fn redundancy_delta(
             /* delta= */ -3.0,
         ),
         Effect::ApplyPostReplacementDamage { .. } => None,
+        Effect::ResumeDamageBatch { .. } => None,
         Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => None,
         Effect::Draw { count, .. } => zero_quantity_redundancy(
             state,
@@ -564,6 +565,10 @@ fn redundancy_delta(
         // CR 311.7: ChaosEnsues fires the current plane's "whenever chaos ensues"
         // triggered ability — it has no target and no static redundancy signal.
         | Effect::ChaosEnsues
+        // CR 701.33: AbandonScheme turns a face-up ongoing scheme face down
+        // onto the bottom of its owner's scheme deck — no target and no
+        // static redundancy signal.
+        | Effect::AbandonScheme
         // CR 119.7 + CR 119.8: RedistributeLifeTotals is a one-time interactive life
         // permutation — no target and no static redundancy signal.
         | Effect::RedistributeLifeTotals
@@ -624,6 +629,7 @@ fn redundancy_delta(
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::Intensify { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -735,7 +741,10 @@ fn redundancy_delta(
         // static redundancy signal (the value depends on the runtime choice).
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
-        | Effect::HeistExile => None,
+        | Effect::HeistExile
+        // Turtle Team-Up (no CR section — casual product): "the bosses play
+        // a card" — value depends on the revealed card; no static signal.
+        | Effect::HordePlayCard { .. } => None,
     }
 }
 

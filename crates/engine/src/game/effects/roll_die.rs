@@ -2,10 +2,10 @@ use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::HashSet;
 
-use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility,
+    DieRollIgnoreRule, DieRollModifier, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ResolvingTriggerContext, WaitingFor};
@@ -55,12 +55,21 @@ pub(crate) fn roll_natural(state: &mut GameState, sides: u8) -> u8 {
 /// The result is clamped to a u8-representable non-negative integer so a large
 /// subtract doesn't wrap; branches with `min`/`max` already in u8 simply won't
 /// match when the actual result is 0.
+///
+/// CR 608.2c: the modifier resolves in the resolving ability's context, so a
+/// later instruction can name what an earlier target-selection clause chose
+/// (the ability's chosen targets). Suspension-resume paths have no ability in
+/// scope and pass `None`, in which case the parked context feeds the
+/// distinguished parked-targets channel — the local members plus the
+/// chain-root/legality/pin context indexed reads need, frozen at park time.
 fn apply_modifier(
     state: &mut GameState,
     natural: u8,
     modifier: Option<&DieRollModifier>,
     controller: PlayerId,
     source_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
+    parked: crate::game::filter::ParkedTargets<'_>,
 ) -> u8 {
     let Some(m) = modifier else {
         return natural;
@@ -68,13 +77,20 @@ fn apply_modifier(
     // Carry the sign as the saturating operation rather than negating the
     // resolved delta: `-resolve_quantity(..)` would panic in debug builds (and
     // wrap in release) when the quantity resolves to `i32::MIN`.
-    let combined =
-        match m {
-            DieRollModifier::Add { value } => (natural as i32)
-                .saturating_add(resolve_quantity(state, value, controller, source_id)),
-            DieRollModifier::Subtract { value } => (natural as i32)
-                .saturating_sub(resolve_quantity(state, value, controller, source_id)),
-        };
+    let resolve = |state: &GameState, value: &crate::types::ability::QuantityExpr| match ability {
+        Some(ability) => {
+            crate::game::quantity::resolve_quantity_with_targets(state, value, ability)
+        }
+        None => crate::game::quantity::resolve_quantity_with_parked_targets(
+            state, value, controller, source_id, parked,
+        ),
+    };
+    let combined = match m {
+        DieRollModifier::Add { value } => (natural as i32).saturating_add(resolve(state, value)),
+        DieRollModifier::Subtract { value } => {
+            (natural as i32).saturating_sub(resolve(state, value))
+        }
+    };
     combined.clamp(0, u8::MAX as i32) as u8
 }
 
@@ -116,13 +132,29 @@ pub(crate) fn propose_roll(
         applied: HashSet::new(),
     };
 
-    match replacement::replace_event(state, proposed, events) {
+    // CR 603.6d + CR 614.12a + CR 611.3b: an as-enters roll is proposed on the
+    // board before its event; every other roll on the live board.
+    let (result, viewed_choice) =
+        match crate::game::pre_entry_view::PreEntryRulesView::of_pending_roll(state) {
+            Some(view) => {
+                let viewed = view.replace(
+                    state,
+                    |board, events| replacement::replace_event(board, proposed, events),
+                    events,
+                );
+                (viewed.result, viewed.choice)
+            }
+            None => (replacement::replace_event(state, proposed, events), None),
+        };
+    match result {
         ReplacementResult::Execute(event) => proposal_from_modified_event(event, count),
         ReplacementResult::Prevented => RollProposal::Prevented,
         ReplacementResult::NeedsChoice(choice_player) => {
             // CR 616.1: two or more applicable replacements — the affected
             // player orders them before the roll happens.
-            state.waiting_for = replacement::replacement_choice_waiting_for(choice_player, state);
+            state.waiting_for = viewed_choice.unwrap_or_else(|| {
+                replacement::replacement_choice_waiting_for(choice_player, state)
+            });
             RollProposal::Suspended
         }
     }
@@ -206,12 +238,43 @@ pub(crate) fn resolve_step(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
+    // CR 706.1: an instruction to roll zero dice names no dice, so nothing is
+    // proposed (`roll_dice_matcher` refuses a zero-count roll anyway) and the
+    // RNG is untouched. CR 706.4: the text says how to use the results; with
+    // no dice rolled the total of those results is 0 (Hydradoodle's ruling:
+    // "you won't roll any dice as it enters and it will be a 0/0"). Unlike a
+    // replacement-prevented roll (CR 614.6, which keeps `None`), the
+    // instruction's result is a determined zero, so a later "equal to the
+    // total of those results" reader cannot fall through to another channel.
+    // CR 608.2c: that zero is published like every instruction result, so a
+    // continuation drain keeps it.
+    if count == 0 {
+        publish_die_result(state, Some(0));
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::RollDie,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(ResolutionProgress::Complete);
+    }
+
+    // Slot context must be captured while `ability` is still in scope — past
+    // the proposal below, a CR 616.1 suspension drops it.
+    let parked = crate::game::targeting::capture_parked_slot_context(state, ability);
     let instruction = PendingDieRollInstruction {
         source_id: ability.source_id,
         controller: ability.controller,
         // CR 706.6: the roller is the player instructed to ignore, and so the
         // player who breaks a tie among equal lowest rolls.
         roller: ability.controller,
+        // CR 109.5 + CR 706.2: the printed controller the inline modifier
+        // reads — captured independently of the roller so a scoped seat
+        // keeps reading "you" as the printed player after a suspension.
+        quantity_controller: Some(ability.original_controller.unwrap_or(ability.controller)),
+        // CR 109.5 + CR 706.2: the ability's scoped-player binding, captured
+        // alongside the printed controller so a resumed ScopedPlayer member
+        // read measures the same seat the inline path measured.
+        scoped_player: ability.scoped_player,
         targets: ability.targets.clone(),
         results_table: results.clone(),
         modifier: modifier.cloned(),
@@ -236,6 +299,31 @@ pub(crate) fn resolve_step(
         // target once that branch runs (see
         // `build_resolved_from_def_with_chain_root`'s doc).
         chain_root_targets: ability.context.chain_root_targets.clone(),
+        // CR 608.2b + CR 400.7: capture the declared-slot legality stamp and
+        // the announced pins aligned with the chain-root list, so a resumed
+        // indexed read applies the same slot/legality/incarnation authority
+        // the live path would.
+        illegal_target_slots: crate::game::targeting::carrier_illegal_slots(state, ability),
+        chain_root_target_pins: ability
+            .context
+            .chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+        // CR 608.2c + CR 608.2b + CR 400.7: capture the slot-base declared
+        // entries, the base offset, and the node's own pins through the
+        // single capture authority — first-match pin lookup would collapse
+        // repeated IDs, and raw root indexing ignores modal/downstream
+        // offsets. Resume prefers these over the legacy chain-root list.
+        // This capture ran through the single capture authority above, so
+        // even an empty list is authoritative on resume.
+        declared_capture: Some((&parked).into()),
+        local_target_pins: parked.local_pins,
+        keyed_target_incarnations: parked.keyed_target_incarnations,
+        declared_player: Some(parked.declared_player),
     };
 
     // CR 706.1 + CR 614.1a: route the instruction through the replacement
@@ -256,7 +344,14 @@ pub(crate) fn resolve_step(
         .take()
         .expect("the just-proposed die instruction remains parked until execution");
 
-    execute_roll(state, instruction, sides, proposal, events)
+    execute_roll(state, instruction, sides, proposal, events, Some(ability))
+}
+
+/// Publish an instruction result, unlike context replay or rollback. The nested
+/// option records explicit clears and same-value writes for continuation drains.
+fn publish_die_result(state: &mut GameState, result: Option<i32>) {
+    state.die_result_this_resolution = result;
+    state.die_result_publication = Some(result);
 }
 
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
@@ -274,6 +369,7 @@ fn execute_roll(
     sides: u8,
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 706.1: a die roll is defined by its kind ("roll a d20"); a zero-sided
     // die names no distribution, so there is nothing to roll. This is not a
@@ -298,7 +394,7 @@ fn execute_roll(
         RollProposal::Prevented => {
             // CR 614.6: the roll never happened — no dice, no branches. Clear
             // any stale die result so "equal to the result" reads nothing.
-            state.die_result_this_resolution = None;
+            publish_die_result(state, None);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::RollDie,
                 source_id: instruction.source_id,
@@ -342,6 +438,14 @@ fn execute_roll(
         // the results-table route by construction.
         continuation: _,
         chain_root_targets,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
+        quantity_controller,
+        scoped_player,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -365,6 +469,14 @@ fn execute_roll(
         forced_ignored: outcome.forced.clone(),
         chain_root_targets,
         trigger_context,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
+        quantity_controller,
+        scoped_player,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -372,7 +484,7 @@ fn execute_roll(
     // replacement in play), "a unique lowest per rule", and the stacked-Lowest
     // run whose N lowest rolls are distinct.
     if !outcome.needs_choice() {
-        return resume_after_ignore(state, pending, outcome.forced, events);
+        return resume_after_ignore(state, pending, outcome.forced, events, ability);
     }
 
     // CR 706.6, 2nd sentence: "if multiple results are tied for the lowest, the
@@ -451,15 +563,17 @@ pub(crate) fn resume_roll_dice_after_replacement(
     // CR 608.2c + CR 400.7e + CR 616.1: replay only the instruction's owned
     // resolution scope. Legacy absence must not acquire ambient authority.
     let entry_die = state.die_result_this_resolution;
+    let entry_publication = state.die_result_publication;
     let trigger_snapshot = instruction
         .trigger_context
         .as_ref()
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = instruction.die_result;
-    let result = execute_roll(state, *instruction, sides, proposal, events);
+    let result = execute_roll(state, *instruction, sides, proposal, events, None);
     let exit_die = if result.is_ok() {
         state.die_result_this_resolution
     } else {
+        state.die_result_publication = entry_publication;
         entry_die
     };
     if let Some(snapshot) = trigger_snapshot {
@@ -481,6 +595,18 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
     }
 }
 
+/// CR 706.3a + CR 608.2c: whether the stack top is a die-roll frame re-parked
+/// mid-loop, after a results-table branch suspended, whose remaining dice a
+/// priority-time drain may resume. A frame still at its first die is a pending
+/// CR 706.6 keep prompt, which stays parked for `GameAction::SelectDieRolls`,
+/// the only thing that knows the roller's picks.
+pub(crate) fn active_die_roll_is_resumable(state: &GameState) -> bool {
+    matches!(
+        state.resolution_stack.active_die_roll(),
+        Some(pending) if pending.next_index > 0
+    )
+}
+
 /// CR 706.3a + CR 608.2c: Continue a die-roll instruction whose results-table
 /// branch suspended for its own interactive choice.
 ///
@@ -498,18 +624,12 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
 ///
 /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
 /// retain their owning scope, including explicit emptiness; legacy missing scope
-/// is not reconstructed. A die roll started by a coin's continuation drain still
-/// loses its published per-survivor result at the drain's whole-snapshot restore
-/// (pre-existing, unchanged).
+/// is not reconstructed. The continuation drain preserves only writer-published
+/// results, including a survivor before its branch pauses, a completed aggregate,
+/// or an explicit clear. Replay is not publication; errors restore both entry
+/// scalar and publication authority.
 pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // Only a mid-loop re-park drains here; a pending CR 706.6 keep prompt must
-    // stay parked for its own action handler, which is the only thing that knows
-    // the roller's picks.
-    let resumable = matches!(
-        state.resolution_stack.active_die_roll(),
-        Some(pending) if pending.next_index > 0
-    );
-    if !resumable {
+    if !active_die_roll_is_resumable(state) {
         return;
     }
     let Ok(Some(pending)) = state.take_active_die_roll_frame() else {
@@ -519,13 +639,14 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     // CR 706.4 + CR 608.2c: restore the instruction context; a completed
     // aggregate stays live until the parent's later instructions consume it.
     let prev_die_result = state.die_result_this_resolution;
+    let entry_publication = state.die_result_publication;
     let trigger_snapshot = pending
         .trigger_context
         .as_ref()
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
-    match resume_after_ignore(state, pending, ignore_indices, events) {
+    match resume_after_ignore(state, pending, ignore_indices, events, None) {
         // Re-suspended on yet another branch choice: the frame re-parked itself
         // with the cursor advanced, so leave the restored context in place for
         // that continuation to read.
@@ -539,7 +660,10 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
             super::drain_pending_continuation(state, events);
             super::resume_resolution_frames(state, events);
         }
-        Err(_) => state.die_result_this_resolution = prev_die_result,
+        Err(_) => {
+            state.die_result_this_resolution = prev_die_result;
+            state.die_result_publication = entry_publication;
+        }
     }
     let exit_die = state.die_result_this_resolution;
     if let Some(snapshot) = trigger_snapshot {
@@ -574,6 +698,7 @@ pub(crate) fn resume_after_ignore(
     pending: PendingDieRoll,
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
+    ability: Option<&ResolvedAbility>,
 ) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
         source_id,
@@ -598,6 +723,14 @@ pub(crate) fn resume_after_ignore(
         forced_ignored: _,
         chain_root_targets,
         trigger_context,
+        illegal_target_slots,
+        chain_root_target_pins,
+        declared_capture,
+        local_target_pins,
+        keyed_target_incarnations,
+        declared_player,
+        quantity_controller,
+        scoped_player,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -608,6 +741,16 @@ pub(crate) fn resume_after_ignore(
 
     let mut total_actual = running_total;
     let mut rolled_any = already_rolled_any;
+
+    // CR 614.1c + CR 614.12 + CR 113.6: this is the one seam that knows both which
+    // roll this is and that its source has not entered: a card whose parked entry
+    // is pending, or a token copy still being created (CR 111.1 + CR 707.2).
+    let pre_entry_source =
+        crate::game::engine_replacement::entrant_has_not_entered(state, source_id)
+            .then_some(source_id);
+    // CR 603.2 + CR 603.10 + CR 603.2c: this pass's stamped rolls, whose
+    // observers are collected together, as rolled, at either exit below.
+    let mut as_enters_rolls: Vec<GameEvent> = Vec::new();
 
     // CR 706.3a: resume at the first die that has not yet run its branch. A
     // fresh instruction starts at 0; a resume after an interactive branch starts
@@ -633,7 +776,28 @@ pub(crate) fn resume_after_ignore(
         }
 
         // CR 706.2: apply the modifier to produce this die's actual result.
-        let actual = apply_modifier(state, natural, modifier.as_ref(), controller, source_id);
+        // CR 109.5: a resumed modifier reads the printed controller captured
+        // at park — the same authority the inline path reads live — not the
+        // acting seat. Pre-field frames keep the legacy acting read.
+        let actual = apply_modifier(
+            state,
+            natural,
+            modifier.as_ref(),
+            quantity_controller.unwrap_or(controller),
+            source_id,
+            ability,
+            crate::game::filter::ParkedTargets {
+                local: &targets,
+                local_pins: &local_target_pins,
+                root: &chain_root_targets,
+                illegal_slots: &illegal_target_slots,
+                root_pins: &chain_root_target_pins,
+                declared_capture: declared_capture.as_ref(),
+                keyed_target_incarnations: &keyed_target_incarnations,
+                declared_player,
+                scoped_player,
+            },
+        );
 
         // CR 706.2 + CR 706.6: emit the authoritative die-roll event ONCE, with
         // the post-modifier value already resolved, and only for a surviving
@@ -641,11 +805,19 @@ pub(crate) fn resume_after_ignore(
         // layer, `game/contraptions.rs`'s roll-difference scan, and
         // `game/effects/effect.rs`'s CR 611.2d snapshot all seeing survivors
         // only.
-        events.push(GameEvent::DieRolled {
+        let rolled = GameEvent::DieRolled {
             player_id: roller,
             sides,
             result: Some(actual),
-        });
+            pre_entry_source,
+        };
+        // CR 603.2 + CR 113.6 + CR 614.1c: an entrant's own as-enters roll is part
+        // of its entry, so it is held with that entry, and what it triggered is
+        // placed with it by the settled release, not by whichever action made it.
+        if pre_entry_source.is_some() {
+            as_enters_rolls.push(rolled.clone());
+        }
+        events.push(rolled);
 
         let actual_amount = i32::from(actual);
         total_actual = total_actual.saturating_add(actual_amount);
@@ -653,7 +825,7 @@ pub(crate) fn resume_after_ignore(
 
         // CR 706.2 + CR 706.3a: The stored value is this die's actual result
         // while its results-table branch resolves.
-        state.die_result_this_resolution = Some(actual_amount);
+        publish_die_result(state, Some(actual_amount));
 
         // CR 706.3a: Find the matching result branch and resolve its effect.
         // Each die consults the same table independently.
@@ -696,6 +868,8 @@ pub(crate) fn resume_after_ignore(
                     source_id,
                     controller,
                     roller,
+                    quantity_controller,
+                    scoped_player,
                     targets: targets.clone(),
                     sides,
                     results: results.clone(),
@@ -716,6 +890,12 @@ pub(crate) fn resume_after_ignore(
                     forced_ignored: ignore_indices.clone(),
                     chain_root_targets: chain_root_targets.clone(),
                     trigger_context,
+                    illegal_target_slots: illegal_target_slots.clone(),
+                    chain_root_target_pins: chain_root_target_pins.clone(),
+                    declared_capture: declared_capture.clone(),
+                    local_target_pins: local_target_pins.clone(),
+                    keyed_target_incarnations: keyed_target_incarnations.clone(),
+                    declared_player,
                 };
                 // CR 706.3a + CR 608.2c: the die owner waits outside the
                 // branch's entire child stack, not merely its top frame.
@@ -732,6 +912,7 @@ pub(crate) fn resume_after_ignore(
                 } else {
                     state.push_die_roll_frame(resumed);
                 }
+                hold_as_enters_rolls(state, &mut as_enters_rolls);
                 return Ok(progress);
             }
         }
@@ -743,11 +924,12 @@ pub(crate) fn resume_after_ignore(
         // result(s)". For no-table rolls the outer sub_ability is resolved by
         // the caller after this function returns, so leave the aggregate
         // available: it must read all surviving dice, not just the last one.
-        state.die_result_this_resolution = Some(total_actual);
+        publish_die_result(state, Some(total_actual));
     } else {
-        state.die_result_this_resolution = None;
+        publish_die_result(state, None);
     }
 
+    hold_as_enters_rolls(state, &mut as_enters_rolls);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RollDie,
         source_id,
@@ -757,16 +939,284 @@ pub(crate) fn resume_after_ignore(
     Ok(ResolutionProgress::Complete)
 }
 
+/// CR 603.2 + CR 603.10 + CR 603.2c: hold this pass's as-enters rolls, with what
+/// they triggered as they were rolled, beside their entry.
+fn hold_as_enters_rolls(state: &mut GameState, as_enters_rolls: &mut Vec<GameEvent>) {
+    if !as_enters_rolls.is_empty() {
+        crate::game::engine_replacement::hold_as_enters_roll_occurrence(
+            state,
+            std::mem::take(as_enters_rolls),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::scenario::{GameScenario, P0};
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, DieResultBranch, QuantityExpr,
         TargetFilter,
     };
-    use crate::types::game_state::{StackEntry, StackEntryKind};
-    use crate::types::identifiers::ObjectId;
+    use crate::types::game_state::{ParkedEntry, ParkedEntryState, StackEntry, StackEntryKind};
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// An entrant on the battlefield, and its entry event.
+    fn entrant_and_entry(state: &mut GameState) -> (ObjectId, GameEvent) {
+        let entrant = crate::game::zones::create_object(
+            state,
+            CardId(900),
+            PlayerId(0),
+            "Entrant".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(state, entrant, &mut events)
+            .expect("entered");
+        let entry = events
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("entry event");
+        (entrant, entry)
+    }
+
+    /// The `pre_entry_source` of each die `source` rolls, with two dice.
+    fn stamps_of_two_dice(state: &mut GameState, source: ObjectId) -> Vec<Option<ObjectId>> {
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 2 },
+                sides: 6,
+                results: vec![],
+                modifier: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).expect("the roll resolves");
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DieRolled {
+                    pre_entry_source, ..
+                } => Some(*pre_entry_source),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CR 614.1c + CR 614.12 + CR 113.6: every die of an instruction its source
+    /// makes before its entry happened names that source; any other roll names
+    /// no one.
+    #[test]
+    fn a_pending_sources_dice_are_all_stamped() {
+        let mut state = GameState::new_two_player(42);
+        let (entrant, entry) = entrant_and_entry(&mut state);
+        state.deferred_entry_events = vec![ParkedEntry::pending(entry, None)];
+        assert_eq!(
+            stamps_of_two_dice(&mut state, entrant),
+            vec![Some(entrant), Some(entrant)]
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let (entrant, _) = entrant_and_entry(&mut state);
+        assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
+    }
+
+    /// CR 603.2: a completed entry happened, so its entrant's later roll is an
+    /// ordinary roll, though the entry still waits for its collector. No printed
+    /// route rolls in this window (no chain puts a permanent onto the battlefield
+    /// and then rolls), so this row is direct.
+    #[test]
+    fn a_completed_sources_dice_are_not_stamped() {
+        let mut state = GameState::new_two_player(42);
+        let (entrant, entry) = entrant_and_entry(&mut state);
+        state.deferred_entry_events = vec![ParkedEntry {
+            event: entry,
+            state: ParkedEntryState::Completed,
+            entry_attack: None,
+            held_triggers: Vec::new(),
+        }];
+        assert_eq!(stamps_of_two_dice(&mut state, entrant), vec![None, None]);
+    }
+
+    const GRANT_AN_ADVANTAGE: &str = "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.";
+
+    /// A board for an as-enters roll by a token copy still being created, whose
+    /// batch has already committed a Wyll, Blade of Frontiers token, and with
+    /// `residents` (Barbarian Class, Pixie Guide) on P0's battlefield. The roll's
+    /// instruction is parked, as `resolve_step` parks it before proposing.
+    fn pre_entry_roll_board(residents: bool) -> GameState {
+        let mut scenario = GameScenario::new();
+        let co_entrant = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Wyll, Blade of Frontiers",
+                1,
+                1,
+                &format!(
+                    "{GRANT_AN_ADVANTAGE}\nWhenever you roll one or more dice, put a +1/+1 counter on Wyll."
+                ),
+            )
+            .id();
+        if residents {
+            scenario.add_enchantment_from_oracle(P0, "Barbarian Class", GRANT_AN_ADVANTAGE);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Pixie Guide",
+                1,
+                3,
+                &format!("Flying\nGrant an Advantage — {GRANT_AN_ADVANTAGE}"),
+            );
+        }
+        let mut state = scenario.build().state().clone();
+        crate::game::layers::flush_layers(&mut state);
+        let roller = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let token = crate::game::game_object::GameObject::new(
+            roller,
+            CardId(0),
+            P0,
+            "Hammer Jammer".to_string(),
+            Zone::Battlefield,
+        );
+        state.liminal_entries.insert(
+            roller,
+            crate::types::game_state::LiminalEntry {
+                copy_settlement: None,
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(token),
+                ),
+                name: "Hammer Jammer".to_string(),
+                source_id: roller,
+                controller: P0,
+                enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: vec![co_entrant],
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+        state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+            source_id: roller,
+            controller: P0,
+            roller: P0,
+            targets: Vec::new(),
+            results_table: Vec::new(),
+            modifier: None,
+            die_result: None,
+            trigger_context: None,
+            continuation: DieRollContinuation::Resolution,
+            chain_root_targets: Vec::new(),
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_capture: None,
+            quantity_controller: None,
+            scoped_player: None,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
+            declared_player: None,
+        }));
+        state
+    }
+
+    /// `state` with the fields a pre-entry proposal hands to the game put back
+    /// as `before` had them.
+    fn without_the_handover(state: &GameState, before: &GameState) -> GameState {
+        let mut rest = state.clone();
+        rest.pending_replacement = before.pending_replacement.clone();
+        rest.replacement_auto_choice_tail = before.replacement_auto_choice_tail.clone();
+        rest.loop_decision_tally = before.loop_decision_tally;
+        rest.waiting_for = before.waiting_for.clone();
+        rest
+    }
+
+    /// U-V2. CR 603.6d + CR 614.12 + CR 616.1: an as-enters roll is proposed on
+    /// the pre-entry board, so a co-entrant's roll replacement does not apply, and
+    /// the proposal writes nothing to the game but its typed handover: the pending
+    /// record, the remembered-order tail, the loop-decision tally and the prompt.
+    #[test]
+    fn a_pre_entry_proposal_writes_only_its_handover() {
+        // Inline: the co-entrant Wyll is the only replacement source, and it is
+        // not on the pre-entry board.
+        let mut state = pre_entry_roll_board(false);
+        let before = state.clone();
+        let mut events = Vec::new();
+        let proposal = propose_roll(&mut state, P0, 1, 6, &mut events);
+        assert!(
+            matches!(
+                proposal,
+                RollProposal::Execute { count: 1, ref ignore_rules } if ignore_rules.is_empty()
+            ),
+            "the co-entrant's replacement does not apply"
+        );
+        assert!(state.pending_replacement.is_none());
+        assert!(without_the_handover(&state, &before) == before);
+
+        // Paused: the two residents' replacements are ordered; the co-entrant's
+        // is not among them.
+        let mut state = pre_entry_roll_board(true);
+        let before = state.clone();
+        let proposal = propose_roll(&mut state, P0, 1, 6, &mut events);
+        assert!(matches!(proposal, RollProposal::Suspended));
+        let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+            panic!("expected the ordering prompt, got {:?}", state.waiting_for);
+        };
+        let mut names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Barbarian Class", "Pixie Guide"]);
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .map(|pending| pending.candidates.len()),
+            Some(2),
+            "the view's pending record is the game's"
+        );
+        assert!(without_the_handover(&state, &before) == before);
+
+        // CR 104.4b + CR 732: no saved order can answer a die roll's prompt (its
+        // replacements' branches can prompt, so the auto-choice key refuses them),
+        // so the pipeline records no loop decision here; the handover of the tally
+        // is tested on `PreEntryRulesView::replace` itself.
+        assert!(crate::game::replacement::replacement_auto_choice_key(&state).is_none());
+    }
+
+    /// The stamp's wire: it round-trips, an older payload decodes to no stamp, and
+    /// an unstamped event writes no key.
+    #[test]
+    fn the_stamp_serializes_only_when_present() {
+        let roll = |pre_entry_source| GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(3),
+            pre_entry_source,
+        };
+        let stamped = roll(Some(ObjectId(7)));
+        let mut wire = serde_json::to_value(&stamped).expect("serializes");
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(wire.clone()).expect("decodes"),
+            stamped
+        );
+        let data = wire["data"].as_object_mut().expect("the event's data");
+        assert_eq!(data.remove("pre_entry_source"), Some(7.into()));
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(wire).expect("decodes"),
+            roll(None)
+        );
+        let unstamped = serde_json::to_value(roll(None)).expect("serializes");
+        assert!(unstamped["data"].get("pre_entry_source").is_none());
+    }
 
     #[test]
     fn roll_die_emits_event_and_resolves_branch() {
@@ -1447,8 +1897,10 @@ mod tests {
         );
     }
 
-    /// CR 706.1: If the requested number of dice resolves to 0, no die result
-    /// exists for an inline `EventContextAmount` consumer.
+    /// CR 706.1: If the requested number of dice resolves to 0, no die is
+    /// rolled. CR 706.4 leaves the use of the results to the ability's text, and
+    /// the total of no results is 0 (Hydradoodle's ruling), so an inline
+    /// `EventContextAmount` consumer reads 0 — never the stale die result.
     #[test]
     fn roll_die_count_zero_clears_stale_die_result() {
         use crate::types::ability::{QuantityRef, TargetFilter};
@@ -1494,7 +1946,7 @@ mod tests {
                 .all(|event| !matches!(event, GameEvent::DieRolled { .. })),
             "count 0 must not emit a die roll"
         );
-        assert_eq!(state.die_result_this_resolution, None);
+        assert_eq!(state.die_result_this_resolution, Some(0));
         assert_eq!(
             state.players[0].hand.len(),
             0,
@@ -1596,6 +2048,8 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
             targets: vec![],
             sides: 20,
             results: vec![4, 17],
@@ -1609,9 +2063,17 @@ mod tests {
             forced_ignored: vec![],
             chain_root_targets: vec![],
             trigger_context: None,
+            illegal_target_slots: vec![],
+            chain_root_target_pins: vec![],
+            // Hand-built without a capture: no declared context, so the
+            // legacy path applies (no indexed reads run here either way).
+            declared_capture: None,
+            local_target_pins: vec![],
+            keyed_target_incarnations: vec![],
+            declared_player: None,
         };
         let mut events = Vec::new();
-        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events).unwrap();
+        let waiting = resume_after_ignore(&mut state, pending, vec![0], &mut events, None).unwrap();
         assert_eq!(
             waiting,
             ResolutionProgress::Complete,
@@ -1634,7 +2096,8 @@ mod tests {
                 GameEvent::DieRolled {
                     player_id: PlayerId(0),
                     sides: 20,
-                    result: Some(17)
+                    result: Some(17),
+                    ..
                 }
             )),
             "the surviving die must still emit DieRolled, got {events:?}"
@@ -1869,6 +2332,8 @@ mod preroll_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
                 target: TargetFilter::SelfRef,
@@ -2138,7 +2603,7 @@ mod preroll_tests {
         install(&mut state, &foreign);
         let mut events = vec![];
         assert_eq!(
-            resume_after_ignore(&mut state, pending, vec![0, 1], &mut events).unwrap(),
+            resume_after_ignore(&mut state, pending, vec![0, 1], &mut events, None).unwrap(),
             ResolutionProgress::Complete
         );
         assert_eq!(state.objects[&source].zone, Zone::Battlefield);
@@ -2152,47 +2617,59 @@ mod preroll_tests {
             .spawn(|| {
                 for mode in ["own", "empty", "legacy"] {
                     for links in [2, 22] {
-                        let mut branch = gain(1);
-                        for _ in 0..links {
-                            let mut parent = gain(1);
-                            parent.sub_ability = Some(Box::new(branch));
-                            branch = parent;
+                        for entry_publication in [None, Some(None), Some(Some(83))] {
+                            let mut branch = gain(1);
+                            for _ in 0..links {
+                                let mut parent = gain(1);
+                                parent.sub_ability = Some(Box::new(branch));
+                                branch = parent;
+                            }
+                            let (mut state, source, owned, caller) = fixture(branch, 3);
+                            state
+                                .pending_die_roll_instruction
+                                .as_mut()
+                                .unwrap()
+                                .trigger_context = match mode {
+                                "own" => Some(owned),
+                                "empty" => Some(empty()),
+                                "legacy" => None,
+                                _ => unreachable!(),
+                            };
+                            let event = modified(&mut state);
+                            install(&mut state, &caller);
+                            state.die_result_publication = entry_publication;
+                            let before = state.players[0].life;
+                            let mut events = vec![];
+                            let result =
+                                resume_roll_dice_after_replacement(&mut state, event, &mut events);
+                            if links == 22 {
+                                assert_eq!(result, Err(EffectError::ChainTooDeep));
+                                assert!(state.players[0].life > before);
+                                assert_eq!(state.die_result_this_resolution, Some(79));
+                                assert_eq!(state.die_result_publication, entry_publication);
+                                assert!(events.iter().any(|event| matches!(
+                                    event,
+                                    GameEvent::DieRolled {
+                                        result: Some(_),
+                                        ..
+                                    }
+                                )));
+                                assert!(!events.iter().any(|e| matches!(
+                                    e,
+                                    GameEvent::EffectResolved {
+                                        kind: EffectKind::RollDie,
+                                        ..
+                                    }
+                                )));
+                            } else {
+                                assert_eq!(result.unwrap(), ResolutionProgress::Complete);
+                                assert_eq!(state.players[0].life, before + 3);
+                                assert_eq!(state.die_result_this_resolution, Some(3));
+                                assert_eq!(state.die_result_publication, Some(Some(3)));
+                            }
+                            assert_scope(&state, &caller);
+                            consume_caller_count(&mut state, source);
                         }
-                        let (mut state, source, owned, caller) = fixture(branch, 3);
-                        state
-                            .pending_die_roll_instruction
-                            .as_mut()
-                            .unwrap()
-                            .trigger_context = match mode {
-                            "own" => Some(owned),
-                            "empty" => Some(empty()),
-                            "legacy" => None,
-                            _ => unreachable!(),
-                        };
-                        let event = modified(&mut state);
-                        install(&mut state, &caller);
-                        let before = state.players[0].life;
-                        let mut events = vec![];
-                        let result =
-                            resume_roll_dice_after_replacement(&mut state, event, &mut events);
-                        if links == 22 {
-                            assert_eq!(result, Err(EffectError::ChainTooDeep));
-                            assert!(state.players[0].life > before);
-                            assert_eq!(state.die_result_this_resolution, Some(79));
-                            assert!(!events.iter().any(|e| matches!(
-                                e,
-                                GameEvent::EffectResolved {
-                                    kind: EffectKind::RollDie,
-                                    ..
-                                }
-                            )));
-                        } else {
-                            assert_eq!(result.unwrap(), ResolutionProgress::Complete);
-                            assert_eq!(state.players[0].life, before + 3);
-                            assert_eq!(state.die_result_this_resolution, Some(3));
-                        }
-                        assert_scope(&state, &caller);
-                        consume_caller_count(&mut state, source);
                     }
                 }
             })
@@ -2336,7 +2813,19 @@ mod preroll_tests {
                 }
                 crate::game::trigger_index::reindex_object_triggers(&mut state, id);
                 let mut events = vec![];
-                crate::game::attractions::roll_to_visit_attractions(&mut state, P0, &mut events);
+                let roll_pause = crate::game::attractions::roll_to_visit_attractions(
+                    &mut state,
+                    P0,
+                    &mut events,
+                );
+                assert!(matches!(
+                    &roll_pause,
+                    Some(WaitingFor::ReplacementChoice {
+                        candidate_count: 2,
+                        ..
+                    })
+                ));
+                assert_eq!(roll_pause.as_ref(), Some(&state.waiting_for));
                 assert!(matches!(
                     state.waiting_for,
                     WaitingFor::ReplacementChoice {

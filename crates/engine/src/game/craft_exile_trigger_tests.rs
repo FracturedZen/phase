@@ -67,6 +67,8 @@ fn craft_ability() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,

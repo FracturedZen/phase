@@ -267,9 +267,9 @@ fn kilo_migrated_dump_fires_object_growth_offer() {
     let first_play = engine::game::play_trace_view(&state).and_then(|view| {
         view.entries.into_iter().find_map(|entry| match entry.kind {
             engine::game::EntryKind::Play { action, .. } => Some(action),
-            engine::game::EntryKind::Answer { .. } | engine::game::EntryKind::Resolution { .. } => {
-                None
-            }
+            engine::game::EntryKind::Answer { .. }
+            | engine::game::EntryKind::Remembered { .. }
+            | engine::game::EntryKind::Resolution { .. } => None,
         })
     });
     assert_eq!(
@@ -391,7 +391,7 @@ fn offered_count_and_ceiling(
 #[test]
 fn kilo_accept_delivers_exactly_n_counters_at_the_take() {
     use engine::game::derived_views::{
-        derive_views, CounterMagnitude, CounterRowView, ObjectCounterDisplay,
+        derive_views, CounterRowView, DisplayMagnitude, ObjectCounterDisplay,
     };
     use engine::types::counter::CounterType;
 
@@ -440,7 +440,7 @@ fn kilo_accept_delivers_exactly_n_counters_at_the_take() {
             pills: vec![CounterRowView {
                 counter: charge.clone(),
                 count: baseline + N,
-                magnitude: CounterMagnitude::Finite,
+                magnitude: DisplayMagnitude::Finite,
             }],
             loyalty: None,
         }),

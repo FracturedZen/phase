@@ -6,27 +6,30 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
+use crate::game::arithmetic::{sum_saturating_i32, u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
     matches_target_filter, matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
     matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
     shared_quality_characteristic_reads, spell_record_matches_filter,
     target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
+    ParkedTargets,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::speed::effective_speed;
 use crate::game::targeting::TriggeringSpell;
 use crate::types::ability::{
-    quantity_ref_object_scope_read, AbilityCondition, AbilityCost, AbilityDefinition,
-    AggregateFunction, AttachmentReferent, BasicLandType, CardTypeSetSource, CastManaObjectScope,
+    filter_recipient_read, quantity_ref_object_scope_read, AbilityCondition, AbilityCost,
+    AbilityDefinition, AggregateFunction, BasicLandType, CardTypeSetSource, CastManaObjectScope,
     CastManaSpentMetric, CastPermissionConstraint, CastingPermission, CombatHistoryScope,
     ContinuousModification, ControllerRef, CountScope, DamageChannel, Duration, Effect, FilterProp,
     ModalSelectionCondition, ModalSelectionConstraint, NameStickerSet, ObjectProperty, ObjectScope,
     ObjectScopeRead, ParsedCondition, PlayerFilter, PlayerScope, PossessionAxis, QuantityExpr,
-    QuantityRef, RepeatContinuation, ResolvedAbility, RoundingMode, SpellCastingOption,
-    StaticCondition, StaticDefinition, SubtypeExclusion, TargetDamageSourceBinding, TargetFilter,
-    TargetRef, ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition,
-    TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
+    QuantityRef, RecipientRead, RepeatContinuation, ResolvedAbility, RoundingMode,
+    SpellCastingOption, StaticCondition, StaticDefinition, SubtypeExclusion,
+    TargetDamageSourceBinding, TargetFilter, TargetRef, ThisWayCause, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnJournalKind, TurnWindow, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card_type::{noncreature_subtype_set, CoreType, SubtypeSet};
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -147,6 +150,46 @@ fn source_lki_for_context(
         })
 }
 
+/// CR 608.2h + CR 400.7: the counters of the triggered source as it last existed
+/// on the battlefield. A live exact source answers with its current counters;
+/// once it has left, the EXIT snapshot of that exact incarnation answers (the
+/// same authority `source_intensity` uses), so counters added after the trigger
+/// and before the departure are counted. With no exit record left, the
+/// trigger-time snapshot remains the fallback.
+fn source_counters_lki_for_context(
+    state: &GameState,
+    ctx: &QuantityContext,
+) -> Option<HashMap<CounterType, u32>> {
+    let Some(source) = ctx.trigger_source.as_ref() else {
+        return source_lki_for_context(state, ctx).map(|lki| lki.counters);
+    };
+    Some(match source.source_read(state) {
+        crate::types::game_state::TriggerSourceRead::ExactLive(object) => {
+            object.snapshot_public_characteristics().counters
+        }
+        crate::types::game_state::TriggerSourceRead::Latched(context) => {
+            latched_source_counters(state, context).clone()
+        }
+    })
+}
+
+/// CR 608.2h + CR 400.7: the counters a departed triggered source is read as
+/// having — the exit snapshot of its exact incarnation, else the trigger-time
+/// snapshot latched in `context`. The single authority behind
+/// [`source_counters_lki_for_context`] and loop normalization's carried read.
+pub(crate) fn latched_source_counters<'a>(
+    state: &'a GameState,
+    context: &'a crate::types::game_state::TriggerSourceContext,
+) -> &'a HashMap<CounterType, u32> {
+    &crate::game::filter::exit_lki_for_incarnation(
+        state,
+        context.identity.reference.object_id,
+        context.identity.reference.incarnation,
+    )
+    .unwrap_or(&context.lki)
+    .counters
+}
+
 /// Digital-only Alchemy: the intensity of the resolving ability's source, read
 /// for the exact source incarnation the ability belongs to. CR 608.2h: while
 /// that incarnation is still in its public zone, its current intensity; once
@@ -229,11 +272,9 @@ fn linked_exile_for_context(
             // as the objects the trigger latched; a card that left exile after the
             // trigger latched its pile (a CR 610.3 return, for one) is not "the exiled
             // card", including when another effect exiled it again.
-            source
-                .linked_exile_snapshot
-                .iter()
+            crate::game::players::linked_exile_pile(state, source)
+                .into_iter()
                 .filter(|linked| linked.is_still_exiled(state))
-                .cloned()
                 .collect()
         })
         .unwrap_or_else(|| crate::game::players::linked_exile_cards_for_source(state, ctx.source))
@@ -370,6 +411,108 @@ fn characteristic_view_for_object(
     }
 }
 
+/// CR 608.2h + CR 400.7: which authority reads one tracked-set member's
+/// characteristics (and its member-filter match). The producing occurrence
+/// binds the read: a stamped origin selects its departure record, never any
+/// latest older departure by storage id.
+enum TrackedMemberRead<'s> {
+    /// Stamped producing transition with a recorded departure snapshot.
+    Snapshot(&'s crate::types::game_state::LKISnapshot),
+    /// Stamped producing transition from a zone that records no LKI
+    /// (hand/library/graveyard): the live object is authoritative — the
+    /// legacy cache slot necessarily describes an EARLIER, unrelated
+    /// departure and must not be consulted.
+    Live,
+    /// Unstamped member (selection sets, legacy saves) or a recording-origin
+    /// data gap: legacy live-or-cache behavior.
+    Legacy,
+}
+
+/// True when departures from `zone` record LKI under their pre-move
+/// incarnation. Mirrors the zones.rs recording gate exactly; a new
+/// recording zone must extend both.
+pub(crate) fn zone_departure_records_lki(zone: Zone) -> bool {
+    matches!(zone, Zone::Battlefield | Zone::Exile | Zone::Stack)
+}
+
+fn tracked_member_read_authority(
+    state: &GameState,
+    set_id: Option<crate::types::identifiers::TrackedSetId>,
+    object_id: ObjectId,
+) -> TrackedMemberRead<'_> {
+    let origin = set_id.and_then(|set_id| {
+        state
+            .tracked_set_member_origins
+            .get(&set_id)
+            .and_then(|origins| origins.get(&object_id))
+    });
+    match origin {
+        None => TrackedMemberRead::Legacy,
+        Some(origin) => match state
+            .lki_by_incarnation
+            .get(&object_id)
+            .and_then(|history| history.get(&origin.departure_incarnation))
+        {
+            Some(lki) => TrackedMemberRead::Snapshot(lki),
+            // A recording origin with no record is a data gap (legacy save,
+            // pruned history): best-effort legacy behavior. A non-recording
+            // origin has no snapshot BY CONSTRUCTION, so live is
+            // authoritative and the legacy slot is provably some other
+            // departure.
+            None if zone_departure_records_lki(origin.departed_from) => TrackedMemberRead::Legacy,
+            None => TrackedMemberRead::Live,
+        },
+    }
+}
+
+/// CR 608.2h + CR 400.7: the characteristic view for one tracked-set member.
+///
+/// A member stamped with its producing transition reads that departure's
+/// snapshot (Danse Macabre reading a pumped sacrifice's battlefield
+/// toughness); a member stamped from a non-recording origin (a discarded
+/// card's hand departure) reads live, which is authoritative there and can
+/// never resurrect an earlier departure's modifications. Unstamped members
+/// keep the shared live-or-LKI helper.
+fn tracked_member_characteristic_view<'s>(
+    state: &'s GameState,
+    set_id: Option<crate::types::identifiers::TrackedSetId>,
+    object_id: ObjectId,
+) -> Option<CharacteristicView<'s>> {
+    match tracked_member_read_authority(state, set_id, object_id) {
+        TrackedMemberRead::Snapshot(lki) => Some(CharacteristicView::Lki(lki)),
+        TrackedMemberRead::Live => state
+            .objects
+            .get(&object_id)
+            .map(CharacteristicView::Object),
+        TrackedMemberRead::Legacy => characteristic_view_for_object(state, object_id),
+    }
+}
+
+/// CR 608.2h + CR 400.7: the characteristic view for one selected target
+/// occurrence. A stale pin reads the occurrence's departure LKI from exact
+/// incarnation history — never the retained live entry (a different object)
+/// and never the legacy cache slot (which may describe a later incarnation).
+/// A current or unpinned target resolves through the shared live-or-LKI
+/// helper. The live path proves the pin from the ability in scope; the
+/// parked path carries it in the frame — both select through here so the
+/// occurrence that was SELECTED is the occurrence that is READ.
+fn pinned_target_characteristic_view<'s>(
+    state: &'s GameState,
+    object_id: ObjectId,
+    pin: Option<ObjectIncarnationRef>,
+) -> Option<CharacteristicView<'s>> {
+    if let Some(pin) = pin {
+        if !pin.is_current(state) {
+            return state
+                .lki_by_incarnation
+                .get(&object_id)
+                .and_then(|history| history.get(&pin.incarnation))
+                .map(CharacteristicView::Lki);
+        }
+    }
+    characteristic_view_for_object(state, object_id)
+}
+
 /// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
 /// yielding one [`CharacteristicView`] per member.
 ///
@@ -469,6 +612,18 @@ fn visit_characteristic_leaf<'s>(
         // the triggering-object exclusion. Property aggregates must enumerate
         // the exact same members as object-count quantities.
         CardTypeSetSource::Objects { filter } => {
+            // No MED1 eval-time skip here: this arm enumerates through
+            // `object_count_matching_ids` with the live `FilterContext`,
+            // exactly the population `ObjectCount` counts, so a
+            // parent-targeted member filter reads the same announced
+            // parent `ObjectCount` reads (CR 608.2c + CR 608.2h). A
+            // skip would break the parity the comment above pins.
+            // Admission (`CardTypeSetSource::validate_admission`) still
+            // refuses dependent member filters at decode; only the
+            // `TrackedSet` arm — whose members can evaluate on the
+            // parked resume path with no ability in scope — fails
+            // closed at resolution (see its arm below and
+            // `med1_refused_member_filters_fail_closed_at_resolution`).
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
                 let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {
@@ -490,7 +645,19 @@ fn visit_characteristic_leaf<'s>(
         CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::TriggeringBatch,
             caused_by,
+            filter,
         } => {
+            // M4r2: a FILTERED TriggeringBatch leaf has no agreed-upon
+            // reading (the batch is an event population, CR 603.10a, while
+            // `filter` speaks of members). Admission refuses the form
+            // (`CardTypeSetSource::validate_admission`, enforced at decode
+            // for every head) and coverage reports it unsupported; this skip
+            // is defense-in-depth for hand-built in-memory values only, and
+            // its zero must never count as support.
+            if filter.is_some() {
+                let _ = caused_by;
+                return;
+            }
             // CR 603.4: detection checks must prefer their explicit TLS event;
             // resolution checks instead see the current trigger event(s). For
             // attackers, use declaration records so repeated declarations and
@@ -527,7 +694,17 @@ fn visit_characteristic_leaf<'s>(
             }
             let _ = caused_by;
         }
-        CardTypeSetSource::TrackedSet { set, caused_by } => {
+        CardTypeSetSource::TrackedSet {
+            set,
+            caused_by,
+            filter,
+        } => {
+            // MED1: same defense-in-depth skip as the `Objects` arm above
+            // for hand-built in-memory values only.
+            if matches!(filter, Some(member) if crate::types::ability::tracked_member_filter_has_unsupported_ref(member))
+            {
+                return;
+            }
             let tracked: Vec<(Option<crate::types::identifiers::TrackedSetId>, ObjectId)> =
                 match set {
                     TrackedAnaphorSource::ChainSet => state
@@ -551,8 +728,45 @@ fn visit_characteristic_leaf<'s>(
                             .is_some_and(|member_cause| member_cause == cause)
                     }),
                 };
-                if cause_ok {
-                    let view = characteristic_view_for_object(state, oid);
+                // CR 608.2h + CR 608.2i: member narrowing judges the same
+                // producing-occurrence authority as the characteristic read
+                // below — a stamped snapshot, authoritative live, or the
+                // legacy off-battlefield cache path for unstamped members.
+                let filter_ok = match filter {
+                    None => true,
+                    Some(filter) => match tracked_member_read_authority(state, set_id, oid) {
+                        TrackedMemberRead::Snapshot(lki) => {
+                            crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                state, oid, lki, filter, filter_ctx,
+                            )
+                        }
+                        TrackedMemberRead::Live => crate::game::filter::matches_target_filter(
+                            state, oid, filter, filter_ctx,
+                        ),
+                        TrackedMemberRead::Legacy => {
+                            if !state.battlefield.contains(&oid) {
+                                state.lki_cache.get(&oid).map_or_else(
+                                    || {
+                                        crate::game::filter::matches_target_filter(
+                                            state, oid, filter, filter_ctx,
+                                        )
+                                    },
+                                    |lki| {
+                                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                                            state, oid, lki, filter, filter_ctx,
+                                        )
+                                    },
+                                )
+                            } else {
+                                crate::game::filter::matches_target_filter(
+                                    state, oid, filter, filter_ctx,
+                                )
+                            }
+                        }
+                    },
+                };
+                if cause_ok && filter_ok {
+                    let view = tracked_member_characteristic_view(state, set_id, oid);
                     if let Some(view) = view {
                         visit(CharacteristicMember::Object(oid), view, false);
                     }
@@ -563,7 +777,7 @@ fn visit_characteristic_leaf<'s>(
         // players. Characteristics come from the cast-time snapshot because a
         // resolved spell is no longer an object (CR 400.7).
         //
-        // Deliberately does NOT replicate `QuantityRef::SpellsCastThisTurn`'s
+        // Deliberately does NOT replicate `QuantityRef::SpellsCast`'s
         // `FilterProp::Another` own-cast exclusion: this population is reached
         // from "spells you've cast", never "OTHER spells you've cast", so a
         // card's own cast is a member (First Family counts itself, CR 112.1 +
@@ -612,6 +826,65 @@ fn visit_characteristic_leaf<'s>(
                 }
             }
         },
+        // CR 608.2c + CR 115.1: the resolving ability's chosen object targets,
+        // addressed by identity (announcement-bound, zone-independent). View
+        // selection is provenance-aware: a target whose announced incarnation
+        // departed reads its departure LKI (CR 608.2h), while a current or
+        // unpinned target reads live. Slot selection reuses the target-slot
+        // authority `referenced_targets_for_filter` rather than re-deriving
+        // it; with no resolving ability in scope (detection-time reads) the
+        // population is empty — fail-closed, never a census.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            let selector = match slot {
+                None => TargetFilter::ParentTarget,
+                Some(index) => TargetFilter::ParentTargetSlot { index: *index },
+            };
+            // CR 608.2c: the resolving ability's targets first; parked
+            // ability-targets (suspension-resume reads, where the ability is
+            // gone but its targets survive on the parked frame) second. The
+            // parked path applies the equivalent slot/legality/incarnation
+            // authority from park-captured context — never a census. Each
+            // parked referent carries the occurrence pin that selected it,
+            // so the read below measures the SELECTED occurrence.
+            match filter_ctx.ability {
+                Some(_) => {
+                    // Positional pins: each selected occurrence carries the
+                    // pin that selected it into the same pinned reader the
+                    // parked path uses — never a first-match re-derivation
+                    // by id.
+                    let selected = crate::game::filter::referenced_targets_with_pins_for_filter(
+                        state,
+                        &selector,
+                        filter_ctx.ability,
+                    );
+                    for (target, pin) in selected {
+                        let TargetRef::Object(oid) = target else {
+                            continue;
+                        };
+                        if let Some(view) = pinned_target_characteristic_view(state, oid, pin) {
+                            visit(CharacteristicMember::Object(oid), view, false);
+                        }
+                    }
+                }
+                None => {
+                    if let Some(parked) = filter_ctx.ability_targets {
+                        let selected = crate::game::filter::referenced_parked_targets_for_filter(
+                            state, &selector, parked,
+                        );
+                        for referent in selected {
+                            let TargetRef::Object(oid) = referent.target else {
+                                continue;
+                            };
+                            if let Some(view) =
+                                pinned_target_characteristic_view(state, *oid, referent.pin)
+                            {
+                                visit(CharacteristicMember::Object(*oid), view, false);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // CR 109.2: unions are unrolled by `try_for_each_member` before this is
         // called, so a union never reaches the leaf walk. Deduplication remains
         // automatic because every caller tallies into one `HashSet` — which is
@@ -826,7 +1099,9 @@ pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
 /// expression authority above.
 pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
     match qty {
-        QuantityRef::StartingLifeTotal { .. } => true,
+        // CR 103.2a: the starting-deck latch is written once at deck load and
+        // no cast changes it — stable beside StartingLifeTotal.
+        QuantityRef::StartingLifeTotal { .. } | QuantityRef::StartingDeckSize { .. } => true,
         QuantityRef::ObjectCount { filter } => target_filter_is_property_free_population(filter),
         _ => false,
     }
@@ -887,6 +1162,8 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -895,8 +1172,12 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity — cannot make a definition cast-unstable.
+        grant_chain: _,
     } = definition;
 
     declares_return_result.is_none()
@@ -1023,6 +1304,8 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -1030,8 +1313,12 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         // field: `parse_effect_chain` outside the pipeline leaves marks intact, and
         // no runtime path reaches such a tree. See `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity payload.
+        grant_chain: _,
     } = definition
     else {
         return false;
@@ -1255,9 +1542,8 @@ pub fn additional_cost_is_cast_stable_for_pre_cast(
         crate::types::ability::AdditionalCost::Kicker { costs, .. } => {
             costs.iter().all(ability_cost_is_cast_stable_for_pre_cast)
         }
-        crate::types::ability::AdditionalCost::Choice(first, second) => {
-            ability_cost_is_cast_stable_for_pre_cast(first)
-                && ability_cost_is_cast_stable_for_pre_cast(second)
+        crate::types::ability::AdditionalCost::Choice(costs) => {
+            costs.iter().all(ability_cost_is_cast_stable_for_pre_cast)
         }
     }
 }
@@ -1437,8 +1723,11 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         unless_pay: None,
         batched: _,
         die_sides: _,
+        gotcha_condition: _,
         expend_threshold: _,
         attack_target_filter: _,
+        // CR 509.3e: a blocker filter, checked like the other matcher filters.
+        blocker_count,
         player_actions: _,
         scry_bottom_count: _,
         damage_amount: _,
@@ -1450,6 +1739,8 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         clash_result: _,
         room_door: _,
         granting_object: _,
+        // Only re-keys a constraint's ledger, and `constraint` must be absent here.
+        limit_leader_offset: _,
     } = definition
     else {
         return false;
@@ -1467,6 +1758,10 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
             .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
         && valid_source
             .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
+        && blocker_count
+            .as_ref()
+            .and_then(|threshold| threshold.blocker.as_ref())
             .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
         && condition
             .as_ref()
@@ -1527,6 +1822,7 @@ pub fn static_definition_is_cast_stable_for_pre_cast(definition: &StaticDefiniti
         protection_does_not_remove: None,
         room_door: None,
         granting_object: None,
+        bound_actor: None,
     } = definition
     else {
         // This is intentionally a positive proof over every direct static
@@ -1619,9 +1915,24 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::StartingLifeTotal { player },
         } => player_scope_is_source_context_previewable(player),
+        // CR 103.2a: the starting-deck latch lives on the player, readable in
+        // any source context exactly like the starting-life snapshot — the
+        // Whtz activation discount previews under the same scope rule.
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingDeckSize { player },
+        } => player_scope_is_source_context_previewable(player),
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
+        // CR 119: the source's controller's current life total is bound by
+        // the source alone. Other players' totals need a recipient or an
+        // iteration the preview doesn't have.
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+        } => true,
         QuantityExpr::Ref { .. } => false,
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
@@ -1757,299 +2068,74 @@ pub fn resolve_quantity_with_recipient(
 /// CR 205.2a + CR 607.2a: Resolve a quantity for a cast-time cost modifier,
 /// carrying the spell being cast as the `SharedCardTypes` intersection subject.
 /// `source_id` remains the static's source permanent (the exile link anchor),
-/// while `spell_id` supplies the spell-side card types.
+/// while `spell_id` supplies the spell-side card types and `caster` binds
+/// `CountScope::ScopedPlayer` to the player casting that spell.
 pub fn resolve_quantity_with_spell(
     state: &GameState,
     expr: &QuantityExpr,
     controller: PlayerId,
     source_id: ObjectId,
     spell_id: ObjectId,
+    caster: PlayerId,
 ) -> i32 {
     resolve_quantity_with_ctx(
         state,
         expr,
         controller,
         QuantityContext {
+            scoped_player: Some(caster),
             spell: Some(spell_id),
             ..QuantityContext::new(source_id)
         },
     )
 }
 
-/// CR 608.2c: How a quantity reads the per-object recipient binding
-/// (`QuantityContext::recipient`). Declared in rank order: a composite quantity
-/// or filter reads at the strongest grade among its parts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum RecipientRead {
-    /// No recipient read the classifier can see.
-    Unread,
-    /// Reads the recipient only as the identity that delimits a counted
-    /// population: "other" (`FilterProp::Another`) or "attached to it"
-    /// (`FilterProp::AttachedTo { to: Recipient }`), alone or under
-    /// `AnyOf` / `Not`. Which objects are counted depends on which object the
-    /// recipient is, never on its characteristics.
-    PopulationIdentity,
-    /// Reads the recipient object or its controller: an `ObjectScope::Recipient`
-    /// characteristic, a `PlayerScope::RecipientController` player quantity, or a
-    /// quality shared with it (`SharesQuality { reference: ParentTarget }`).
-    /// Filters held in game state (`FilterProp::CanEnchant`,
-    /// `TargetFilter::ChosenDamageSource`) carry the recipient but their contents
-    /// are invisible here, so they are graded `Characteristics`.
-    Characteristics,
-}
-
-/// True when the QuantityExpr needs a per-object recipient binding to resolve
-/// an anaphoric quantity such as "for each Aura attached to it" or "for each
-/// word in its name."
-pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
-    quantity_expr_recipient_read(expr) != RecipientRead::Unread
-}
-
-/// How `expr` reads the recipient binding; see [`RecipientRead`].
-pub(crate) fn quantity_expr_recipient_read(expr: &QuantityExpr) -> RecipientRead {
-    match expr {
-        QuantityExpr::Fixed { .. } => RecipientRead::Unread,
-        QuantityExpr::Ref { qty } => quantity_ref_recipient_read(qty),
-        QuantityExpr::DivideRounded { inner, .. }
-        | QuantityExpr::Offset { inner, .. }
-        | QuantityExpr::ClampMin { inner, .. }
-        | QuantityExpr::Multiply { inner, .. } => quantity_expr_recipient_read(inner),
-        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
-            .iter()
-            .map(quantity_expr_recipient_read)
-            .max()
-            .unwrap_or(RecipientRead::Unread),
-        QuantityExpr::UpTo { max } => quantity_expr_recipient_read(max),
-        QuantityExpr::Power { exponent, .. } => quantity_expr_recipient_read(exponent),
-        QuantityExpr::Difference { left, right } => {
-            quantity_expr_recipient_read(left).max(quantity_expr_recipient_read(right))
-        }
+/// CR 601.2f: bind a population's `CastingSpell` referent ("the same name as
+/// that spell") to the spell whose cost is being determined. With no such spell
+/// the referent names nothing. CR 601.2a: that spell is already on the stack, so
+/// it is never itself a member of the counted population even while its object
+/// storage still lists its origin zone ("The spell being cast doesn't reduce its
+/// own cost" — Locket of Yesterdays ruling).
+fn bind_casting_spell_referent(
+    filter: &TargetFilter,
+    spell: Option<ObjectId>,
+) -> std::borrow::Cow<'_, TargetFilter> {
+    if !crate::game::filter::filter_operands_contain(filter, &|node| {
+        matches!(node, TargetFilter::CastingSpell)
+    }) {
+        return std::borrow::Cow::Borrowed(filter);
     }
-}
-
-/// Classify every reference explicitly so a new variant requires a decision.
-pub(crate) fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
-    match qty {
-        QuantityRef::HandSize { player }
-        | QuantityRef::LifeTotal { player }
-        | QuantityRef::GraveyardSize { player }
-        | QuantityRef::StartingLifeTotal { player }
-        | QuantityRef::LifeLostThisTurn { player }
-        | QuantityRef::PartySize { player }
-        | QuantityRef::Speed { player }
-        | QuantityRef::LifeGainedThisTurn { player }
-        | QuantityRef::CardsDrawnThisTurn { player }
-        | QuantityRef::LandsPlayedThisTurn { player, .. }
-        | QuantityRef::PlayerChosenNumber { player }
-        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { player }
-        | QuantityRef::CardsDiscardedThisTurn { player }
-        | QuantityRef::TokensCreatedThisTurn { player, .. }
-        | QuantityRef::PlayerActionsThisTurn { player, .. }
-        | QuantityRef::SacrificedThisTurn { player, .. }
-        | QuantityRef::BattlefieldEntriesThisTurn { player, .. } => player_scope_recipient_read(player),
-        QuantityRef::Power { scope }
-        | QuantityRef::BasePower { scope }
-        | QuantityRef::Intensity { scope }
-        | QuantityRef::Toughness { scope }
-        | QuantityRef::ObjectManaValue { scope }
-        | QuantityRef::ObjectColorCount { scope }
-        | QuantityRef::ObjectNameWordCount { scope }
-        | QuantityRef::ObjectTypelineComponentCount { scope }
-        | QuantityRef::ManaSymbolsInManaCost { scope, .. }
-        // CR 122.1 + CR 613.4c: a per-recipient counter count varies with
-        // the affected object, just like its other object-scoped values.
-        | QuantityRef::CountersOn { scope, .. } => object_scope_recipient_read(scope),
-        QuantityRef::NameStickerLetterCount { stickers, .. } => match stickers {
-            NameStickerSet::OnObject { scope } => object_scope_recipient_read(scope),
-            NameStickerSet::ThatSticker => RecipientRead::Unread,
-        },
-        QuantityRef::ObjectCount { filter }
-        | QuantityRef::ObjectCountDistinct { filter, .. }
-        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
-        | QuantityRef::CountersOnObjects { filter, .. }
-        | QuantityRef::EnteredThisTurn { filter }
-        | QuantityRef::DistinctCounterKindsAmong { filter } => filter_recipient_read(filter),
-        QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_recipient_read(filter),
-        QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::AttackedThisTurn { filter, .. } => filter
-            .as_ref()
-            .map_or(RecipientRead::Unread, filter_recipient_read),
-        QuantityRef::CounterAddedThisTurn { target, .. } => filter_recipient_read(target),
-        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
-            filter_recipient_read(source).max(filter_recipient_read(target))
-        }
-        QuantityRef::PropertyAggregate(aggregate) => {
-            card_type_set_source_recipient_read(aggregate.source())
-        }
-        QuantityRef::DistinctCardTypes { source }
-        | QuantityRef::SharedCardTypes { source }
-        | QuantityRef::DistinctSubtypes { source, .. }
-        | QuantityRef::DistinctColorsAmong { source } => card_type_set_source_recipient_read(source),
-        QuantityRef::PlayerCount { filter } => match filter {
-            // Only this top-level player filter preserves the quantity context.
-            PlayerFilter::PlayerAttribute { value, .. } => quantity_expr_recipient_read(value),
-            PlayerFilter::Controller
-            | PlayerFilter::Opponent
-            | PlayerFilter::DefendingPlayer
-            | PlayerFilter::OpponentLostLife
-            | PlayerFilter::OpponentGainedLife
-            | PlayerFilter::HasLostTheGame
-            | PlayerFilter::OpponentAttacked { .. }
-            | PlayerFilter::OpponentAttackingEnchantedPlayer
-            | PlayerFilter::All
-            | PlayerFilter::AllExcept { .. }
-            | PlayerFilter::HighestSpeed
-            | PlayerFilter::ZoneChangedThisWay
-            | PlayerFilter::PerformedActionThisWay { .. }
-            | PlayerFilter::OwnersOfCardsExiledBySource
-            | PlayerFilter::TriggeringPlayer
-            | PlayerFilter::OpponentOtherThanTriggering
-            | PlayerFilter::OpponentOfTriggeringPlayer
-            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
-            | PlayerFilter::VotedFor { .. }
-            | PlayerFilter::ParentObjectTargetController
-            | PlayerFilter::ChosenPlayer { .. }
-            | PlayerFilter::ParentObjectTargetOwner
-            | PlayerFilter::TargetPlayer
-            | PlayerFilter::GrantingObjectCaster
-            | PlayerFilter::OpponentDealtDamage { .. }
-            | PlayerFilter::ControlsCount { .. }
-            | PlayerFilter::TrackedSetPossessor { .. }
-            | PlayerFilter::AnyOf { .. } => RecipientRead::Unread,
-        },
-        // Filter-bearing members use records, fresh contexts, or target-slot
-        // metadata, not the live recipient binding. Sacrifice/token/entry filters
-        // above are likewise record-based; only their player scopes can read it.
-        QuantityRef::ControlledByEachPlayer { .. }
-        | QuantityRef::ZoneChangeCountThisTurn { .. }
-        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
-        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastThisGame { .. }
-        | QuantityRef::ManaSpentToCast { .. }
-        | QuantityRef::TargetObjectManaValue { .. }
-        | QuantityRef::EventContextPlayerCount { .. }
-        // Remaining leaves have no recipient-bearing payload.
-        | QuantityRef::AttachmentsOnLeavingObject { .. }
-        | QuantityRef::LifeAboveStarting
-        | QuantityRef::TriggeringDiscoverValue
-        | QuantityRef::TriggeringScryLookCount
-        | QuantityRef::TriggeringScryBottomCount
-        | QuantityRef::PlayerCounter { .. }
-        | QuantityRef::TargetControllerCounter { .. }
-        | QuantityRef::Variable { .. }
-        | QuantityRef::SelfManaValue
-        | QuantityRef::TargetZoneCardCount { .. }
-        | QuantityRef::Devotion { .. }
-        | QuantityRef::CardsExiledBySource
-        | QuantityRef::ExiledCardPower { .. }
-        | QuantityRef::BasicLandTypeCount { .. }
-        | QuantityRef::TrackedSetSize
-        | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount { .. }
-        | QuantityRef::PreviousEffectCount
-        | QuantityRef::UnspentMana { .. }
-        | QuantityRef::EventContextAmount
-        | QuantityRef::EventContextSourceCostX
-        | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::CrimesCommittedThisTurn
-        | QuantityRef::BendTypesThisTurn
-        | QuantityRef::TurnsTaken
-        | QuantityRef::ChosenNumber
-        | QuantityRef::NotedNumber
-        | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
-        | QuantityRef::DungeonsCompleted
-        | QuantityRef::CostXPaid
-        | QuantityRef::KickerCount
-        | QuantityRef::AdditionalCostPaymentCount
-        | QuantityRef::AdditionalCostPaymentCountFor { .. }
-        | QuantityRef::ConvokedCreatureCount
-        | QuantityRef::TimesCostPaidThisResolution
-        | QuantityRef::ColorsInCommandersColorIdentity
-        | QuantityRef::CommanderCastFromCommandZoneCount
-        | QuantityRef::CommanderManaValue { .. }
-        | QuantityRef::VoteCount { .. } => RecipientRead::Unread,
-    }
-}
-
-fn object_scope_recipient_read(scope: &ObjectScope) -> RecipientRead {
-    match scope {
-        ObjectScope::Recipient => RecipientRead::Characteristics,
-        ObjectScope::Source
-        | ObjectScope::Target
-        | ObjectScope::EventSource
-        | ObjectScope::EventTarget
-        | ObjectScope::CostPaidObject
-        | ObjectScope::Anaphoric
-        | ObjectScope::Demonstrative
-        | ObjectScope::AmassedArmy
-        | ObjectScope::OtherRevealedCard
-        | ObjectScope::OwnedLinkedExileCard
-        | ObjectScope::BatchSource
-        | ObjectScope::ChainRootTarget
-        | ObjectScope::GrantingObject
-        | ObjectScope::SpecificObject { .. } => RecipientRead::Unread,
-    }
-}
-
-fn player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
-    match scope {
-        PlayerScope::RecipientController => RecipientRead::Characteristics,
-        PlayerScope::AllPlayers { exclude, .. } => exclude
-            .as_deref()
-            .map_or(RecipientRead::Unread, single_player_scope_recipient_read),
-        PlayerScope::Controller
-        | PlayerScope::ScopedPlayer
-        | PlayerScope::Target
-        | PlayerScope::Opponent { .. }
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTarget { .. }
-        | PlayerScope::SourceChosenPlayer
-        | PlayerScope::AnyTurn
-        | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
-    }
-}
-
-fn single_player_scope_recipient_read(scope: &PlayerScope) -> RecipientRead {
-    match scope {
-        PlayerScope::RecipientController => RecipientRead::Characteristics,
-        // resolve_single_player_scope does not descend into aggregate exclusions.
-        PlayerScope::AllPlayers { .. }
-        | PlayerScope::Opponent { .. }
-        | PlayerScope::Controller
-        | PlayerScope::ScopedPlayer
-        | PlayerScope::Target
-        | PlayerScope::DefendingPlayer
-        | PlayerScope::ParentObjectTarget { .. }
-        | PlayerScope::SourceChosenPlayer
-        | PlayerScope::AnyTurn
-        | PlayerScope::SpecificPlayer { .. } => RecipientRead::Unread,
-    }
-}
-
-fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientRead {
-    match source {
-        CardTypeSetSource::Objects { filter } => filter_recipient_read(filter),
-        CardTypeSetSource::AnyOf { .. } => {
-            let mut grade = RecipientRead::Unread;
-            let complete = source
-                .try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
-                    grade = grade.max(card_type_set_source_recipient_read(leaf))
-                });
-            if complete {
-                grade
-            } else {
-                // An unseen member could read characteristics; do not bind an
-                // uncreated token merely because the walk was truncated.
-                RecipientRead::Characteristics
+    let mut bound = filter.clone();
+    let mut referenced = false;
+    let mut complete = true;
+    crate::types::ability::rewrite_filter_props::<()>(
+        &mut bound,
+        &mut |node, _, _| {
+            if matches!(node, TargetFilter::CastingSpell) {
+                referenced = true;
+                *node = spell.map_or(TargetFilter::None, |id| TargetFilter::SpecificObject { id });
             }
-        }
-        CardTypeSetSource::TurnJournal { .. }
-        | CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => RecipientRead::Unread,
+        },
+        &mut |_| {},
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if !referenced {
+        return std::borrow::Cow::Borrowed(filter);
     }
+    std::borrow::Cow::Owned(match spell {
+        Some(id) => TargetFilter::And {
+            filters: vec![
+                bound,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SpecificObject { id }),
+                },
+            ],
+        },
+        None => bound,
+    })
 }
 
 /// The explicit object scope, if any, from the exhaustive reference classifier.
@@ -2374,6 +2460,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2407,6 +2494,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::SharedCardTypes { .. }
         | QuantityRef::DistinctSubtypes { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::BasicLandTypeCount { .. }
@@ -2415,20 +2503,23 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -2441,7 +2532,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -2539,6 +2630,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to resolve.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -2591,6 +2684,8 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: the poison predicate reads poison counters, never mana.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2605,7 +2700,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
@@ -2630,6 +2725,7 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
     }
@@ -2728,6 +2824,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2751,6 +2848,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -2758,19 +2856,22 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -2782,7 +2883,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -2913,9 +3014,21 @@ fn characteristic_leaf_reads_at(source: &CardTypeSetSource, depth: u32) -> Chara
         // this arm has already been walked; contributing EMPTY here keeps the
         // fold identity correct rather than double-counting.
         CardTypeSetSource::AnyOf { .. } => CharacteristicKinds::EMPTY,
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => CharacteristicKinds::EMPTY,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
+            .as_ref()
+            .map_or(CharacteristicKinds::EMPTY, |filter| {
+                target_filter_characteristic_reads_at(filter, depth)
+            }),
+        // CR 608.2c + CR 115.1: a targeted-objects population reads exactly
+        // what its canonical slot filter reads, via the single
+        // `targeted_objects_filter` authority — never a hardcoded constant.
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+            CharacteristicKinds::EMPTY
+        }
+        CardTypeSetSource::TargetedObjects { slot } => target_filter_characteristic_reads_at(
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            depth,
+        ),
     }
 }
 
@@ -3031,6 +3144,11 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         // CR 400.7 + CR 613.1b: look-back attachment snapshot, optionally scoped
         // by a `ControllerRef` (payload rule 2).
         QuantityRef::AttachmentsOnLeavingObject { .. } => CharacteristicKinds::CONTROLLER,
+        // Turtle Team-Up (no CR section — casual product): the deployed-Boss census
+        // reads live card types (Boss membership) — a layer-4 change to a
+        // command-zone object perturbs the count.
+        QuantityRef::DeployedBossCount => CharacteristicKinds::CARD_TYPES,
+
 
         // ---- Reads no layer-writable characteristic. ----
         // Player-level totals, counters (CR 122.1 — counters are not
@@ -3042,6 +3160,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3063,7 +3182,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::NameStickerLetterCount { .. }
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
@@ -3071,15 +3190,19 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::EventContextSourceModesChosen
         // CR 117.1: spell-cast journals store each spell's cast-time
         // characteristics.
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         // CR 701.16a: sacrifice-time characteristics.
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
@@ -3094,7 +3217,6 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         // CR 122.1: counter-addition journal.
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3208,10 +3330,23 @@ fn characteristic_leaf_perturbed_by_entry(
         }
         // Unrolled by the bounded walker below; a union never reaches this arm.
         CardTypeSetSource::AnyOf { .. } => false,
+        // A member filter narrows the published set; a battlefield entry
+        // adds no members to it, so the verdict stands with or without one.
         CardTypeSetSource::Zone { .. }
         | CardTypeSetSource::ExiledBySource
         | CardTypeSetSource::TrackedSet { .. }
         | CardTypeSetSource::TurnJournal { .. } => false,
+        // CR 608.2c + CR 115.1: the entered object perturbs the aggregate
+        // exactly when it matches the canonical slot filter — including the
+        // case where the entrant IS one of the ability's targets (identity
+        // match through `FilterContext.ability`), which a hardcoded `false`
+        // would miss. Delegated, never asserted.
+        CardTypeSetSource::TargetedObjects { slot } => matches_target_filter(
+            state,
+            entered.id,
+            &CardTypeSetSource::targeted_objects_filter(slot),
+            ctx,
+        ),
     }
 }
 
@@ -3297,12 +3432,15 @@ fn entered_object_perturbs_quantity_ref(
         // Player-level, single-object, history-record, payment, and choice refs:
         // an object's battlefield entry/exit cannot change their value. Identical
         // enumeration to the `false` arm of `quantity_ref_uses_object_count`.
+        // CR 103.2a: the starting-deck latch is written once at deck load —
+        // no battlefield entry/exit perturbs it.
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3326,6 +3464,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::SelfManaValue
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::ZoneCardCount { .. }
         | QuantityRef::TrackedSetSize
@@ -3333,19 +3472,22 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -3357,7 +3499,7 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -3398,226 +3540,6 @@ pub(crate) fn filter_uses_recipient(filter: &TargetFilter) -> bool {
     filter_recipient_read(filter) != RecipientRead::Unread
 }
 
-/// How `filter` reads the recipient binding; see [`RecipientRead`].
-fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
-    match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .map(filter_prop_recipient_read)
-            .max()
-            .unwrap_or(RecipientRead::Unread),
-        TargetFilter::Not { filter: inner } => filter_recipient_read(inner),
-        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
-            .iter()
-            .map(filter_recipient_read)
-            .max()
-            .unwrap_or(RecipientRead::Unread),
-        TargetFilter::TrackedSetFiltered { filter, .. } => filter_recipient_read(filter),
-        // The selected source's filter lives in game state and preserves the
-        // recipient on recheck. Its unseen contents require a conservative grade.
-        TargetFilter::ChosenDamageSource { .. } => RecipientRead::Characteristics,
-        TargetFilter::None
-        | TargetFilter::Any
-        | TargetFilter::Player
-        | TargetFilter::Controller
-        | TargetFilter::SourceController
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::Opponent
-        | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::PlayerWhoChoseLabel { .. }
-        | TargetFilter::Neighbor { .. }
-        | TargetFilter::ScopedPlayer
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSpellController
-        | TargetFilter::TriggeringSpellOwner
-        | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
-        | TargetFilter::EventTarget
-        | TargetFilter::TriggeringSourceController
-        | TargetFilter::EventTargetController
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::DeclaredPlayer { .. }
-        | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::HasChosenName
-        | TargetFilter::Named { .. }
-        | TargetFilter::Owner
-        | TargetFilter::AllPlayers
-        | TargetFilter::PlayerMatching { .. } => RecipientRead::Unread,
-    }
-}
-
-fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
-    match prop {
-        // CR 608.2c: "other" / "attached to it" name which object the counted
-        // population is relative to: an identity read.
-        FilterProp::AttachedTo {
-            to: AttachmentReferent::Recipient,
-        }
-        | FilterProp::Another => RecipientRead::PopulationIdentity,
-        FilterProp::AnyOf { props } => props
-            .iter()
-            .map(filter_prop_recipient_read)
-            .max()
-            .unwrap_or(RecipientRead::Unread),
-        // CR 608.2c: Negation reads the inner prop's references — recurse (mirrors AnyOf).
-        FilterProp::Not { prop } => filter_prop_recipient_read(prop),
-        // A shared quality compares the referent's characteristics.
-        FilterProp::SharesQuality {
-            reference: Some(reference),
-            ..
-        } if matches!(reference.as_ref(), TargetFilter::ParentTarget) => {
-            RecipientRead::Characteristics
-        }
-        FilterProp::SharesQuality { reference, .. } => reference
-            .as_deref()
-            .map_or(RecipientRead::Unread, filter_recipient_read),
-        // The Aura's own enchant filter lives in game state and receives the
-        // recipient. Its unseen contents require a conservative grade.
-        FilterProp::CanEnchant { .. } => RecipientRead::Characteristics,
-        // These nested filters and quantity thresholds do not receive the outer
-        // recipient. Do not walk their payloads.
-        FilterProp::DifferentNameFrom { .. }
-        | FilterProp::DistinctFrom { .. }
-        | FilterProp::Targets { .. }
-        | FilterProp::TargetsOnly { .. }
-        // CR 701.3a: the filter-matched host axis resolves its host set from the
-        // resolving ability's parent targets, the creation snapshot, or the
-        // trigger event — never the per-object recipient of the enclosing
-        // quantity, so its payload is not walked here either.
-        | FilterProp::AttachedTo {
-            to: AttachmentReferent::Host { .. },
-        }
-        | FilterProp::ControllerMatches { .. }
-        | FilterProp::DealtDamageThisTurn { .. }
-        | FilterProp::Counters { .. }
-        | FilterProp::Cmc { .. }
-        | FilterProp::PtComparison { .. }
-        // Remaining leaves have no recipient-bearing payload.
-        | FilterProp::Token
-        | FilterProp::NonToken
-        | FilterProp::RepresentedByCard
-        | FilterProp::ControllerChoseLabel { .. }
-        | FilterProp::WasPlayed
-        | FilterProp::Attacking { .. }
-        | FilterProp::Blocking
-        | FilterProp::BlockingSource
-        | FilterProp::CombatRelation { .. }
-        | FilterProp::BlockStatus { .. }
-        | FilterProp::AttackingAlone
-        | FilterProp::BlockingAlone
-        | FilterProp::Tapped
-        | FilterProp::Untapped
-        | FilterProp::IsSaddled
-        | FilterProp::SaddledSource
-        | FilterProp::CrewedThisTurn { .. }
-        | FilterProp::ConvokedSource
-        | FilterProp::ProtectorMatches { .. }
-        | FilterProp::HasHasteOrControlledSinceTurnBegan
-        | FilterProp::WithKeyword { .. }
-        | FilterProp::HasKeywordKind { .. }
-        | FilterProp::WithoutKeyword { .. }
-        | FilterProp::WithoutKeywordKind { .. }
-        | FilterProp::ManaValueParity { .. }
-        | FilterProp::ManaCostIn { .. }
-        | FilterProp::InZone { .. }
-        | FilterProp::Owned { .. }
-        | FilterProp::Foretold
-        | FilterProp::HasAdventure
-        | FilterProp::EnchantedBy
-        | FilterProp::EquippedBy
-        | FilterProp::AttachedTo {
-            to: AttachmentReferent::Source,
-        }
-        | FilterProp::AttachedTo {
-            to: AttachmentReferent::Player { .. },
-        }
-        | FilterProp::AttachedTo {
-            to: AttachmentReferent::DeclaredTarget { .. },
-        }
-        | FilterProp::HasAttachment { .. }
-        | FilterProp::HasAnyAttachmentOf { .. }
-        | FilterProp::Unpaired
-        | FilterProp::OtherThanTriggerObject
-        | FilterProp::HasColor { .. }
-        | FilterProp::PowerGTSource
-        | FilterProp::ColorCount { .. }
-        | FilterProp::ManaSymbolCount { .. }
-        | FilterProp::HasSupertype { .. }
-        | FilterProp::IsChosenCreatureType
-        | FilterProp::MostPrevalentCreatureTypeIn { .. }
-        | FilterProp::IsChosenColor
-        | FilterProp::IsChosenCardType
-        | FilterProp::MatchesLastChosenCardPredicate
-        | FilterProp::HasSingleTarget
-        | FilterProp::Modal
-        | FilterProp::PrepareSpell
-        | FilterProp::NotColor { .. }
-        | FilterProp::NotSupertype { .. }
-        | FilterProp::Suspected
-        | FilterProp::Prepared
-        | FilterProp::Renowned
-        | FilterProp::Goaded
-        | FilterProp::ToughnessGTPower
-        | FilterProp::PowerExceedsBase
-        | FilterProp::InTrackedSet { .. }
-        | FilterProp::Modified
-        | FilterProp::Historic
-        | FilterProp::NotHistoric
-        | FilterProp::InAnyZone { .. }
-        | FilterProp::WasDealtDamageThisTurn
-        | FilterProp::EnteredThisTurn
-        | FilterProp::ControlledContinuouslySinceTurnBegan
-        | FilterProp::ZoneChangedThisTurn { .. }
-        | FilterProp::AttackedThisTurn { .. }
-        | FilterProp::BlockedThisTurn
-        | FilterProp::AttackedOrBlockedThisTurn
-        | FilterProp::CountersPutOnThisTurn { .. }
-        | FilterProp::FaceDown
-        | FilterProp::Transformed
-        | FilterProp::CouldBeTargetedByTriggeringSpell
-        | FilterProp::HasXInManaCost
-        | FilterProp::HasXInActivationCost
-        | FilterProp::WasKicked
-        | FilterProp::HasManaAbility
-        | FilterProp::HasNoAbilities
-        | FilterProp::Named { .. }
-        | FilterProp::SameName
-        | FilterProp::SameNameAsParentTarget
-        | FilterProp::SameNameAsExiledBySource
-        | FilterProp::NameMatchesAnyPermanent { .. }
-        | FilterProp::IsCommander
-        | FilterProp::SharesCreatureTypeWithCommander
-        | FilterProp::Other { .. } => RecipientRead::Unread,
-    }
-}
-
 /// Resolve a QuantityExpr with an explicit `QuantityContext` so variants like
 /// self-scoped spent-mana quantities can distinguish entering-object scope from static-source
 /// scope. Used by the replacement pipeline for ETB-counter effects.
@@ -3629,7 +3551,9 @@ pub fn resolve_quantity_with_ctx(
 ) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
+        QuantityExpr::Ref { qty } => {
+            resolve_ref(state, qty, controller, ctx, &[], None, None, None)
+        }
         other => fold_compose(other, |inner| {
             resolve_quantity_with_ctx(state, inner, controller, ctx.clone())
         }),
@@ -3747,7 +3671,7 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         return resolve_quantity_with_ctx(state, expr, controller, ctx);
     }
     if let Some(event) = event {
-        if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
+        if let Some(value) = resolve_event_scoped_ref(state, expr, event, source_context) {
             return value;
         }
         // CR 603.4: Make the triggering event visible to the resolver for
@@ -3897,30 +3821,119 @@ pub fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
 // ~7 `resolve_quantity*` entry points either path happens to use, because the
 // gate lives in the `EventContextAmount` cascade (`event_context_amount`) — the
 // single shared consumption point all of them funnel into.
+//
+// CR 614.6 + CR 615.5: a replacement's own action is the other nested scope. It
+// suppresses the same enclosing-trigger tiers and also owns the amount its
+// "that many" names: the amount of the event it replaced or prevented.
 std::thread_local! {
-    static SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+    static NESTED_AMOUNT_SCOPE: std::cell::Cell<NestedAmountScope> =
+        const { std::cell::Cell::new(NestedAmountScope::Enclosing) };
+}
+
+/// Which nested ability, if any, the `EventContextAmount` cascade is resolving for.
+#[derive(Clone, Copy)]
+enum NestedAmountScope {
+    /// Outside any nested scope: every tier of the cascade is live.
+    Enclosing,
+    /// CR 603.12: a reflexive triggered ability's own target slots and frozen count.
+    Reflexive,
+    /// CR 614.6 + CR 615.5: a replacement's own action, with the amount of the event it
+    /// replaced or prevented (`None` when that event had no amount).
+    ReplacementAction { amount: Option<i32> },
+}
+
+/// Run `f` in `scope`, restoring the previous scope afterwards. Mirrors
+/// `with_detection_trigger_event`'s save/restore-previous-value discipline
+/// (not a hard reset) so nested scopes compose: a reflexive ability created
+/// inside a replacement's action, or a replacement applying inside either.
+fn with_nested_amount_scope<R>(scope: NestedAmountScope, f: impl FnOnce() -> R) -> R {
+    // The guard restores the previous scope on unwind too: a native server reuses its
+    // threads, so a leaked replacement-action amount would answer every later "that many".
+    let _restore = ResumedReplacementAction {
+        previous: Some(NESTED_AMOUNT_SCOPE.with(|c| c.replace(scope))),
+    };
+    f()
 }
 
 /// CR 603.12: Run `f` with the enclosing trigger's own event context
-/// suppressed from the `EventContextAmount` cascade. Mirrors
-/// `with_detection_trigger_event`'s save/restore-previous-value discipline
-/// (not a hard reset to `false`) so nested reflexive-in-reflexive
-/// construction, if it ever occurs, composes correctly.
+/// suppressed from the `EventContextAmount` cascade.
 pub(crate) fn with_reflexive_resolution_scope<R>(f: impl FnOnce() -> R) -> R {
-    let prev = SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.replace(true));
-    let result = f();
-    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.set(prev));
-    result
+    with_nested_amount_scope(NestedAmountScope::Reflexive, f)
+}
+
+/// CR 614.6 + CR 615.5: Run a replacement's own action (a post-replacement continuation,
+/// `engine_replacement::dispatch_pending_post_replacement_effect`) with `amount`, the amount
+/// of the event it replaced or prevented, as its "that many". The amount outranks the die
+/// result and every enclosing-trigger tier of the cascade, because the action is part of the
+/// modified event that occurs instead (CR 614.1a), not one of the instructions of the spell
+/// or ability resolving around it (CR 608.2c). The enclosing-trigger tiers stay suppressed
+/// when `amount` is `None`, as in the reflexive scope.
+pub(crate) fn with_replacement_action_scope<R>(amount: Option<i32>, f: impl FnOnce() -> R) -> R {
+    with_nested_amount_scope(NestedAmountScope::ReplacementAction { amount }, f)
 }
 
 fn enclosing_trigger_event_amount_suppressed() -> bool {
-    SUPPRESS_ENCLOSING_TRIGGER_EVENT_AMOUNT.with(|c| c.get())
+    NESTED_AMOUNT_SCOPE.with(|c| !matches!(c.get(), NestedAmountScope::Enclosing))
+}
+
+/// CR 614.6 + CR 615.5: the amount the replacement action now running owns, if any.
+/// `None` outside a replacement's action, and inside a reflexive ability created within one.
+fn replacement_action_amount() -> Option<i32> {
+    current_replacement_action().map(|action| action.amount)
+}
+
+/// CR 614.6 + CR 615.5: the replacement action whose work is running now, if it owns an amount —
+/// what work it leaves for a later `apply()` carries (`PendingContinuation::replacement_action`).
+/// `None` outside a replacement's action, inside one that owns no amount, and inside a reflexive
+/// ability created within one.
+pub(crate) fn current_replacement_action(
+) -> Option<crate::types::game_state::ReplacementActionScope> {
+    NESTED_AMOUNT_SCOPE.with(|c| match c.get() {
+        NestedAmountScope::ReplacementAction {
+            amount: Some(amount),
+        } => Some(crate::types::game_state::ReplacementActionScope { amount }),
+        NestedAmountScope::ReplacementAction { amount: None }
+        | NestedAmountScope::Enclosing
+        | NestedAmountScope::Reflexive => None,
+    })
+}
+
+/// Restores the scope that was current when [`resume_replacement_action`] entered.
+#[must_use = "the replacement action's scope lasts only while the guard is held"]
+pub(crate) struct ResumedReplacementAction {
+    previous: Option<NestedAmountScope>,
+}
+
+impl Drop for ResumedReplacementAction {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous {
+            NESTED_AMOUNT_SCOPE.with(|c| c.set(previous));
+        }
+    }
+}
+
+/// CR 614.6 + CR 615.5 + CR 608.2c: re-enter the replacement action that left `action`'s work
+/// for a later `apply()`, so a step after a child prompt reads the amount the action owns, as
+/// it would have read it had nothing paused. `None` (ordinary work) leaves the current scope
+/// as it is.
+pub(crate) fn resume_replacement_action(
+    action: Option<crate::types::game_state::ReplacementActionScope>,
+) -> ResumedReplacementAction {
+    ResumedReplacementAction {
+        previous: action.map(|action| {
+            NESTED_AMOUNT_SCOPE.with(|c| {
+                c.replace(NestedAmountScope::ReplacementAction {
+                    amount: Some(action.amount),
+                })
+            })
+        }),
+    }
 }
 
 /// CR 603.12 + CR 603.2c: The enclosing trigger's filtered subject count.
-/// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
-/// cannot inherit its enclosing trigger's batched-event count.
+/// Suppressed inside `with_reflexive_resolution_scope` and
+/// `with_replacement_action_scope` so a reflexive trigger or a replacement's
+/// action cannot inherit its enclosing trigger's batched-event count.
 fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
@@ -3930,7 +3943,8 @@ fn enclosing_trigger_match_count(state: &GameState) -> Option<i32> {
 
 /// CR 603.12 + CR 603.2c/603.4: The enclosing trigger's scalar event amount.
 /// Suppressed inside `with_reflexive_resolution_scope` so a reflexive trigger
-/// falls through to the action that created it.
+/// falls through to the action that created it, and inside
+/// `with_replacement_action_scope` (CR 614.6).
 fn enclosing_trigger_event_amount(state: &GameState) -> Option<i32> {
     if enclosing_trigger_event_amount_suppressed() {
         return None;
@@ -4020,6 +4034,7 @@ fn resolve_event_scoped_ref(
     state: &GameState,
     expr: &QuantityExpr,
     event: &crate::types::events::GameEvent,
+    source_context: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
     match expr {
         QuantityExpr::Ref {
@@ -4030,13 +4045,18 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // CR 106.3 + CR 201.5: the payment record is the spell's, but a source
+            // filter is relative to the ability that reads it. "~" names the
+            // listener, never the spell.
+            let filter_source =
+                source_context.map_or(id, |source| source.identity.reference.object_id);
             // No latch routing: the read subject is the triggering SPELL from
             // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
-                &FilterContext::from_source(state, id),
+                &FilterContext::from_source(state, filter_source),
                 None,
             )
         }
@@ -4131,6 +4151,7 @@ pub fn resolve_quantity_with_targets(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets(state, inner, ability)
@@ -4215,6 +4236,7 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_and_recipient(state, inner, ability, recipient_id)
@@ -4250,6 +4272,7 @@ pub(crate) fn resolve_quantity_with_targets_and_damage_source(
             &ability.targets,
             ability.chosen_x,
             Some(ability),
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_and_damage_source(state, inner, ability, damage_source)
@@ -4279,9 +4302,63 @@ pub fn resolve_quantity_with_targets_slice(
             targets,
             None,
             None,
+            None,
         ),
         other => fold_compose(other, |inner| {
             resolve_quantity_with_targets_slice(state, inner, controller, source_id, targets)
+        }),
+    }
+}
+
+/// CR 608.2c: Resolve a QuantityExpr against parked ability-targets with no
+/// full `ResolvedAbility` in scope.
+///
+/// Suspension-resume paths (`roll_die::resume_after_ignore` and its callers)
+/// lose the `ResolvedAbility` across the suspension, but the parked frame
+/// carries its targets plus the chain-root/legality/pin context indexed
+/// reads need. That context feeds the distinguished `ability_targets`
+/// channel — consumed by `TargetedObjects` and by the selected-target arms
+/// (`ParentTarget`, `ParentTargetSlot`) of the shared member matcher, which
+/// judge the parked targets plus the carried keyed guard exactly like the
+/// live path; the ordinary `targets` slice stays empty so every other arm
+/// reads exactly as the ability-blind entry would. The combat-tax slice
+/// entry keeps its own meaning and is untouched.
+///
+/// CR 109.5 + CR 706.2: the scoped-player binding rides the same parked
+/// channel (captured at park, `None` on pre-field frames) so a resumed
+/// `ControllerRef::ScopedPlayer` member read measures the same seat the
+/// inline path measured instead of falling back.
+pub fn resolve_quantity_with_parked_targets(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    source_id: ObjectId,
+    parked: ParkedTargets<'_>,
+) -> i32 {
+    match expr {
+        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            controller,
+            QuantityContext {
+                entering: None,
+                source: source_id,
+                trigger_source: None,
+                recipient: None,
+                scoped_player: parked.scoped_player,
+                damage_source: None,
+                spell: None,
+                event_amount: None,
+                granting_object: None,
+            },
+            &[],
+            None,
+            None,
+            Some(parked),
+        ),
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_parked_targets(state, inner, controller, source_id, parked)
         }),
     }
 }
@@ -4369,6 +4446,7 @@ fn resolve_quantity_scoped_in(
                 ..QuantityContext::new(source_id)
             },
             targets,
+            None,
             None,
             None,
         ),
@@ -4482,7 +4560,7 @@ fn reduce_property_values(values: impl Iterator<Item = i32>, function: Aggregate
 /// exile") rather than the generic objects in a zone. A conjunction is card-only
 /// when any conjunct is, a union only when every branch is, a complement takes
 /// its inner filter's population.
-fn filter_names_cards(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_names_cards(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed
             .type_filters
@@ -4649,17 +4727,43 @@ fn target_filter_matches_population_semantics(
     }
 }
 
-fn tracked_set_object_ids(
+/// CR 608.2c: bind a tracked-set id, the `TrackedSetId(0)` sentinel through the
+/// chain -> latest ladder (`targeting::resolve_tracked_set_id`). The one binder
+/// for the id-level readers below.
+fn bound_tracked_set_id(
     state: &GameState,
     id: crate::types::identifiers::TrackedSetId,
-) -> Vec<ObjectId> {
-    let resolved = if id.0 == 0 {
+) -> Option<crate::types::identifiers::TrackedSetId> {
+    if id.0 == 0 {
         crate::game::targeting::resolve_tracked_set_id(state)
     } else {
         Some(id)
-    };
-    resolved
+    }
+}
+
+/// CR 730.3: the raw members of a tracked set: the population of every count,
+/// aggregate and per-permanent reader. A merged permanent that left the
+/// battlefield is one permanent, so its components are not counted. Object
+/// finders read [`tracked_set_found_object_ids`].
+pub(crate) fn tracked_set_object_ids(
+    state: &GameState,
+    id: crate::types::identifiers::TrackedSetId,
+) -> Vec<ObjectId> {
+    bound_tracked_set_id(state, id)
         .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+        .unwrap_or_default()
+}
+
+/// CR 730.3c: the objects a finder over a tracked set finds: the members, then
+/// the components of a merged member that `reader` may find
+/// (`merge::tracked_set_found_objects`, under its D7 gate). Never a count.
+pub(crate) fn tracked_set_found_object_ids(
+    state: &GameState,
+    id: crate::types::identifiers::TrackedSetId,
+    reader: Option<&ResolvedAbility>,
+) -> Vec<ObjectId> {
+    bound_tracked_set_id(state, id)
+        .map(|id| crate::game::merge::tracked_set_found_objects(state, id, reader, None))
         .unwrap_or_default()
 }
 
@@ -4920,16 +5024,10 @@ fn current_cast_occurrence_matches(
     {
         return false;
     }
-    let Ok(index) = usize::try_from(occurrence.turn_journal_index) else {
-        return false;
-    };
-    state
-        .spells_cast_this_turn_by_player
-        .get(&occurrence.caster)
-        .and_then(|records| records.get(index))
-        .is_some_and(|record| record.spell_object_id == Some(ability.source_id))
+    crate::game::ledger::cast_occurrence_is_current(state, occurrence, ability.source_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_ref(
     state: &GameState,
     qty: &QuantityRef,
@@ -4938,7 +5036,37 @@ fn resolve_ref(
     targets: &[TargetRef],
     chosen_x: Option<u32>,
     ability: Option<&ResolvedAbility>,
+    // CR 608.2c: parked ability-targets for suspension-resume reads, where
+    // the ability is gone but its targets survive (the roll-die parked
+    // frame), plus the chain-root/legality/pin context indexed reads need.
+    // `None` in every other context — in particular the combat-tax slice
+    // entry keeps its own meaning for `targets` and never feeds this.
+    ability_targets: Option<ParkedTargets<'_>>,
 ) -> i32 {
+    // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
+    // counts the pre-entry rules view, in which a permanent entering in the same
+    // simultaneous event has no static effect yet (a co-entering March of the
+    // Machines has not made an existing artifact a creature). The view has no
+    // co-entrant on its battlefield, so the recursion ends there.
+    if ctx.entering.is_some() {
+        if let Some(view) = state
+            .active_pre_entry_battlefield_snapshot()
+            .and_then(|snapshot| {
+                crate::game::engine_replacement::pre_entry_rules_view(state, snapshot)
+            })
+        {
+            return resolve_ref(
+                &view,
+                qty,
+                controller,
+                ctx,
+                targets,
+                chosen_x,
+                ability,
+                ability_targets,
+            );
+        }
+    }
     let source_id = ctx.source;
     // Build a FilterContext that preserves ability scope (for `chosen_x`/targets
     // in nested filter thresholds) when available, falling back to the controller
@@ -4976,6 +5104,15 @@ fn resolve_ref(
         }
     };
     filter_ctx.recipient_id = ctx.recipient;
+    filter_ctx.ability_targets = ability_targets;
+    // CR 614.12 + CR 614.1c: a quantity read for an ENTERING object's replacement
+    // (`ctx.entering`) counts the battlefield as it was before the simultaneous
+    // entry, so permanents entering in the same event are excluded from every
+    // population read (object counts, counters among objects, aggregates) at
+    // this single boundary. Every other read keeps the live battlefield.
+    filter_ctx.pre_entry_battlefield = ctx
+        .entering
+        .and(state.active_pre_entry_battlefield_snapshot());
     let player = state.players.iter().find(|p| p.id == controller);
     match qty {
         // CR 402: hand size for the scoped player(s).
@@ -5086,14 +5223,27 @@ fn resolve_ref(
         // double-count, and Archenemy's 40/20 baseline follows that controller.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
             crate::game::players::team_life_total(state, p.id)
-                - state.format_config.starting_life_total_for_player(p.id)
+                - state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
         }),
         // CR 103.4 + CR 904.5: the rules starting total for the referenced
         // player or players selected by `scope`, including the archenemy's
         // 40-life baseline.
         QuantityRef::StartingLifeTotal { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                state.format_config.starting_life_total_for_player(p.id)
+                state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
+            })
+        }
+        // CR 103.2a + CR 702.139b: the latched submitted-starting-deck count
+        // for the scoped player (`Player::starting_deck_size`), written once
+        // at deck load. Mill, draw, and command-zone moves never change it —
+        // the Whtz discount reads the snapshot.
+        QuantityRef::StartingDeckSize { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                usize_to_i32_saturating(p.starting_deck_size as usize)
             })
         }
         // CR 701.57a: the mana-value limit of the discover that fired the current
@@ -5145,14 +5295,22 @@ fn resolve_ref(
             .unwrap_or(0),
         // CR 119.3 + CR 800.4i: Life lost this turn, including departed players,
         // scoped via PlayerScope (Π-3).
-        QuantityRef::LifeLostThisTurn { player } => resolve_per_player_history_scalar(
+        //
+        // CR 500: `window` picks the live this-turn counter or the snapshot
+        // latched at the turn boundary (`life_lost_last_turn`).
+        QuantityRef::LifeLost { player, window } => resolve_per_player_history_scalar(
             state,
             player,
             controller,
             ctx,
             targets,
             ability,
-            |p| u32_to_i32_saturating(p.life_lost_this_turn),
+            |p| {
+                u32_to_i32_saturating(match window {
+                    TurnWindow::ThisTurn => p.life_lost_this_turn,
+                    TurnWindow::LastTurn => p.life_lost_last_turn,
+                })
+            },
         ),
         // CR 700.8: Number of creatures in `player`'s party. The maximum
         // assignment of creatures to the four party slots (Cleric/Rogue/
@@ -5174,7 +5332,26 @@ fn resolve_ref(
             // the filter's zone, with `OtherThanTriggerObject` exclusion applied
             // — shared with the "for each [object]" iteration so count and
             // members stay in lockstep.
-            object_count_matching_ids(state, filter, &filter_ctx, source_id).len(),
+            object_count_matching_ids(
+                state,
+                &bind_casting_spell_referent(filter, ctx.spell),
+                &filter_ctx,
+                source_id,
+            )
+            .into_iter()
+            // CR 614.1c + CR 614.12 + CR 608.2h: an entry-counter
+            // quantity reads the population before entry, even when a copy
+            // answer has physically placed the projected entrant on the
+            // battlefield. Keep its characteristics available to source and
+            // chosen-attribute reads; exclude only its population membership.
+            .filter(|id| {
+                Some(*id) != ctx.entering
+                    || state
+                        .objects
+                        .get(id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+            })
+            .count(),
         ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
@@ -5585,7 +5762,8 @@ fn resolve_ref(
                         Some(a) => FilterContext::from_ability_with_controller(a, p.id),
                         None => FilterContext::from_source_with_controller(source_id, p.id)
                             .with_granting_object(ctx.granting_object),
-                    };
+                    }
+                    .with_pre_entry_battlefield(filter_ctx.pre_entry_battlefield);
                     usize_to_i32_saturating(
                         zone_ids
                             .iter()
@@ -5855,6 +6033,13 @@ fn resolve_ref(
         QuantityRef::CardsExiledBySource => {
             usize_to_i32_saturating(linked_exile_for_context(state, &ctx).len())
         }
+        // Turtle Team-Up (no CR section — casual product): the number of
+        // Bosses currently deployed. Delegates to the single authority so the
+        // count matches stage sizes, Krang's wave bonus, and Leatherhead's
+        // entry gain on every layer pass.
+        QuantityRef::DeployedBossCount => {
+            usize_to_i32_saturating(crate::game::boss::bosses_in_command_zone(state).len())
+        }
         // CR 607.2a: The power of a specific card exiled by the source, indexed by order.
         // Its only producer is The Mimeoplasm's entry replacement: the ordinal
         // "this way" reading over the per-turn ledger. "The exiled card" readers
@@ -5878,18 +6063,20 @@ fn resolve_ref(
             scope,
         } => {
             let mut count = 0;
-            // Per-player zones (graveyard, library)
+            // Per-player zones (graveyard, library, hand)
             match zone {
                 ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
                     for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
                         for &obj_id in zone_container(state, zone, player) {
-                            if matches_zone_card_filter(
-                                state,
-                                obj_id,
-                                card_types,
-                                filter.as_ref(),
-                                &filter_ctx,
-                            ) {
+                            if state.objects.get(&obj_id).is_some_and(|obj| {
+                                matches_zone_card_filter(
+                                    state,
+                                    obj,
+                                    card_types,
+                                    filter.as_ref(),
+                                    &filter_ctx,
+                                )
+                            }) {
                                 count += 1;
                             }
                         }
@@ -5906,14 +6093,10 @@ fn resolve_ref(
                                 controller,
                                 obj.owner,
                             );
-                            // CR 108.2 + CR 109.1: count only cards in exile;
-                            // the CR 722.3c retained prepare copy is a copy of
-                            // a card, not a card.
-                            if obj.is_card_population_member()
-                                && owner_matches
+                            if owner_matches
                                 && matches_zone_card_filter(
                                     state,
-                                    obj_id,
+                                    obj,
                                     card_types,
                                     filter.as_ref(),
                                     &filter_ctx,
@@ -6024,7 +6207,19 @@ fn resolve_ref(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
-        QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+        QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } => {
+            // MED1: `QuantityRef` deserialization is derived, so this peer
+            // of the `TrackedSet` member filter has no decode gate — the
+            // parser builds only selected-free shapes, and this fail-closed
+            // skip covers hand-built in-memory values. Its zero must never
+            // count as support.
+            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
+                return 0;
+            }
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
             else {
                 return 0;
@@ -6045,31 +6240,55 @@ fn resolve_ref(
                             .and_then(|causes| causes.get(&oid))
                             .is_some_and(|member_cause| member_cause == cause),
                     };
-                    let matches_filter = if !state.battlefield.contains(&oid) {
-                        // CR 608.2h: Use last-known information to filter a tracked object that has left the battlefield.
-                        state.lki_cache.get(&oid).map_or_else(
-                            || {
-                                crate::game::filter::matches_target_filter(
-                                    state,
-                                    oid,
-                                    filter,
-                                    &filter_ctx,
-                                )
-                            },
-                            |lki| {
-                                crate::game::filter::matches_target_filter_on_lki_snapshot(
-                                    state,
-                                    oid,
-                                    lki,
-                                    filter,
-                                    &filter_ctx,
-                                )
-                            },
-                        )
-                    } else {
+                    // CR 608.2h + CR 400.7: a member stamped with its producing
+                    // departure reads that departure's snapshot; one stamped from a
+                    // zone that records no LKI reads live. An unstamped member that
+                    // is now in a library was never moved by the producing action
+                    // (a reveal, CR 701.20b), so its live characteristics are
+                    // authoritative and any cached snapshot is an earlier,
+                    // unrelated departure.
+                    let read_live = |oid| {
                         crate::game::filter::matches_target_filter(state, oid, filter, &filter_ctx)
                     };
-                    cause_ok && matches_filter
+                    let read_snapshot = |oid, lki| {
+                        crate::game::filter::matches_target_filter_on_lki_snapshot(
+                            state,
+                            oid,
+                            lki,
+                            filter,
+                            &filter_ctx,
+                        )
+                    };
+                    let matches_filter =
+                        match tracked_member_read_authority(state, Some(*set_id), oid) {
+                            TrackedMemberRead::Snapshot(lki) => read_snapshot(oid, lki),
+                            TrackedMemberRead::Live => read_live(oid),
+                            TrackedMemberRead::Legacy
+                                if state.battlefield.contains(&oid)
+                                    || state
+                                        .objects
+                                        .get(&oid)
+                                        .is_some_and(|obj| obj.zone == Zone::Library) =>
+                            {
+                                read_live(oid)
+                            }
+                            // CR 608.2h: an unstamped member that left the
+                            // battlefield is filtered by last-known information.
+                            TrackedMemberRead::Legacy => state
+                                .lki_cache
+                                .get(&oid)
+                                .map_or_else(|| read_live(oid), |lki| read_snapshot(oid, lki)),
+                        };
+                    // CR 614.6 + CR 701.17c: a destination-named count ("put into
+                    // a graveyard this way") counts only members that actually
+                    // arrived there — a replaced move never happened, so a card a
+                    // replacement sent to exile instead is not counted. The
+                    // member's CURRENT zone is the authority; the departure
+                    // snapshot above describes the zone it LEFT.
+                    let destination_ok = destination.is_none_or(|zone| {
+                        state.objects.get(&oid).is_some_and(|obj| obj.zone == zone)
+                    });
+                    cause_ok && matches_filter && destination_ok
                 })
                 .count();
             usize_to_i32_saturating(count)
@@ -6273,8 +6492,32 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(found.len())
         }
+        // CR 601.2i + CR 603.4 + CR 800.4i: spells cast during the previous turn
+        // by the scoped players, read from the per-player snapshot latched at
+        // the turn boundary. CR 800.4i: a player who has left the game still
+        // counts (the table-wide "no spells were cast last turn" total includes
+        // their casts), so the population is not narrowed by elimination.
+        // No per-spell data survives the boundary, so a filtered last-turn count
+        // is not representable: it reads 0 and `coverage` classifies it
+        // unsupported rather than inventing a value.
+        QuantityRef::SpellsCast {
+            scope,
+            ref filter,
+            window: TurnWindow::LastTurn,
+        } => match filter {
+            None => usize_to_i32_saturating(
+                history_scoped_players(state, scope, ctx, controller)
+                    .map(|p| p.spells_cast_last_turn as usize)
+                    .sum(),
+            ),
+            Some(_) => 0,
+        },
         // CR 117.1: Count spells cast this turn by the scoped players, optionally filtered.
-        QuantityRef::SpellsCastThisTurn { scope, ref filter } => {
+        QuantityRef::SpellsCast {
+            scope,
+            ref filter,
+            window: TurnWindow::ThisTurn,
+        } => {
             // CR 109.1 + CR 614.12: When the filter carries the own-cast
             // exclusion marker (`FilterProp::Another`), count records matching
             // the PEELED filter, then subtract the source's own pending cast.
@@ -6443,6 +6686,11 @@ fn resolve_ref(
         QuantityRef::CrimesCommittedThisTurn => {
             player.map_or(0, |p| u32_to_i32_saturating(p.crimes_committed_this_turn))
         }
+        // CR 107.14 + CR 122.1: Energy counters paid or lost this turn — uses
+        // the tracked counter on the player.
+        QuantityRef::EnergyPaidOrLostThisTurn => player.map_or(0, |p| {
+            u32_to_i32_saturating(p.energy_paid_or_lost_this_turn)
+        }),
         // CR 701.65b/701.66b/701.67c/702.189b: distinct bend types the controller
         // performed this turn — reads the tracked `HashSet<BendingType>` cardinality.
         QuantityRef::BendTypesThisTurn => player.map_or(0, |p| {
@@ -6470,6 +6718,32 @@ fn resolve_ref(
             ability,
             |p| u32_to_i32_saturating(p.cards_drawn_this_turn),
         ),
+        // CR 121.1 + CR 603.4: Cards drawn during the previous turn, scoped
+        // via PlayerScope. Reads the turn-start snapshot, mirroring the
+        // this-turn arm above.
+        QuantityRef::CardsDrawnLastTurn { player } => resolve_per_player_history_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| u32_to_i32_saturating(p.cards_drawn_last_turn),
+        ),
+        // CR 601.2i + CR 603.4: Spells cast by opponents since the previous
+        // turn ended, scoped via PlayerScope. Reads the per-player window
+        // counter bumped on every finalized cast.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            resolve_per_player_history_scalar(
+                state,
+                player,
+                controller,
+                ctx,
+                targets,
+                ability,
+                |p| u32_to_i32_saturating(p.opponent_spells_cast_since_own_last_turn),
+            )
+        }
         // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the
         // scoped player. CR 608.2i is the look-back exception that makes a
         // departed permanent still count.
@@ -6687,16 +6961,42 @@ fn resolve_ref(
                     .unwrap_or(0)
             })
         }
-        // CR 601.2i: spells that became cast during the previous turn, by any player
-        // (table-wide total).
-        QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
+        QuantityRef::CardsCycled {
+            scope,
+            window,
+            name,
+        } => {
+            // CR 602.2b + CR 601.2h + CR 601.2i: The ledger records paid activations
+            // at placement. CR 608.2h: Evaluate membership using the current turn.
+            // CR 109.5: In an ability, "you" uses its bound controller.
+            usize_to_i32_saturating(
+                history_scoped_players(state, scope, ctx, controller)
+                    .filter_map(|player| state.cycles_completed_this_game_by_player.get(&player.id))
+                    .flatten()
+                    .filter(|record| {
+                        let in_window = match window {
+                            crate::types::ability::CyclingHistoryWindow::ThisTurn => {
+                                record.turn == state.turn_number
+                            }
+                            crate::types::ability::CyclingHistoryWindow::ThisGame => true,
+                        };
+                        // CR 201.2 + CR 201.2a: Compare the recorded English name.
+                        in_window
+                            && name.as_deref().is_none_or(|name| {
+                                !name.is_empty()
+                                    && crate::game::filter::card_names_match(&record.name, name)
+                            })
+                    })
+                    .count(),
+            )
+        }
         // CR 601.2i: Number of spells that became cast this game by the scoped
         // players, optionally filtered by spell characteristics.
         //
         // `filter: None` reads the fast O(1) `state.spells_cast_this_game`
         // count — preserves the pre-lift Establishing Shot semantics.
         // `filter: Some(_)` scans `state.spells_cast_this_game_by_player`
-        // records, mirroring `SpellsCastThisTurn`'s filtered scan.
+        // records, mirroring `SpellsCast`'s filtered scan.
         QuantityRef::SpellsCastThisGame { scope, ref filter } => match filter {
             None => usize_to_i32_saturating(
                 scoped_players(state, scope, ctx, controller)
@@ -6728,22 +7028,60 @@ fn resolve_ref(
             actor,
             counters,
             target,
-        } => u32_to_i32_saturating(
-            state
-                .counter_added_this_turn
-                .iter()
-                .filter(|record| {
-                    count_scope_actor_matches(state, actor, ctx.clone(), controller, record.actor)
-                        && counters.matches(&record.counter_type)
-                        && matches_target_filter_on_counter_added_record(
-                            state,
-                            record,
-                            target,
-                            &filter_ctx,
+        } => {
+            // CR 400.7 + CR 608.2h: "on ~" names the ability's source: the exact
+            // object it triggered from, even after that object has left (a triggered
+            // ability exists independently of its source, CR 113.7a). A counter put
+            // on another incarnation was put on a different object. The record is
+            // history, so it is matched by identity, not against a live source.
+            // Population recipients keep reading every record; a legacy record
+            // without a stamp keeps the object-id-only match.
+            let self_identity = matches!(target, TargetFilter::SelfRef).then(|| {
+                trigger_source.as_ref().map_or_else(
+                    || {
+                        (
+                            source_id,
+                            state.objects.get(&source_id).map(|o| o.incarnation),
                         )
-                })
-                .fold(0, |total: u32, record| total.saturating_add(record.count)),
-        ),
+                    },
+                    |source| {
+                        let identity = source.identity.reference;
+                        (identity.object_id, Some(identity.incarnation))
+                    },
+                )
+            });
+            u32_to_i32_saturating(
+                state
+                    .counter_added_this_turn
+                    .iter()
+                    .filter(|record| {
+                        let recipient = match self_identity {
+                            Some((id, incarnation)) => {
+                                record.object_id == id
+                                    && incarnation.is_none_or(|current| {
+                                        record.incarnation.is_none_or(|stamp| stamp == current)
+                                    })
+                            }
+                            None => matches_target_filter_on_counter_added_record(
+                                state,
+                                record,
+                                target,
+                                &filter_ctx,
+                            ),
+                        };
+                        recipient
+                            && count_scope_actor_matches(
+                                state,
+                                actor,
+                                ctx.clone(),
+                                controller,
+                                record.actor,
+                            )
+                            && counters.matches(&record.counter_type)
+                    })
+                    .fold(0, |total: u32, record| total.saturating_add(record.count)),
+            )
+        }
         // CR 701.9 + CR 603.4: Cards discarded this turn, scoped via PlayerScope.
         QuantityRef::CardsDiscardedThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
@@ -7093,42 +7431,66 @@ fn damage_source_controller_matches(
     }
 }
 
-/// Check if an object matches a set of type filters for zone card counting.
-/// Empty `card_types` means all cards match.
+/// CR 109.2a + CR 111.6: zoned card descriptions count cards, not tokens.
+/// Check card identity before optional type and target filters, even before
+/// non-card objects are removed by state-based actions.
+/// Empty `card_types` leaves only the optional target filter.
 fn matches_zone_card_filter(
     state: &GameState,
-    obj_id: ObjectId,
+    obj: &crate::game::game_object::GameObject,
     card_types: &[TypeFilter],
     filter: Option<&TargetFilter>,
     filter_ctx: &FilterContext<'_>,
 ) -> bool {
-    if !card_types.is_empty() {
-        let matches_type = state.objects.get(&obj_id).is_some_and(|obj| {
-            card_types
-                .iter()
-                .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
-        });
-        if !matches_type {
-            return false;
-        }
+    if !obj.is_represented_by_a_card() {
+        return false;
     }
-    filter.is_none_or(|filter| matches_target_filter(state, obj_id, filter, filter_ctx))
+    if !card_types.is_empty()
+        && !card_types
+            .iter()
+            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+    {
+        return false;
+    }
+    filter.is_none_or(|filter| matches_target_filter(state, obj.id, filter, filter_ctx))
 }
 
 /// CR 608.2 + CR 109.5: Resolve which player a `CountScope` variant binds to,
 /// then return an iterator over matching players.
 ///
-/// `Controller` always means the printed ability's controller (caster) — this
-/// is the "you" axis. `ScopedPlayer` (Issue #310) means the currently iterated
-/// player when a surrounding `player_scope` is active, falling back to
-/// `Controller` outside iteration. `Opponents` and `All` are computed
-/// relative to `Controller` (the caster), preserving CR 109.5's "you" semantics
-/// for unscoped opponent/all counts.
+/// `Controller` means the ability's controller — this is the "you" axis
+/// (the source object's current controller for a static ability, CR 109.5).
+/// `ScopedPlayer` (Issue #310) means the currently iterated player when a
+/// surrounding `player_scope` is active, falling back to `Controller` outside
+/// iteration. `Opponents` and `All` are computed relative to `Controller`,
+/// preserving CR 109.5's "you" semantics for unscoped opponent/all counts.
 fn scoped_players<'a>(
     state: &'a GameState,
     scope: &'a CountScope,
     ctx: QuantityContext,
     controller: PlayerId,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    scoped_players_matching(state, scope, ctx, controller, false)
+}
+
+/// CR 800.4i: `scoped_players` for an action-history read that "can find actions
+/// that were taken by a player who has left the game". Same scope selection,
+/// but the `All` / `Opponents` populations keep a departed player's record.
+fn history_scoped_players<'a>(
+    state: &'a GameState,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+) -> impl Iterator<Item = &'a crate::types::player::Player> {
+    scoped_players_matching(state, scope, ctx, controller, true)
+}
+
+fn scoped_players_matching<'a>(
+    state: &'a GameState,
+    scope: &'a CountScope,
+    ctx: QuantityContext,
+    controller: PlayerId,
+    include_departed: bool,
 ) -> impl Iterator<Item = &'a crate::types::player::Player> {
     let scoped_player = ctx
         .scoped_player
@@ -7145,18 +7507,22 @@ fn scoped_players<'a>(
         // CR 800.4a takes their owned objects out of the game with them. So
         // neither their player counters (CR 122.1) nor their zone and
         // spell-cast counts may contribute to an "each player" / "each
-        // opponent" total. Same population as the `PlayerScope` aggregate
-        // authority in `resolve_per_player_scalar`, which filters
-        // `!p.is_eliminated` on its `Opponent` and `AllPlayers` arms; these
-        // two scopes are the `CountScope` mirror of those and must agree.
+        // opponent" total. Match the live-player exclusion used by
+        // `resolve_per_player_scalar`; the opponent scope additionally uses
+        // the shared team-aware relationship below. This does not redefine
+        // the separate `PlayerScope` aggregation readers.
         //
         // The single-player scopes above deliberately keep no such filter: they
         // name ONE specific player rather than ranging over a population, and
         // silently resolving `Controller` (the "you" axis) or a persisted
         // `SourceChosenPlayer` to the empty set would read 0 instead of that
         // player's actual value.
-        CountScope::All => !p.is_eliminated,
-        CountScope::Opponents => p.id != controller && !p.is_eliminated,
+        CountScope::All => include_departed || !p.is_eliminated,
+        // CR 102.3: teammates are not opponents; retain the live-population filter.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, p.id)
+                && (include_departed || !p.is_eliminated)
+        }
     })
 }
 
@@ -7238,7 +7604,11 @@ fn count_scope_owner_matches(
         // Single-player scopes above keep no filter, for the same reason as in
         // `scoped_players`: they name one player rather than a population.
         CountScope::All => !player_has_left(state, owner),
-        CountScope::Opponents => owner != controller && !player_has_left(state, owner),
+        // CR 102.3: global-zone owners use the same team relation as live players.
+        CountScope::Opponents => {
+            crate::game::players::is_opponent(state, controller, owner)
+                && !player_has_left(state, owner)
+        }
     }
 }
 
@@ -7720,12 +8090,54 @@ pub(crate) fn distinct_counter_kinds_among(
     filter: &TargetFilter,
     filter_ctx: &FilterContext<'_>,
 ) -> Vec<CounterType> {
+    // CR 122.1 + CR 608.2k: the ability's own object — what a bare "kind of
+    // counter on it" names (the parser binds it only to that object), or the
+    // object choosing a kind of counter it doesn't have — is read through the
+    // same per-object reader as its counter COUNT (`read_counters_on_scope` at
+    // `ObjectScope::Source`, as `QuantityRef::CountersOn` reads it), so a census
+    // and a count read at the same moment see the same counter map. They are
+    // not read at the same moment everywhere: a delayed trigger freezes its
+    // count at creation (`snapshot_quantity_ref`) but takes no census
+    // snapshot, so the parser accepts the census only where this read is the
+    // ability's own object at that ability's own resolution — never in a
+    // delayed-trigger body (`ParseContext::enter_delayed_trigger_body`).
+    // CR 603.10a + CR 608.2h: a source that has left the battlefield ("When
+    // this creature dies, …") still reports the kinds it had, from its
+    // departure record or last known information, rather than dropping out of
+    // a battlefield scan.
+    if matches!(filter, TargetFilter::SelfRef) {
+        let ctx = QuantityContext {
+            entering: None,
+            source: filter_ctx.source_id,
+            trigger_source: filter_ctx.trigger_source.cloned(),
+            recipient: None,
+            scoped_player: None,
+            damage_source: None,
+            spell: None,
+            event_amount: None,
+            // CR 201.5a: the definition's granter stamp, as every filter-derived read carries it.
+            granting_object: filter_ctx.granting_object,
+        };
+        let targets = filter_ctx
+            .ability
+            .map_or(&[][..], |ability| ability.targets.as_slice());
+        let kinds = read_counters_on_scope(
+            state,
+            ObjectScope::Source,
+            ctx,
+            targets,
+            filter_ctx.ability,
+            positive_counter_types,
+        )
+        .unwrap_or_default();
+        return sorted_counter_kinds(kinds.into_iter().collect());
+    }
     let mut seen: HashSet<CounterType> = HashSet::new();
-    // CR 608.2c + CR 122.1: parent-target domains ("it", "that permanent",
-    // or an indexed parent slot) resolve through the same ability-bound
-    // authorities as other resolution effects. Predicate domains instead scan
-    // every zone declared by `InZone` / `InAnyZone`, defaulting to the
-    // battlefield only when the filter declares no zone.
+    // CR 608.2c + CR 122.1: parent-target domains ("that permanent", or an
+    // indexed parent slot) resolve through the same ability-bound authorities
+    // as other resolution effects. Predicate domains instead scan every zone
+    // declared by `InZone` / `InAnyZone`, defaulting to the battlefield only
+    // when the filter declares no zone.
     let object_ids: Vec<ObjectId> = match filter {
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => filter_ctx
             .ability
@@ -7760,6 +8172,12 @@ pub(crate) fn distinct_counter_kinds_among(
             }
         }
     }
+    sorted_counter_kinds(seen)
+}
+
+/// The deterministic (`CounterType::as_str`-sorted) order of a counter-kind
+/// set — see [`distinct_counter_kinds_among`].
+fn sorted_counter_kinds(seen: HashSet<CounterType>) -> Vec<CounterType> {
     let mut kinds: Vec<CounterType> = seen.into_iter().collect();
     kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     kinds
@@ -7897,8 +8315,13 @@ fn battlefield_departure_counter_context(
 /// tier determined one. `resolve_ref` reads `None` as 0; callers that must tell an
 /// undetermined amount from a determined zero (a delayed trigger freezing its
 /// creation-time amount, CR 603.7a) use `determined_event_context_amount`.
-/// Resolution-precedence ordered:
+/// Resolution-precedence ordered, after the proposed event's own amount
+/// (`ctx.event_amount`) and the Moonlit copy count:
 ///
+///   0. CR 614.6 + CR 615.5: the amount a replacement's own action owns
+///      (`with_replacement_action_scope`) — the amount of the event it
+///      replaced or prevented. Inside that scope the enclosing-trigger tiers
+///      (1 and 4) are suppressed as well.
 ///   1. `current_trigger_match_count` — the filtered subject count of a
 ///      batched trigger ("one or more <FILTER> <verb>"), set by
 ///      `stack::resolve_top` for the resolution. This is the canonical
@@ -7939,6 +8362,12 @@ fn event_context_amount(
         // Meditation); `None` otherwise, so it falls straight through to the
         // existing trigger/effect cascade.
         .or(state.post_replacement_token_substitution_count)
+        // CR 614.6 + CR 615.5: a replacement's own action reads the amount of the
+        // event it replaced or prevented, ahead of the die result and the trigger
+        // tiers of the resolution around it. Farideh's Fireball's "deals 2 damage to
+        // each opponent" under Delaying Shield puts 2 delay counters on it, not the
+        // d20 face. `None` outside that scope, so every other reader is unchanged.
+        .or_else(replacement_action_amount)
         .or_else(|| enclosing_trigger_match_count(state))
         // CR 706.4: Die results recorded earlier in THIS resolution
         // outrank the triggering event's own amount, so "roll one or more
@@ -7965,9 +8394,10 @@ fn event_context_amount(
         // life change, cards drawn, counters, die results), plus the CR
         // 603.4 detection-time fallback for intervening-`if` re-checks
         // where `current_trigger_event` is still `None`. Both tiers are
-        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) so
-        // a reflexive ability's "that many" never reads the enclosing
-        // trigger's event while that trigger's resolution is paused.
+        // suppressed inside `with_reflexive_resolution_scope` (CR 603.12) and
+        // `with_replacement_action_scope` (CR 614.6) so neither a reflexive
+        // ability's nor a replacement action's "that many" reads the event of
+        // the trigger resolving around it.
         .or_else(|| enclosing_trigger_event_amount(state))
         .or(state.last_effect_count)
         .or(state.last_effect_amount)
@@ -8049,28 +8479,27 @@ fn counter_total_from_map(counters: &HashMap<CounterType, u32>) -> i32 {
     i32::try_from(crate::types::counter::counter_total(counters)).unwrap_or(i32::MAX)
 }
 
-/// Resolve an ordinary object scope through its live object or its LKI snapshot.
+/// Read the counters on the object an ordinary scope names through its live
+/// object or its LKI snapshot. `None` when the scope names no object.
 ///
 /// CR 122.2 + CR 400.7 + CR 603.10a: When a source has changed zones, its
 /// live counter map has been cleared, so its departure snapshot provides the
 /// pre-exit values. A live battlefield object remains authoritative over a
 /// stale ObjectId-keyed cache entry from an earlier incarnation.
-fn resolve_counters_on_live_or_lki_scope(
+fn read_counters_on_live_or_lki_scope<T>(
     state: &GameState,
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
-    counter_type: Option<&CounterType>,
-) -> i32 {
+    read: impl FnOnce(&HashMap<CounterType, u32>) -> T,
+) -> Option<T> {
     // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
     // clause subject and no per-recipient static to bind it, so the pronoun
     // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
     // Enrage reflex.
     if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric) && ctx.trigger_source.is_some()
     {
-        return source_lki_for_context(state, &ctx)
-            .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-            .unwrap_or(0);
+        return source_counters_lki_for_context(state, &ctx).map(|counters| read(&counters));
     }
     // An unbound anaphor resolves through the `Source` lookup — the generic
     // scope helpers have no referent for `Anaphoric` itself.
@@ -8078,18 +8507,15 @@ fn resolve_counters_on_live_or_lki_scope(
         ObjectScope::Anaphoric => ObjectScope::Source,
         other => other,
     };
-    let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
-        return 0;
-    };
+    let object_id = object_id_for_scope(state, lookup_scope, ctx, targets)?;
     let live = state.objects.get(&object_id);
     let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
     if !on_battlefield {
         if let Some(lki) = state.lki_cache.get(&object_id) {
-            return counter_count_from_map(&lki.counters, counter_type);
+            return Some(read(&lki.counters));
         }
     }
-    live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
-        .unwrap_or(0)
+    live.map(|obj| read(&obj.counters))
 }
 
 /// CR 201.5a: the incarnation stamped on the definition read — the resolving
@@ -8102,6 +8528,9 @@ fn granter_scope(ability: Option<&ResolvedAbility>, ctx: &QuantityContext) -> Op
     .map(|object| ObjectScope::SpecificObject { object })
 }
 
+/// CR 122.1: The counter COUNT on the object `scope` names
+/// (`QuantityRef::CountersOn`); `counter_type = None` sums every kind. Zero when
+/// the scope names no object.
 fn resolve_counters_on_scope(
     state: &GameState,
     scope: ObjectScope,
@@ -8110,6 +8539,29 @@ fn resolve_counters_on_scope(
     ability: Option<&ResolvedAbility>,
     counter_type: Option<&CounterType>,
 ) -> i32 {
+    read_counters_on_scope(state, scope, ctx, targets, ability, |counters| {
+        counter_count_from_map(counters, counter_type)
+    })
+    .unwrap_or(0)
+}
+
+/// CR 122.1: The single authority for reading ONE object's counters, by the
+/// scope that names it — behind both the counter COUNT
+/// (`QuantityRef::CountersOn`, via [`resolve_counters_on_scope`]) and the
+/// counter-KIND census of a single named object
+/// (`QuantityRef::DistinctCounterKindsAmong`, via
+/// [`distinct_counter_kinds_among`]), so the two can never disagree about which
+/// counter map — live, departure record, or last known information — an object
+/// contributes. `read` sees that map; `None` when the scope names no object (or
+/// names it only through a malformed departure record).
+fn read_counters_on_scope<T>(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
+    read: impl Fn(&HashMap<CounterType, u32>) -> T,
+) -> Option<T> {
     match scope {
         // CR 400.7 + CR 603.10a: On a battlefield departure, EventSource is
         // the event's prior incarnation, not a same-id object that has since
@@ -8122,16 +8574,15 @@ fn resolve_counters_on_scope(
                 .unwrap_or(BattlefieldDepartureCounterContext::NotBattlefieldDeparture)
             {
                 BattlefieldDepartureCounterContext::Present { context } => {
-                    counter_count_from_map(&context.lki.counters, counter_type)
+                    Some(read(&context.lki.counters))
                 }
                 BattlefieldDepartureCounterContext::Absent { object_id } => state
                     .lki_cache
                     .get(&object_id)
-                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or(0),
-                BattlefieldDepartureCounterContext::Malformed => 0,
+                    .map(|lki| read(&lki.counters)),
+                BattlefieldDepartureCounterContext::Malformed => None,
                 BattlefieldDepartureCounterContext::NotBattlefieldDeparture => {
-                    resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
+                    read_counters_on_live_or_lki_scope(state, scope, ctx, targets, read)
                 }
             }
         }
@@ -8142,12 +8593,11 @@ fn resolve_counters_on_scope(
         // `Source`/`Anaphoric` live-with-LKI shape; `object_id_for_scope`
         // reads `ctx.damage_source`).
         | ObjectScope::BatchSource => {
-            resolve_counters_on_live_or_lki_scope(state, scope, ctx, targets, counter_type)
+            read_counters_on_live_or_lki_scope(state, scope, ctx, targets, read)
         }
         ObjectScope::CostPaidObject => ability
             .and_then(|ability| ability.cost_paid_object.as_ref())
-            .map(|snapshot| counter_count_from_map(&snapshot.lki.counters, counter_type))
-            .unwrap_or(0),
+            .map(|snapshot| read(&snapshot.lki.counters)),
         ObjectScope::AmassedArmy => ability
             .and_then(|ability| ability.amassed_army_object.as_ref())
             .map(|snapshot| {
@@ -8155,32 +8605,27 @@ fn resolve_counters_on_scope(
                 // an Army that changed zones and returned is a new object. The
                 // LKI fallbacks below are deliberately ungated (CR 608.2h: they
                 // report the departed Army's recorded counters).
-                let live = snapshot
+                let live_on_battlefield = snapshot
                     .live_object_id(state)
-                    .and_then(|id| state.objects.get(&id));
-                let on_battlefield =
-                    live.is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
-                if on_battlefield {
-                    return live
-                        .map(|obj| counter_count_from_map(&obj.counters, counter_type))
-                        .unwrap_or(0);
-                }
-                // CR 608.2h + CR 400.7: departure-time counters for THIS
-                // incarnation. The id-keyed `state.lki_cache` is overwritten on
-                // every departure, so it would report a later incarnation's
-                // counters once the referent has departed again; qualify by the
-                // captured incarnation and fall back to the binding-time
-                // snapshot only when no versioned record exists.
-                state
-                    .lki_by_incarnation
-                    .get(&snapshot.object_id)
-                    .and_then(|history| history.get(&snapshot.incarnation))
-                    .map(|lki| counter_count_from_map(&lki.counters, counter_type))
-                    .unwrap_or_else(|| {
-                        counter_count_from_map(&snapshot.lki.counters, counter_type)
-                    })
-            })
-            .unwrap_or(0),
+                    .and_then(|id| state.objects.get(&id))
+                    .filter(|obj| obj.zone == crate::types::zones::Zone::Battlefield);
+                let counters = match live_on_battlefield {
+                    Some(obj) => &obj.counters,
+                    // CR 608.2h + CR 400.7: departure-time counters for THIS
+                    // incarnation. The id-keyed `state.lki_cache` is overwritten
+                    // on every departure, so it would report a later
+                    // incarnation's counters once the referent has departed
+                    // again; qualify by the captured incarnation and fall back
+                    // to the binding-time snapshot only when no versioned record
+                    // exists.
+                    None => state
+                        .lki_by_incarnation
+                        .get(&snapshot.object_id)
+                        .and_then(|history| history.get(&snapshot.incarnation))
+                        .map_or(&snapshot.lki.counters, |lki| &lki.counters),
+                };
+                read(counters)
+            }),
         // CR 608.2c + CR 122.2 + CR 400.7 + CR 608.2h: "that <permanent>" /
         // "that many" back-reference to the chain-root spell's own target.
         // LIVE counters while that target is still on the battlefield (an
@@ -8205,26 +8650,24 @@ fn resolve_counters_on_scope(
                         _ => None,
                     })
             })
-            .map(|id| {
+            .and_then(|id| {
                 let live = state.objects.get(&id);
                 let on_battlefield = live.is_some_and(|obj| obj.zone == Zone::Battlefield);
-                if !on_battlefield {
-                    if let Some(lki) = state.lki_cache.get(&id) {
-                        return counter_count_from_map(&lki.counters, counter_type);
-                    }
-                }
-                live.map(|obj| counter_count_from_map(&obj.counters, counter_type))
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0),
+                let departed = (!on_battlefield)
+                    .then(|| state.lki_cache.get(&id).map(|lki| &lki.counters))
+                    .flatten();
+                departed
+                    .or_else(|| live.map(|obj| &obj.counters))
+                    .map(read)
+            }),
         // CR 201.5a: the stamped granter; unbound, the symbol reads the ability's source (CR 113.7).
-        ObjectScope::GrantingObject => resolve_counters_on_scope(
+        ObjectScope::GrantingObject => read_counters_on_scope(
             state,
             granter_scope(ability, &ctx).unwrap_or(ObjectScope::Source),
             ctx,
             targets,
             ability,
-            counter_type,
+            read,
         ),
         // CR 400.7 + CR 608.2h + CR 122.2: the bound incarnation's counters; once it has
         // changed zones its counters ceased to exist, so only a resolution reads its LKI.
@@ -8232,13 +8675,10 @@ fn resolve_counters_on_scope(
             state,
             object,
             ability,
-            &|o| Some(counter_count_from_map(&o.counters, counter_type)),
-            &|l| Some(counter_count_from_map(&l.counters, counter_type)),
-        )
-        .unwrap_or(0),
-        _ => object_for_scope(state, scope, ctx, targets)
-            .map(|obj| counter_count_from_map(&obj.counters, counter_type))
-            .unwrap_or(0),
+            &|o| Some(read(&o.counters)),
+            &|l| Some(read(&l.counters)),
+        ),
+        _ => object_for_scope(state, scope, ctx, targets).map(|obj| read(&obj.counters)),
     }
 }
 
@@ -8437,16 +8877,16 @@ where
 /// zone-change record identifies it. A leave and re-entry can reuse the same
 /// `ObjectId`, but the re-entered permanent is a new object; it must not replace
 /// the original entrant's LKI for an already-pending trigger.
-fn read_object_pt_by_id_for_incarnation<F, G>(
+fn read_object_pt_by_id_for_incarnation<T, F, G>(
     state: &GameState,
     id: ObjectId,
     expected_incarnation: Option<u64>,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     let live = state.objects.get(&id);
     live.filter(|obj| {
@@ -8483,16 +8923,16 @@ where
 
 /// CR 400.7 + CR 608.2h: reads the bound incarnation live wherever it is, else its LKI only for
 /// a resolution that carries its ability.
-fn read_specific_object<F, G>(
+fn read_specific_object<T, F, G>(
     state: &GameState,
     object: ObjectIncarnationRef,
     ability: Option<&ResolvedAbility>,
     obj_extract: &F,
     lki_extract: &G,
-) -> Option<i32>
+) -> Option<T>
 where
-    F: Fn(&crate::game::game_object::GameObject) -> Option<i32>,
-    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
+    F: Fn(&crate::game::game_object::GameObject) -> Option<T>,
+    G: Fn(&crate::types::game_state::LKISnapshot) -> Option<T>,
 {
     state
         .objects
@@ -8608,6 +9048,35 @@ where
             let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
                 read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            } else if let Some(incarnation) = ability
+                .and_then(|a| a.source_incarnation)
+                // CR 400.7 + CR 602.2a: a snapshot at the captured incarnation
+                // proves the source LEFT that incarnation (a departure from the
+                // battlefield, exile or stack). A source that paid its own move
+                // cost has `source_incarnation` stamped AFTER the cost, so it
+                // has no snapshot there and keeps its live read — the Scavenge
+                // shape, a graveyard ability reading the live card.
+                .filter(|incarnation| {
+                    state
+                        .lki_by_incarnation
+                        .get(&ctx.source)
+                        .is_some_and(|history| history.contains_key(incarnation))
+                })
+            {
+                // CR 608.2h: an activated ability's source is read from the
+                // incarnation that activated it. Grenzo, Dungeon Warden's
+                // "power less than or equal to Grenzo's power" is activated on
+                // the battlefield; if Grenzo leaves in response, the moved card
+                // is compared against the power it last had there, not the base
+                // P/T of the graveyard card that now occupies the storage id.
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    ctx.source,
+                    Some(incarnation),
+                    &obj_extract,
+                    &lki_extract,
+                )
+                .unwrap_or(0)
             } else {
                 state
                     .objects
@@ -8701,7 +9170,7 @@ where
         // up to one other target creature" clause's own target, which may
         // still be alive if the destroy was replaced or prevented) is rebound
         // the same way, via `try_parse_amass`'s
-        // `rebind_cost_paid_object_pt_to_target` call. `CostPaidObject` stays
+        // `rebind_pt_scope_to_target` call. `CostPaidObject` stays
         // the specific cost/trigger/effect-context object (Greater Good,
         // sacrifice-cost and trigger-event power refs depend on this).
         ObjectScope::CostPaidObject => ability
@@ -9255,7 +9724,7 @@ fn resolve_object_mana_value(
 /// `PlayerId`, when one exists. Aggregate scopes (`Opponent`, `AllPlayers`)
 /// have no single-player interpretation and yield `None`. Used to resolve the
 /// `exclude` anchor of `PlayerScope::AllPlayers { exclude }`.
-fn resolve_single_player_scope(
+pub(crate) fn resolve_single_player_scope(
     state: &GameState,
     scope: &PlayerScope,
     controller: PlayerId,
@@ -9473,8 +9942,8 @@ where
 /// Rakdos, Belbe, Teysa and Kaito, and Thought Sponge's draw-count ruling.
 /// Opponent aggregates exclude teammates but retain departed opponents;
 /// all-player aggregates retain departed players too. Single-player scopes
-/// delegate to `resolve_per_player_scalar`. The life-only player-count twin is
-/// `player_filter_reads_life_history`.
+/// delegate to `resolve_per_player_scalar`. The player-count twin (life changes and
+/// last-turn spell casts, CR 800.4i) is `player_filter_reads_life_history`.
 fn resolve_per_player_history_scalar<F>(
     state: &GameState,
     scope: &PlayerScope,
@@ -9540,9 +10009,20 @@ fn player_filter_reads_life_history(filter: &PlayerFilter) -> bool {
         // narrow: other `PlayerAttribute` scalars (hand size, graveyard size,
         // player counters, …) keep excluding departed players, matching the
         // `AllPlayers` aggregate form in `resolve_per_player_history_scalar`.
+        //
+        // CR 800.4i: "If an effect requires information from the game about
+        // actions players have taken, the effect can find actions that were
+        // taken by a player who has left the game." A spell cast last turn is
+        // such an action ("a player cast two or more spells last turn", Gatstaf
+        // Howler), so the last-turn spell attr joins the life-change attrs.
         PlayerFilter::PlayerAttribute { attr, .. } => matches!(
             attr.as_ref(),
-            QuantityRef::LifeLostThisTurn { .. } | QuantityRef::LifeGainedThisTurn { .. }
+            QuantityRef::LifeLost { .. }
+                | QuantityRef::LifeGainedThisTurn { .. }
+                | QuantityRef::SpellsCast {
+                    window: TurnWindow::LastTurn,
+                    ..
+                }
         ),
         _ => false,
     }
@@ -9677,7 +10157,7 @@ fn resolve_per_team_life(
     match scope {
         // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
         // opponents' teams still in the game. An eliminated player's
-        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // `team_life_total` reads 0 (`shared_life_members` returns empty
         // for a departed player off-2HG), so leaving them in this fold lets
         // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
@@ -9723,7 +10203,8 @@ where
     match aggregate {
         AggregateFunction::Max => values.max().unwrap_or(0),
         AggregateFunction::Min => values.min().unwrap_or(0),
-        AggregateFunction::Sum => values.sum(),
+        // CR 107.1: Individually representable tallies can overflow when summed.
+        AggregateFunction::Sum => sum_saturating_i32(values),
     }
 }
 
@@ -9831,8 +10312,8 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
 }
 
 /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Single
-/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` was
-/// dealt damage this turn (relative to `controller`'s opponents) when a
+/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` (in
+/// `relation` to `controller`) was dealt damage this turn when a
 /// `damage_dealt_this_turn` record targets it, its combat status matches `kind`
 /// (CR 120.2a combat / CR 120.2b noncombat / `Any` = either), AND its source
 /// matches `source`. `source = None` accepts any source (Tymna the Weaver);
@@ -9843,13 +10324,42 @@ pub(crate) fn opponent_dealt_damage_matches(
     state: &GameState,
     player: PlayerId,
     controller: PlayerId,
-    kind: crate::types::ability::DamageKindFilter,
-    source: &Option<Box<TargetFilter>>,
-    min_sources: u32,
+    filter: &PlayerFilter,
     ability_source_id: ObjectId,
 ) -> bool {
-    if player == controller {
+    // The callers dispatch on the variant; anything else fails closed. The
+    // payload rides as the whole filter (not four flat params) so the next
+    // field does not re-trip `too_many_arguments`.
+    let PlayerFilter::OpponentDealtDamage {
+        kind,
+        source,
+        min_sources,
+        relation,
+    } = filter
+    else {
         return false;
+    };
+    let kind = *kind;
+    let min_sources = *min_sources;
+    let relation = *relation;
+    // CR 102.2 + CR 608.2c: `relation` gates the candidate population. `All`
+    // (clauses with no opponent word, e.g. Steel Hellkite) skips the gate so a
+    // damaged player who later controls the source still qualifies. `Opponent`
+    // keeps the HISTORICAL `player != controller` gate verbatim — deliberately
+    // not `is_opponent`, so team-game behavior for existing cards is unchanged
+    // (teammate refinement is a separate unit).
+    match relation {
+        crate::types::ability::PlayerRelation::All => {}
+        crate::types::ability::PlayerRelation::Opponent => {
+            if player == controller {
+                return false;
+            }
+        }
+        crate::types::ability::PlayerRelation::Controller => {
+            if player != controller {
+                return false;
+            }
+        }
     }
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
     let record_matches = |r: &crate::types::game_state::DamageRecord| {
@@ -10091,22 +10601,12 @@ pub(crate) fn player_count_matching_ids(
                     // Handled by the early return above; unreachable here.
                     PlayerFilter::HasLostTheGame => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
-                    // CR 120.2a/120.2b: Each opponent who was dealt damage of
-                    // the given kind this turn, optionally restricted to a
-                    // matching source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        source_id,
-                    ),
+                    // CR 120.2a/120.2b: Each player in `relation` who was dealt
+                    // damage of the given kind this turn, optionally restricted
+                    // to a matching source.
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        opponent_dealt_damage_matches(state, p.id, controller, filter, source_id)
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != controller
@@ -10127,10 +10627,11 @@ pub(crate) fn player_count_matching_ids(
                     // set (count context). Uses the generic predicate
                     // authority; ability-target anchors are resolved by the
                     // player_scope driver, not by this count helper.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
-                            state, p.id, exclude, controller, source_id,
-                        )
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && !crate::game::effects::matches_player_scope(
+                                state, p.id, exclude, controller, source_id,
+                            )
                     }
                     // CR 102.1 + CR 608.2c: the union of the members (count
                     // context). Delegates to the single-authority predicate in
@@ -10163,8 +10664,7 @@ pub(crate) fn player_count_matching_ids(
                                 )
                             },
                             |source| {
-                                source
-                                    .linked_exile_snapshot
+                                crate::game::players::linked_exile_pile(state, source)
                                     .iter()
                                     .any(|linked| linked.owner == p.id)
                             },
@@ -10370,13 +10870,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        quantity_expr_contains_scope, AbilityCondition, AbilityDefinition, AbilityKind,
-        ActivationRestriction, AggregateFunction, ChoiceValue, ChooseOneOfKind, Comparator,
-        ControllerRef, CountScope, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-        DevotionColors, DieResultBranch, Duration, Effect, FilterProp, KickerVariant, LetterQuery,
-        ModalSelectionCondition, ModalSelectionConstraint, ObjectProperty, ObjectScope,
-        PlayerRelation, RepeatContinuation, SharedQuality, StaticCondition, TargetChoiceTiming,
-        TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
+        card_type_set_source_recipient_read, quantity_expr_contains_scope,
+        quantity_expr_recipient_read, quantity_expr_uses_recipient, quantity_ref_recipient_read,
+        AbilityCondition, AbilityDefinition, AbilityKind, ActivationRestriction, AggregateFunction,
+        ChoiceValue, ChooseOneOfKind, Comparator, ControllerRef, CountScope, DamageChannel,
+        DamageKindFilter, DelayedTriggerCondition, DevotionColors, DieResultBranch, Duration,
+        Effect, FilterProp, KickerVariant, LetterQuery, ModalSelectionCondition,
+        ModalSelectionConstraint, ObjectProperty, ObjectScope, PlayerRelation, RepeatContinuation,
+        SharedQuality, StaticCondition, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::{CounterMatch, CounterType};
@@ -10529,9 +11031,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for unknown in [nested_filter_x, spell_ledger] {
@@ -10723,9 +11226,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let graveyard_cards = QuantityExpr::Ref {
@@ -11015,6 +11519,68 @@ mod tests {
         };
 
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), spell), 2);
+    }
+
+    /// CR 106.3 + CR 201.5: the payment read is the triggering spell's, but `SelfRef`
+    /// in its source filter names the listening ability's source, never the spell.
+    #[test]
+    fn triggering_spell_source_filter_self_ref_binds_to_the_listener() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Savannah Lions".to_string(),
+            Zone::Stack,
+        );
+        let listener = create_object(
+            &mut state,
+            CardId(101),
+            PlayerId(0),
+            "Barracks of the Thousand".to_string(),
+            Zone::Battlefield,
+        );
+        let other = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, listener);
+        add_spent_mana_source_snapshot(&mut state, spell, other);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ManaSpentToCast {
+                scope: CastManaObjectScope::TriggeringSpell,
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
+            },
+        };
+        let event = crate::types::events::GameEvent::SpellCast {
+            card_id: CardId(100),
+            controller: PlayerId(0),
+            object_id: spell,
+            cast_mana_value: None,
+        };
+        let count_for = |source: ObjectId| {
+            let context = crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&source],
+            );
+            resolve_quantity_for_trigger_check(
+                &state,
+                &qty,
+                PlayerId(0),
+                Some(&context),
+                Some(&event),
+            )
+        };
+
+        assert_eq!(count_for(listener), 2);
+        assert_eq!(count_for(other), 1);
     }
 
     #[test]
@@ -11399,6 +11965,39 @@ mod tests {
         // graveyard excluded); P1 sees only their own 2.
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), bf), 3);
         assert_eq!(resolve_quantity(&state, &qty, PlayerId(1), opp), 2);
+    }
+
+    /// PR-C F5 — VISITOR. A `PropertyAggregate` over a filter-bearing
+    /// `TrackedSet` source classifies the member filter's recipient read
+    /// exactly like an `Objects` source: "other" is a population-identity
+    /// read, and an unfiltered set reads nothing.
+    #[test]
+    fn tracked_set_member_filter_participates_in_recipient_reads() {
+        let aggregate = |filter: Option<TargetFilter>| QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Toughness,
+                    crate::types::ability::CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter,
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        };
+        let other = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Another]));
+        assert_eq!(
+            quantity_expr_recipient_read(&aggregate(Some(other))),
+            RecipientRead::PopulationIdentity,
+            "the member filter's 'other' must read as population identity"
+        );
+        assert_eq!(
+            quantity_expr_recipient_read(&aggregate(None)),
+            RecipientRead::Unread,
+            "an unfiltered set reads no recipient"
+        );
     }
 
     /// CR 107.4a + CR 107.4e + CR 202.1: `aggregate_property_over` is the single
@@ -12496,6 +13095,42 @@ mod tests {
         );
     }
 
+    /// M3 (CR 105.1 + CR 611.3a): `DistinctColorsAmong` over an
+    /// `Objects { filter }` population is recipient-dependent when its filter
+    /// reads the recipient, exactly like its `DistinctCardTypes`,
+    /// `SharedCardTypes`, and `DistinctSubtypes` siblings — the recipient
+    /// classifier must route it through the shared source authority instead
+    /// of dropping it to `Unread`.
+    #[test]
+    fn distinct_colors_among_over_recipient_filter_uses_recipient() {
+        let recipient_relative = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::AttachedTo {
+                            to: crate::types::ability::AttachmentReferent::Recipient,
+                        },
+                    ])),
+                },
+            },
+        };
+        assert!(
+            quantity_expr_uses_recipient(&recipient_relative),
+            "DistinctColorsAmong over Objects{{AttachedToRecipient}} is recipient-dependent"
+        );
+
+        // Paired negative: ExiledBySource is fixed per source, never recipient-relative.
+        let source_fixed = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctColorsAmong {
+                source: CardTypeSetSource::ExiledBySource,
+            },
+        };
+        assert!(
+            !quantity_expr_uses_recipient(&source_fixed),
+            "DistinctColorsAmong over ExiledBySource reads no recipient and must not force re-resolution"
+        );
+    }
+
     /// CR 608.2c: the graded recipient classifier separates identity reads
     /// ("other", "attached to it") from characteristic/controller reads, a
     /// composite or filter grades at its strongest part, and the legacy `bool`
@@ -12665,6 +13300,7 @@ mod tests {
             QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(other()),
                 caused_by: None,
+                destination: None,
             },
             QuantityRef::DistinctCounterKindsAmong { filter: other() },
             QuantityRef::CounterAddedThisTurn {
@@ -12819,9 +13455,10 @@ mod tests {
                 player: PlayerScope::Controller,
                 filter: other(),
             },
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(other()),
+                window: TurnWindow::ThisTurn,
             },
             QuantityRef::SpellsCastBeforeTriggeringSpell {
                 scope: CountScope::Controller,
@@ -12893,7 +13530,7 @@ mod tests {
                 | QuantityRef::SacrificedThisTurn { filter, .. }
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => Some(filter),
-                QuantityRef::SpellsCastThisTurn { filter, .. }
+                QuantityRef::SpellsCast { filter, .. }
                 | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
                 | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref(),
                 QuantityRef::ManaSpentToCast {
@@ -13014,6 +13651,7 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::Zone {
                 zone: ZoneRef::Graveyard,
@@ -13190,9 +13828,10 @@ mod tests {
                 3,
             ),
             (
-                QuantityRef::SpellsCastThisTurn {
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(filter.clone()),
+                    window: TurnWindow::ThisTurn,
                 },
                 1,
             ),
@@ -13214,7 +13853,7 @@ mod tests {
                 | QuantityRef::TokensCreatedThisTurn { filter, .. }
                 | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
                 | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
-                | QuantityRef::SpellsCastThisTurn {
+                | QuantityRef::SpellsCast {
                     filter: Some(filter),
                     ..
                 }
@@ -13673,7 +14312,7 @@ mod tests {
     /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
     /// WITHOUT that filter this read returns 0 rather than the lowest live
     /// life total, and this test fails.
-    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// Because `topology::shared_life_members` returns EMPTY for a departed
     /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
     /// which becomes the new Min whenever it undercuts every live player's
     /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
@@ -13801,7 +14440,12 @@ mod tests {
         state.players[2].poison_counters = 40;
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "precondition: P2 must have actually left the game"
@@ -13840,7 +14484,12 @@ mod tests {
         state.players[2].poison_counters = 40;
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert_eq!(
             state.players[2].poison_counters, 40,
             "non-vacuity: see the All-scope sibling"
@@ -13857,6 +14506,111 @@ mod tests {
             2,
             "an 'each opponent' poison total must read only the SURVIVING opponent (2): the \
              controller's 1 is not an opponent and the departed 40 is not in the game"
+        );
+    }
+
+    /// CR 102.3 + CR 109.5: live opponent counters exclude the current
+    /// controller's teammate, regardless of which team controls the ability.
+    #[test]
+    fn player_counter_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        for (player, poison) in state.players.iter_mut().zip([1, 8, 2, 3]) {
+            player.poison_counters = poison;
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: crate::types::player::PlayerCounterKind::Poison,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "P2 and P3 contribute; P0 and teammate P1 do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "the current controller changes which team supplies the opponents"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        assert_eq!(state.players[2].poison_counters, 2);
+        assert_eq!(state.players[3].poison_counters, 3);
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "departed opponents' retained counters and the living teammate are excluded"
+        );
+    }
+
+    /// CR 102.3 + CR 800.4a: global exile counts use the owner's team and
+    /// exclude departed owners even when their cards remain in engine exile.
+    #[test]
+    fn exile_zone_count_opponents_scope_excludes_two_headed_giant_teammate() {
+        let mut state =
+            GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 0);
+        let mut opponent_cards = Vec::new();
+        for (seat, count) in [(0, 1), (1, 8), (2, 2), (3, 3)] {
+            for _ in 0..count {
+                let card = create_object(
+                    &mut state,
+                    CardId(1),
+                    PlayerId(seat),
+                    "Exiled Card".to_string(),
+                    Zone::Exile,
+                );
+                if seat >= 2 {
+                    opponent_cards.push(card);
+                }
+            }
+        }
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: Vec::new(),
+                filter: None,
+                scope: CountScope::Opponents,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            5,
+            "both opposing owners contribute, but the controller and teammate do not"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(2), ObjectId(0)),
+            9,
+            "owner membership is relative to the current controller's team"
+        );
+
+        let mut events = Vec::new();
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
+        assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
+        for card in opponent_cards {
+            assert!(state.exile.contains(&card));
+            assert!(matches!(
+                state.objects.get(&card).map(|object| object.owner),
+                Some(PlayerId(2) | PlayerId(3))
+            ));
+        }
+        assert_eq!(
+            resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)),
+            0,
+            "neither departed opposing owners nor the living teammate contribute"
         );
     }
 
@@ -13884,7 +14638,12 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.exile.contains(&card),
             "non-vacuity: this engine routes a departed player's cards INTO exile, so the \
@@ -13946,6 +14705,78 @@ mod tests {
             ),
             30,
             "StartingLifeTotal reads the shared team baseline, not a per-seat half"
+        );
+    }
+
+    /// CR 103.2a: `StartingDeckSize` reads the latched
+    /// `Player::starting_deck_size` snapshot, not the live library — and a
+    /// strict-GT gate over the two resolved sides evaluates (50 > 40 true,
+    /// 40 > 40 false). Mill after the latch cannot move the snapshot: the
+    /// revert (resolving live library size) collapses the distinction.
+    #[test]
+    fn starting_deck_size_reads_the_latched_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        // V9-style latches: P0 submitted 200 (199 distinct + Whtz), P1 60.
+        state.players[0].starting_deck_size = 200;
+        state.players[1].starting_deck_size = 60;
+        // P0 mills down to a 50-card library: the latch must not move.
+        // NOTE: the entries must back real `GameObject`s — `ZoneCardCount`
+        // only counts library entries present in `state.objects` (CR 400.1
+        // zone membership), so pushing raw `ObjectId`s would count 0 and
+        // the comparative below would exercise nothing.
+        for id in 1..=50 {
+            create_object(
+                &mut state,
+                CardId(id),
+                PlayerId(0),
+                format!("Milled Card {id}"),
+                Zone::Library,
+            );
+        }
+
+        let latch = QuantityExpr::Ref {
+            qty: QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0)),
+            200,
+            "controller-scoped latch reads P0's 200 despite the mill"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &latch, PlayerId(1), ObjectId(1)),
+            60,
+            "controller-scoped latch reads P1's 60"
+        );
+
+        // V12 (library-vs-starting-deck GT): live library GT latched starting size.
+        // Reset P0's latch to the 40 boundary for the discriminating rows.
+        state.players[0].starting_deck_size = 40;
+        let library = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: None,
+                scope: CountScope::Controller,
+            },
+        };
+        let lhs = resolve_quantity(&state, &library, PlayerId(0), ObjectId(0));
+        let rhs = resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0));
+        assert_eq!((lhs, rhs), (50, 40));
+        assert!(
+            Comparator::GT.evaluate(lhs, rhs),
+            "library-vs-starting-deck gate: 50-card library > 40-card starting deck must hold"
+        );
+        while state.players[0].library.len() > 40 {
+            state.players[0].library.pop_back();
+        }
+        let lhs = resolve_quantity(&state, &library, PlayerId(0), ObjectId(0));
+        let rhs = resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0));
+        assert_eq!((lhs, rhs), (40, 40));
+        assert!(
+            !Comparator::GT.evaluate(lhs, rhs),
+            "library-vs-starting-deck gate: strict GT must fail at equality (40 == 40)"
         );
     }
 
@@ -14040,7 +14871,9 @@ mod tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert_eq!(
@@ -17680,7 +18513,7 @@ mod tests {
             "without a spell subject, SharedCardTypes must fail closed rather than use the source"
         );
         assert_eq!(
-            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell),
+            resolve_quantity_with_spell(&state, &expr, PlayerId(0), source, spell, PlayerId(0)),
             1,
             "the exact spell subject shares Creature with the source-linked exile population"
         );
@@ -17866,6 +18699,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -17916,6 +18750,7 @@ mod tests {
                             kind,
                             source: None,
                             min_sources: 1,
+                            relation: crate::types::ability::PlayerRelation::Opponent,
                         },
                     },
                 },
@@ -17956,6 +18791,7 @@ mod tests {
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         );
 
@@ -17968,11 +18804,42 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: None,
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         );
         let reser = serde_json::to_string(&any).unwrap();
         let back: PlayerFilter = serde_json::from_str(&reser).unwrap();
         assert_eq!(any, back);
+
+        // Absent `relation` → Opponent (NOT All): legacy card-data keeps the
+        // historical opponents-only gate. And `Opponent` is omitted when
+        // serializing, so existing cards stay byte-identical.
+        assert!(
+            !reser.contains("relation"),
+            "default Opponent must not serialize, got {reser}"
+        );
+
+        // Explicit `relation: All` (Steel Hellkite) round-trips with the field
+        // (`PlayerRelation` serializes internally-tagged: `{"type":"All"}`).
+        let all: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtDamage","relation":{"type":"All"}}"#)
+                .unwrap();
+        assert_eq!(
+            all,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+                source: None,
+                min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::All,
+            }
+        );
+        let reser_all = serde_json::to_string(&all).unwrap();
+        assert!(
+            reser_all.contains(r#""relation":{"type":"All"}"#),
+            "non-default All must serialize, got {reser_all}"
+        );
+        let back_all: PlayerFilter = serde_json::from_str(&reser_all).unwrap();
+        assert_eq!(all, back_all);
     }
 
     /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
@@ -17988,6 +18855,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -18036,6 +18904,7 @@ mod tests {
                     source: Some(Box::new(dragon_filter)),
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -18079,6 +18948,7 @@ mod tests {
                             source: Some(Box::new(source)),
 
                             min_sources: 1,
+                            relation: crate::types::ability::PlayerRelation::Opponent,
                         },
                     },
                 },
@@ -18168,7 +19038,7 @@ mod tests {
         );
     }
 
-    /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across
+    /// CR 119.3: `LifeLost { Opponent { Sum } }` sums life lost across
     /// opponents, excluding the controller. Three players' losses [2, 5, 1]
     /// with controller = 0 → sum of opponents 1+2 = 5+1 = 6. Locks in the
     /// pre-Π-3 `OpponentLifeLostThisTurn` semantic.
@@ -18182,10 +19052,11 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::Opponent {
                     aggregate: AggregateFunction::Sum,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         // Controller = player 0: opponents are 1 and 2 → 5 + 1 = 6.
@@ -18194,7 +19065,7 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 3);
     }
 
-    /// CR 119.3 + CR 603.4: `LifeLostThisTurn { AllPlayers { Max } }` returns
+    /// CR 119.3 + CR 603.4: `LifeLost { AllPlayers { Max } }` returns
     /// the maximum life-loss across all players (controller + opponents),
     /// not the sum. Three players' losses [2, 5, 1] → max = 5.
     /// Critical: 2 + 5 + 1 = 8 would falsely satisfy a >= 8 threshold,
@@ -18209,11 +19080,12 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         // Resolves identically regardless of which player is the controller —
@@ -18229,11 +19101,12 @@ mod tests {
     fn resolve_quantity_max_life_lost_this_turn_none_lost() {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::LifeLostThisTurn {
+            qty: QuantityRef::LifeLost {
                 player: PlayerScope::AllPlayers {
                     aggregate: AggregateFunction::Max,
                     exclude: None,
                 },
+                window: TurnWindow::ThisTurn,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
@@ -18567,7 +19440,7 @@ mod tests {
     /// CR 119.3 + CR 608.2h: discriminating coverage for the all-players
     /// life-change population — "for each player who lost life this turn"
     /// (Reaper's Scythe / Strefan, Maurer Progenitor) lowers to
-    /// `PlayerCount{PlayerAttribute{relation: All, attr: LifeLostThisTurn, GE 1}}`.
+    /// `PlayerCount{PlayerAttribute{relation: All, attr: LifeLost, GE 1}}`.
     /// 3-player board: the CONTROLLER lost 2 (must count — "each player" is not
     /// "each opponent"), opp1 lost 1 (counts), opp2 lost 0 (excluded). Expect 2.
     /// The opponent-only `OpponentLostLife` representation would answer 1 here,
@@ -18586,8 +19459,9 @@ mod tests {
             qty: QuantityRef::PlayerCount {
                 filter: PlayerFilter::PlayerAttribute {
                     relation: PlayerRelation::All,
-                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                    attr: Box::new(QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     }),
                     comparator: Comparator::GE,
                     value: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -18679,8 +19553,9 @@ mod tests {
             },
         };
 
-        let per_each = lost_life(QuantityRef::LifeLostThisTurn {
+        let per_each = lost_life(QuantityRef::LifeLost {
             player: PlayerScope::ScopedPlayer,
+            window: TurnWindow::ThisTurn,
         });
         assert_eq!(
             resolve_quantity(&state, &per_each, PlayerId(0), ObjectId(1)),
@@ -19464,6 +20339,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -19480,13 +20356,14 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
         );
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::creature()
@@ -19500,6 +20377,7 @@ mod tests {
                             },
                         ]),
                 )),
+                window: TurnWindow::ThisTurn,
             },
         };
 
@@ -19566,9 +20444,10 @@ mod tests {
             QuantityExpr::ClampMin {
                 inner: Box::new(QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::All,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     }),
                     offset: -1,
@@ -19592,6 +20471,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         }
@@ -19617,9 +20497,10 @@ mod tests {
         let controller_only = QuantityExpr::ClampMin {
             inner: Box::new(QuantityExpr::Offset {
                 inner: Box::new(QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 }),
                 offset: -1,
@@ -19633,16 +20514,17 @@ mod tests {
         );
     }
 
-    // --- SpellsCastThisTurn own-cast exclusion marker (CR 400.7 / CR 601.2i) ---
+    // --- SpellsCast own-cast exclusion marker (CR 400.7 / CR 601.2i) ---
 
     fn red_exclusion_expr() -> QuantityExpr {
         let red = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
             color: ManaColor::Red,
         }]));
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::with_own_cast_exclusion(Some(red))),
+                window: TurnWindow::ThisTurn,
             },
         }
     }
@@ -20202,6 +21084,91 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    /// CR 608.2h + CR 701.20b: a revealed card still in its library is read
+    /// live. A same-step snapshot from an earlier battlefield stay (an animated
+    /// land bounced to the top before Game Preserve's reveal) must not make it
+    /// count as a creature, while an unstamped member that left the
+    /// battlefield keeps its last-known characteristics.
+    #[test]
+    fn filtered_tracked_set_size_reads_library_members_live_and_departed_members_by_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Game Preserve".to_string(),
+            Zone::Battlefield,
+        );
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Revealed Land".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&revealed)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut stale_lki = state.objects[&revealed].snapshot_public_characteristics();
+        stale_lki.card_types = vec![CoreType::Land, CoreType::Creature];
+        state.lki_cache.insert(revealed, stale_lki);
+        let departed = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Departed Land".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&departed)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        let mut departed_lki = state.objects[&departed].snapshot_public_characteristics();
+        departed_lki.card_types = vec![CoreType::Land, CoreType::Creature];
+        state.lki_cache.insert(departed, departed_lki);
+
+        let creatures = |state: &GameState| {
+            let qty = QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::new(
+                        crate::types::ability::TypeFilter::Creature,
+                    ),
+                )),
+                caused_by: None,
+                destination: None,
+            };
+            resolve_ref(
+                state,
+                &qty,
+                PlayerId(0),
+                QuantityContext::new(source),
+                &[],
+                None,
+                None,
+                None,
+            )
+        };
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![revealed]);
+        assert_eq!(creatures(&state), 0, "the revealed land is read live");
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![revealed, departed]);
+        assert_eq!(
+            creatures(&state),
+            1,
+            "the departed member keeps its last-known creature type"
+        );
     }
 
     #[test]
@@ -21177,6 +22144,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -21199,6 +22167,2138 @@ mod tests {
                 source,
             ),
             5,
+        );
+    }
+
+    /// M4: a FILTERED `TriggeringBatch` tracked source has no agreed-upon
+    /// reading — the batch is an event population (CR 603.10a) while `filter`
+    /// speaks of members — so no aggregate kind may consume the leaf: it
+    /// contributes nothing. The hostile filter below is SATISFIED by the
+    /// batch member (it is a creature), which distinguishes fail-closed (0)
+    /// from both wrong readings — apply-the-filter (1) and
+    /// ignore-the-filter (1). The nested-union arm pins that a well-formed
+    /// sibling leaf still contributes while the poisoned leaf does not, and
+    /// the ChainSet control pins that the refusal is scoped to the batch:
+    /// legitimate filtered chain sets (Occult Epiphany) still consume.
+    #[test]
+    fn filtered_triggering_batch_leaf_contributes_nothing_to_any_aggregate_kind() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(523),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let batch_member = create_object(
+            &mut state,
+            CardId(524),
+            PlayerId(0),
+            "Batch member".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&batch_member).unwrap();
+            object.card_types.core_types = vec![CoreType::Creature];
+            object.card_types.subtypes.push("Goblin".to_string());
+            object.color = vec![ManaColor::Red];
+        }
+        let exile_member = create_object(
+            &mut state,
+            CardId(525),
+            PlayerId(0),
+            "Exile member".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&exile_member)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Enchantment];
+        state.current_trigger_events = vec![GameEvent::AttackersDeclared {
+            attacker_ids: vec![batch_member],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: Vec::new(),
+        }];
+        let chain_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state
+            .tracked_object_sets
+            .insert(chain_id, vec![batch_member]);
+
+        // Hostile but SATISFIED: the batch member is a red Goblin creature.
+        let satisfied_creature = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        let poisoned = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::TriggeringBatch,
+            caused_by: None,
+            filter: Some(satisfied_creature()),
+        };
+        let resolve = |qty: QuantityRef| {
+            resolve_quantity(&state, &QuantityExpr::Ref { qty }, PlayerId(0), source)
+        };
+        assert_eq!(
+            resolve(QuantityRef::DistinctCardTypes {
+                source: poisoned.clone()
+            }),
+            0,
+            "DistinctCardTypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::SharedCardTypes {
+                source: poisoned.clone()
+            }),
+            0,
+            "SharedCardTypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::DistinctSubtypes {
+                source: poisoned.clone(),
+                exclude: SubtypeExclusion::None,
+                restrict: None,
+            }),
+            0,
+            "DistinctSubtypes must not consume a filtered batch leaf"
+        );
+        assert_eq!(
+            resolve(QuantityRef::DistinctColorsAmong {
+                source: poisoned.clone()
+            }),
+            0,
+            "DistinctColorsAmong must not consume a filtered batch leaf"
+        );
+        let union = QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::Zone {
+                    zone: ZoneRef::Exile,
+                    scope: CountScope::Controller,
+                },
+                poisoned.clone(),
+            ])
+            .expect("two-member union"),
+        };
+        assert_eq!(
+            resolve(union),
+            1,
+            "the well-formed exile leaf contributes Enchantment while the poisoned batch leaf contributes nothing"
+        );
+        let chained = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(satisfied_creature()),
+        };
+        assert_eq!(
+            resolve(QuantityRef::DistinctCardTypes { source: chained }),
+            1,
+            "the refusal is scoped to the batch: a satisfied filtered ChainSet still consumes"
+        );
+    }
+
+    /// M1r2 staging: Oak was a pumped 5-power creature on the battlefield
+    /// (incarnation 1, departure recorded), was bounced to hand
+    /// (incarnation 2, hand exits record nothing), then discarded to the
+    /// graveyard (incarnation 3, live power back to printed 2). The chain
+    /// tracked set holds Oak as a Discarded member bound to the
+    /// hand-departure origin — the shape production stamping produces.
+    fn stage_pumped_bounced_discarded_member(state: &mut GameState) -> (ObjectId, ObjectId) {
+        use crate::types::game_state::{LKISnapshot, TrackedMemberOrigin};
+
+        let source = create_object(
+            state,
+            CardId(528),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let oak = create_object(
+            state,
+            CardId(529),
+            PlayerId(0),
+            "Oak".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&oak).unwrap();
+            obj.power = Some(2);
+            obj.toughness = Some(3);
+            obj.incarnation = 3;
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let pumped = LKISnapshot {
+            name: "Oak".to_string(),
+            token_image_ref: None,
+            power: Some(5),
+            toughness: Some(6),
+            base_power: Some(2),
+            base_toughness: Some(3),
+            mana_value: 3,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            card_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            counters: Default::default(),
+            chosen_attributes: vec![],
+            tapped: false,
+            is_suspected: false,
+            was_prepared: false,
+            attachments: Vec::new(),
+            intensity: 0,
+        };
+        state
+            .lki_by_incarnation
+            .entry(oak)
+            .or_default()
+            .insert(1, pumped.clone());
+        state.lki_cache.insert(oak, pumped);
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![oak]);
+        state.tracked_set_member_causes.insert(
+            set_id,
+            [(oak, ThisWayCause::Discarded)].into_iter().collect(),
+        );
+        state.tracked_set_member_origins.insert(
+            set_id,
+            [(
+                oak,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Hand,
+                    departure_incarnation: 2,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        (source, oak)
+    }
+
+    /// M1r2: a discarded member reads its producing hand-departure origin —
+    /// live printed power — not the greatest older battlefield departure.
+    /// CR 400.7: the bounce plus discard made Oak a new object twice over;
+    /// the old pump belongs to neither. Fails while the reader selects any
+    /// latest older departure by storage id.
+    #[test]
+    fn discarded_member_reads_producing_origin_not_older_battlefield_pump() {
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &aggregate, PlayerId(0), source),
+            2,
+            "the discarded member must read printed power 2, not the pumped battlefield departure 5"
+        );
+    }
+
+    /// M1r2, filter half: member narrowing over the same discarded member
+    /// judges the producing origin too — live power 2 fails a power-3 floor
+    /// the stale pumped snapshot would satisfy.
+    #[test]
+    fn discarded_member_filter_judges_producing_origin_not_older_pump() {
+        use crate::types::ability::{PtStat, PtValueScope};
+
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let power_floor =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    scope: PtValueScope::Current,
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                },
+            ]));
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(power_floor),
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&state, &aggregate, PlayerId(0), source),
+            0,
+            "live power 2 fails the power-3 floor; the stale pumped 5 must not admit the member"
+        );
+    }
+
+    /// B2 — STATE EQUIVALENCE (origins). Two states identical except one
+    /// member's departure origin read different powers (5 vs 2) through the
+    /// same ChainSet aggregate, so they must compare UNEQUAL — origin-blind
+    /// equality would certify loop-equivalent states that aggregate
+    /// differently. Fails while `tracked_set_member_origins` is absent from
+    /// the equality chain.
+    #[test]
+    fn loop_equality_distinguishes_tracked_member_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        let mut a = GameState::new_two_player(42);
+        let (source_a, _) = stage_pumped_bounced_discarded_member(&mut a);
+        let mut b = GameState::new_two_player(42);
+        let (source_b, _) = stage_pumped_bounced_discarded_member(&mut b);
+        // A re-pins Oak's origin to the pumped battlefield departure
+        // (snapshot power 5); B keeps the staged hand exit (live power 2).
+        // The origins map is the ONLY field that differs.
+        let set = TrackedSetId(a.next_tracked_set_id - 1);
+        let oak = a.tracked_object_sets.get(&set).expect("staged set")[0];
+        a.tracked_set_member_origins.entry(set).or_default().insert(
+            oak,
+            TrackedMemberOrigin {
+                departed_from: Zone::Battlefield,
+                departure_incarnation: 1,
+            },
+        );
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity(&a, &power_sum(), PlayerId(0), source_a),
+            5,
+            "the battlefield origin must read the pumped snapshot 5"
+        );
+        assert_eq!(
+            resolve_quantity(&b, &power_sum(), PlayerId(0), source_b),
+            2,
+            "the hand-exit origin must read live power 2"
+        );
+        assert_ne!(a, b, "raw equality must distinguish the origins");
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "loop equality must distinguish the origins"
+        );
+    }
+
+    /// B2 — control: identical states with identical origins stay equal
+    /// through normalization. Guards the equality conjunct against
+    /// over-distinguishing.
+    #[test]
+    fn loop_equality_keeps_identical_origins_equal() {
+        use crate::types::game_state::loop_states_equal;
+
+        let mut a = GameState::new_two_player(42);
+        stage_pumped_bounced_discarded_member(&mut a);
+        let b = a.clone();
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "identical states must stay loop-equal"
+        );
+    }
+
+    /// B2 — RENUMBERED origins: two positions minted at different times with
+    /// the same structure (a pumped battlefield departure under incarnation 7
+    /// vs 9) normalize to EQUAL states that read the same aggregate. The
+    /// resolved set's origin-named snapshots must survive retention and both
+    /// the snapshots and the origins must canonicalize to one rank. Fails
+    /// after the equality conjunct until retention plus canonicalization
+    /// extend to origins.
+    #[test]
+    fn loop_equality_canonicalizes_renumbered_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        fn staged_at(incarnation: u64) -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            // Replace the staged history with a single pumped departure under
+            // the requested incarnation, and pin the origin to it.
+            state.lki_by_incarnation.clear();
+            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+            assert_eq!(pumped.power, Some(5), "staged pump shape");
+            state
+                .lki_by_incarnation
+                .entry(oak)
+                .or_default()
+                .insert(incarnation, pumped);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    oak,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            (state, source)
+        }
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = staged_at(7);
+        let (b, source_b) = staged_at(9);
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&na, &nb),
+            "renumbered origins must canonicalize to equal states"
+        );
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            5,
+            "the retained, remapped snapshot must still read 5 on A"
+        );
+        assert_eq!(
+            resolve_quantity(&nb, &power_sum(), PlayerId(0), source_b),
+            5,
+            "the retained, remapped snapshot must still read 5 on B"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a superseded tracked-set origin normalizes to what a read through it
+    /// selected while its set was resolved, whether the newer set re-stamps its member after a
+    /// move, in place, or not at all, and renormalizing changes nothing.
+    #[test]
+    fn loop_normalization_reads_superseded_origins_as_while_resolved() {
+        use crate::game::combat::BlockHistoryPair;
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+        use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Record {
+            Nothing,
+            SameStep,
+            AcrossStep,
+        }
+        fn stamp(
+            state: &mut GameState,
+            set: u64,
+            member: ObjectId,
+            incarnation: u64,
+            zone: Zone,
+            record: Record,
+        ) {
+            let set = TrackedSetId(set);
+            state.tracked_object_sets.insert(set, vec![member]);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: zone,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            if record != Record::Nothing {
+                let mut departed = state.objects[&member].clone();
+                departed.power = Some(5);
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(incarnation, departed.snapshot_public_characteristics());
+            }
+        }
+        // Prior frame: set 2 = {M@`stale`} departing `zone` is the latest set; `live` is M's
+        // incarnation (None: M no longer exists) and `carrier` a block-history incarnation of M.
+        // Current frame: the prior plus set 4, re-stamping M's departure from its prior live
+        // incarnation and leaving M at `after`, or naming N instead (`after` None).
+        let frames = |stale: u64,
+                      live: Option<u64>,
+                      carrier: Option<u64>,
+                      after: Option<u64>,
+                      zone: Zone,
+                      record: Record| {
+            let mut prior = GameState::new_two_player(42);
+            let mut create = |name: &str| {
+                crate::game::zones::create_object(
+                    &mut prior,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Graveyard,
+                )
+            };
+            let (m, n) = (create("M"), create("N"));
+            prior.objects.get_mut(&n).unwrap().incarnation = 6;
+            match live {
+                Some(incarnation) => prior.objects.get_mut(&m).unwrap().incarnation = incarnation,
+                None => {
+                    prior.objects.remove(&m);
+                }
+            }
+            if let Some(incarnation) = carrier {
+                prior
+                    .creature_blocked_attackers_this_turn
+                    .insert(BlockHistoryPair {
+                        blocker: ObjectIncarnationRef::of(m, incarnation),
+                        attacker: ObjectIncarnationRef::of(ObjectId(99), 0),
+                    });
+            }
+            stamp(&mut prior, 2, m, stale, zone, record);
+            let mut current = prior.clone();
+            if let Some(after) = after {
+                if record == Record::AcrossStep {
+                    current.lki_by_incarnation.clear();
+                }
+                stamp(&mut current, 4, m, live.unwrap_or(3), zone, record);
+                if let Some(object) = current.objects.get_mut(&m) {
+                    object.incarnation = after;
+                }
+            } else {
+                stamp(&mut current, 4, n, 5, Zone::Hand, Record::Nothing);
+            }
+            let origin = move |state: &GameState| {
+                state.tracked_set_member_origins[&TrackedSetId(2)][&m].departure_incarnation
+            };
+            (prior, current, origin, m, n)
+        };
+        let power_sum = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+
+        let mut failures = Vec::new();
+        for (case, live, carrier, after, zone, record) in [
+            (
+                "live, re-stamped",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, re-stamped in place",
+                Some(3),
+                None,
+                Some(3),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, not re-stamped",
+                Some(3),
+                None,
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "not live, re-stamped",
+                None,
+                None,
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "not live, not re-stamped",
+                None,
+                None,
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, newer carrier",
+                Some(4),
+                Some(3),
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, newer carrier, re-stamped",
+                Some(4),
+                Some(3),
+                Some(5),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, carrier at the stamp, re-stamped",
+                Some(3),
+                Some(2),
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "snapshot, re-stamped in the same step",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Battlefield,
+                Record::SameStep,
+            ),
+            (
+                "snapshot, re-stamped across a step",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Battlefield,
+                Record::AcrossStep,
+            ),
+        ] {
+            let (prior, current, origin, m, n) = frames(2, live, carrier, after, zone, record);
+            let normalized = [prior.normalize_for_loop(), current.normalize_for_loop()];
+            if origin(&normalized[0]) != origin(&normalized[1]) {
+                failures.push(format!("{case}: prior and current origins differ"));
+            }
+            for (frame, once) in ["prior", "current"].into_iter().zip(&normalized) {
+                let twice = once.normalize_for_loop();
+                if twice.tracked_set_member_origins != once.tracked_set_member_origins
+                    || twice.lki_by_incarnation != once.lki_by_incarnation
+                {
+                    failures.push(format!("{case} / {frame}: renormalizing changed it"));
+                }
+                let names_snapshot = once
+                    .lki_by_incarnation
+                    .get(&m)
+                    .is_some_and(|history| history.contains_key(&origin(once)));
+                match record {
+                    Record::Nothing if origin(once) != 0 => {
+                        failures.push(format!("{case} / {frame}: origin is not unanchored"));
+                    }
+                    Record::SameStep | Record::AcrossStep if !names_snapshot => {
+                        failures.push(format!("{case} / {frame}: origin names no snapshot"));
+                    }
+                    Record::Nothing | Record::SameStep | Record::AcrossStep => {}
+                }
+            }
+            if record != Record::Nothing
+                && resolve_quantity(&normalized[0], &power_sum, PlayerId(0), n) != 5
+            {
+                failures.push(format!(
+                    "{case}: the normalized prior's read lost the snapshot"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+
+        // CR 400.7: a later exile departure records under the live incarnation, so an in-place
+        // exile origin stays distinct from a stale one; a hand origin records nothing either way.
+        let stale_vs_live = |zone: Zone| {
+            let (_, stale, origin, ..) = frames(2, Some(3), None, None, zone, Record::Nothing);
+            let (_, live, ..) = frames(3, Some(3), None, None, zone, Record::Nothing);
+            let (stale, live) = (stale.normalize_for_loop(), live.normalize_for_loop());
+            (
+                origin(&stale) == origin(&live),
+                loop_states_equal(&stale, &live),
+            )
+        };
+        assert_eq!(
+            stale_vs_live(Zone::Exile),
+            (false, false),
+            "an exile origin naming the live incarnation must stay distinct from a stale one"
+        );
+        assert_eq!(
+            stale_vs_live(Zone::Hand),
+            (true, true),
+            "a hand origin naming the live incarnation must read like a stale one"
+        );
+    }
+
+    /// B2 — STALE-ORIGIN totality: an origin naming an incarnation with no
+    /// snapshot anywhere (legacy save, pruned history) must not panic
+    /// canonicalization, and reads fall back to legacy behavior (live 2
+    /// here), since no snapshot sits at that rank.
+    #[test]
+    fn loop_normalization_tolerates_stale_departure_origins() {
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+
+        fn staged_stale() -> (GameState, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            // A decoy snapshot under incarnation 7 plus an origin naming the
+            // record-less incarnation 99.
+            state.lki_by_incarnation.clear();
+            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+            state
+                .lki_by_incarnation
+                .entry(oak)
+                .or_default()
+                .insert(7, pumped);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    oak,
+                    TrackedMemberOrigin {
+                        departed_from: Zone::Battlefield,
+                        departure_incarnation: 99,
+                    },
+                );
+            (state, source)
+        }
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = staged_stale();
+        let (b, _) = staged_stale();
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert!(
+            loop_states_equal(&na, &nb),
+            "identical stale states must stay loop-equal"
+        );
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            2,
+            "the record-less origin must fall back to legacy live power 2"
+        );
+    }
+
+    fn stage_carrier_kept_snapshot_with_origin(origin_incarnation: u64) -> (GameState, ObjectId) {
+        use crate::types::game_state::TrackedMemberOrigin;
+
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let set = TrackedSetId(state.next_tracked_set_id - 1);
+        let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+        state.lki_by_incarnation.clear();
+        let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+        assert_eq!(pumped.power, Some(5), "staged pump shape");
+        state
+            .lki_by_incarnation
+            .entry(oak)
+            .or_default()
+            .insert(7, pumped);
+        // A ZoneChanged carrier still names incarnation 7, so the
+        // snapshot survives pruning in BOTH states even when no origin
+        // names it — the retained record the missing origin must not
+        // alias. Fixed ids keep the two states symmetric.
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            oak,
+            Some(Zone::Exile),
+            Zone::Battlefield,
+        );
+        record.entered_incarnation = Some(7);
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(5),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(crate::types::events::GameEvent::ZoneChanged {
+                    object_id: oak,
+                    from: Some(Zone::Exile),
+                    to: Zone::Battlefield,
+                    record: Box::new(record),
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+            .tracked_set_member_origins
+            .entry(set)
+            .or_default()
+            .insert(
+                oak,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: origin_incarnation,
+                },
+            );
+        (state, source)
+    }
+
+    /// B2 — MISSING-BEFORE-RETAINED aliasing: two otherwise identical states
+    /// each hold a retained power-5 snapshot at incarnation 7 — kept through
+    /// pruning by a `ZoneChanged` carrier on the stack that still names 7 —
+    /// with live power 2, but A's origin names the missing incarnation 1
+    /// while B's names 7. CR 608.2h: A's aggregate reads 2 (legacy fallback),
+    /// B's reads 5 (snapshot) — states whose reads differ must NOT compare
+    /// equal after normalization, and normalization must preserve each side's
+    /// read. A would-be-rank remap aliases A's origin onto the retained rank
+    /// 1, so A reads 5 and the normalized states coincide.
+    #[test]
+    fn loop_normalization_keeps_missing_before_retained_distinct() {
+        use crate::types::game_state::loop_states_equal;
+
+        let power_sum = || QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+        let (a, source_a) = stage_carrier_kept_snapshot_with_origin(1);
+        let (b, source_b) = stage_carrier_kept_snapshot_with_origin(7);
+        assert_eq!(
+            resolve_quantity(&a, &power_sum(), PlayerId(0), source_a),
+            2,
+            "reach-guard: the missing origin reads legacy live power 2"
+        );
+        assert_eq!(
+            resolve_quantity(&b, &power_sum(), PlayerId(0), source_b),
+            5,
+            "reach-guard: the retained origin reads snapshot power 5"
+        );
+        let na = a.normalize_for_loop();
+        let nb = b.normalize_for_loop();
+        assert_eq!(
+            resolve_quantity(&na, &power_sum(), PlayerId(0), source_a),
+            2,
+            "normalization must preserve the missing origin's legacy read"
+        );
+        assert_eq!(
+            resolve_quantity(&nb, &power_sum(), PlayerId(0), source_b),
+            5,
+            "normalization must preserve the retained origin's snapshot read"
+        );
+        assert!(
+            !loop_states_equal(&na, &nb),
+            "states whose tracked reads differ (2 vs 5) must not compare loop-equal"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a superseded origin naming a missing incarnation between a
+    /// carrier-kept snapshot and the live object takes a rank no snapshot holds, so it stays
+    /// distinct from an origin naming the snapshot.
+    #[test]
+    fn loop_normalization_keeps_missing_above_retained_distinct() {
+        use crate::types::game_state::loop_states_equal;
+
+        let normalized = |origin: u64| {
+            let (mut state, source) = stage_carrier_kept_snapshot_with_origin(origin);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            state.objects.get_mut(&oak).unwrap().incarnation = 9;
+            let newer = TrackedSetId(state.next_tracked_set_id);
+            state.next_tracked_set_id += 1;
+            state.tracked_object_sets.insert(newer, vec![source]);
+            let state = state.normalize_for_loop();
+            let rank = state.tracked_set_member_origins[&set][&oak].departure_incarnation;
+            let names_snapshot = state.lki_by_incarnation[&oak].contains_key(&rank);
+            (state, names_snapshot)
+        };
+        let (missing, missing_names_snapshot) = normalized(8);
+        let (retained, retained_names_snapshot) = normalized(7);
+        assert!(
+            retained_names_snapshot,
+            "reach-guard: the origin naming the snapshot keeps naming it"
+        );
+        assert!(
+            !missing_names_snapshot,
+            "the missing origin must not take the snapshot's rank"
+        );
+        assert!(
+            loop_states_equal(&missing, &normalized(8).0),
+            "reach-guard: identical states stay loop-equal"
+        );
+        assert!(
+            !loop_states_equal(&missing, &retained),
+            "a missing origin must stay distinct from one naming a retained snapshot"
+        );
+    }
+
+    /// M2r2: live slot selection keeps repeated-id pins positional — the
+    /// same repeated-identifier/differing-pin shape as the parked control,
+    /// read WITHOUT suspension. Slot 0 selected the live return (power 2),
+    /// slot 1 the pumped departure (power 5); a first-match pin lookup
+    /// reads slot 0's live pin for slot 1 (2), the positional read 5.
+    /// (Every-target sums dedup by member, so only slot selection can
+    /// distinguish the two occurrences live.)
+    #[test]
+    fn live_slot_selection_reads_the_selected_occurrence_pin() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        // Force the incarnation break through a real exit and return: the
+        // departure records pumped 5, the live return resets to base 2.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        // The test-helper move does not run the production battlefield-exit
+        // revert; model it explicitly so the live return reads base 2 while
+        // the recorded departure keeps pumped 5.
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "slot 1 reads its own pumped-departure pin, not slot 0's live pin"
+        );
+    }
+
+    /// F1: parked slot selection admits the SAME legal-then-departed
+    /// occurrence the live path reads — the repeated-id twin of
+    /// `live_slot_selection_reads_the_selected_occurrence_pin`, driven
+    /// through the production capture authority and the production die
+    /// resume. Slot 1's stale pin reads its pumped-departure power 5
+    /// (natural 10 + 5 = 15); a suspension that dropped the stale pin
+    /// would emit 10, so an optional die choice must not change the
+    /// aggregate's value.
+    #[test]
+    fn parked_slot_selection_reads_the_selected_occurrence_pin() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        // Same incarnation break as the live twin: the departure records
+        // pumped 5, the live return resets to base 2.
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        // Production capture: the same calls `resolve` makes before a
+        // CR 616.1 suspension drops the ability.
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_pins,
+            vec![Some(current), Some(stale)],
+            "reach guard: capture must carry each occurrence's own pin"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let chain_root_targets = ability.context.chain_root_targets.clone();
+        let chain_root_target_pins = chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                    )
+                    .unwrap(),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: source,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets,
+            trigger_context: None,
+            illegal_target_slots: illegal,
+            chain_root_target_pins,
+            declared_capture: Some((&captured).into()),
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "slot 1 reads its own pumped-departure pin (10 + 5); dropping the stale pin emits 10"
+        );
+    }
+
+    /// F1r2: live slot selection still honors the SEPARATE keyed
+    /// delayed-referent guard — slot 1's occurrence departed with pumped
+    /// power 5, but its keyed pin went stale with it, so the keyed
+    /// restriction excludes it and the aggregate reads 0. The
+    /// no-keyed-pin twin reads 5 through fail-open admission.
+    #[test]
+    fn live_slot_selection_excludes_stale_keyed_delayed_referent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        // Delayed-trigger creation stamps the keyed referent list through
+        // this recursive setter; the stale keyed pin mirrors the departure.
+        ability.set_target_incarnations_recursive(vec![stale]);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                )
+                .unwrap(),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            0,
+            "the stale keyed guard excludes slot 1 despite its departure value"
+        );
+    }
+
+    /// F1r2: parked slot selection honors the SAME keyed delayed-referent
+    /// guard — the repeated-id twin captured through the production
+    /// authority and resumed: slot 1's stale keyed pin excludes it, so
+    /// the modifier reads 0 (natural 10 stays 10). Without the carried
+    /// guard the positional departure reads 5 and emits 15.
+    #[test]
+    fn parked_slot_selection_excludes_stale_keyed_delayed_referent() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(530),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(531),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute), TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let stale = ability.target_pin_at(0).expect("pin announced");
+        let mut zone_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Exile, &mut zone_events);
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Battlefield, &mut zone_events);
+        let current = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state.objects.get(&brute).expect("brute returned"),
+        );
+        assert_ne!(stale, current, "reach guard: divergent pins required");
+        state.objects.get_mut(&brute).unwrap().power = Some(2);
+        ability.replace_target_occurrences(vec![
+            (TargetRef::Object(brute), Some(current)),
+            (TargetRef::Object(brute), Some(stale)),
+        ]);
+        ability.set_target_incarnations_recursive(vec![stale]);
+        // Production capture: the same calls `resolve` makes before a
+        // CR 616.1 suspension drops the ability.
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.keyed_target_incarnations,
+            vec![stale],
+            "reach guard: capture must carry the keyed guard"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let chain_root_targets = ability.context.chain_root_targets.clone();
+        let chain_root_target_pins = chain_root_targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => ability.occurrence_pin_for(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TargetedObjects { slot: Some(1) },
+                    )
+                    .unwrap(),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: source,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets,
+            trigger_context: None,
+            illegal_target_slots: illegal,
+            chain_root_target_pins,
+            declared_capture: Some((&captured).into()),
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![10],
+            "the stale keyed guard excludes slot 1 (10 + 0); admitting it emits 15"
+        );
+    }
+
+    /// R1 fixture: a live unstamped 5-power brute on the battlefield,
+    /// published to the chain tracked set and selected as the ability's
+    /// target with announced pins. The keyed delayed-referent pin is the
+    /// announced pin — current, or stale after an incarnation bump when
+    /// `stale_keyed`.
+    fn r1_member_fixture(stale_keyed: bool) -> (GameState, ResolvedAbility) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(540),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(541),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&brute).unwrap().power = Some(5);
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        let pin = ability.target_pin_at(0).expect("pin announced");
+        if stale_keyed {
+            state.objects.get_mut(&brute).unwrap().bump_incarnation();
+        }
+        crate::game::effects::publish_tracked_set(&mut state, vec![brute]);
+        ability.set_target_incarnations_recursive(vec![pin]);
+        (state, ability)
+    }
+
+    /// R1: live member matching honors a `ParentTarget` member filter (and
+    /// its slotted twin) against current keyed pins — the tracked brute,
+    /// also the ability's target, contributes its power 5.
+    #[test]
+    fn live_member_filter_matches_selected_target_with_current_keyed_pin() {
+        let (state, ability) = r1_member_fixture(false);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let aggregate = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter.clone()),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &aggregate, &ability),
+                5,
+                "live member filter {filter:?} must match the selected target"
+            );
+        }
+    }
+
+    /// R1: a parked member filter matches the same selected target after a
+    /// production capture and resume — the current keyed entry carries the
+    /// authority the live path reads (natural 10 + 5 = 15 per filter).
+    #[test]
+    fn parked_member_filter_matches_selected_target_with_current_keyed_pin() {
+        let (mut state, ability) = r1_member_fixture(false);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert!(
+            !captured.keyed_target_incarnations.is_empty(),
+            "reach guard: the keyed entry must travel or both reads are vacuous"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let modifier = crate::types::ability::DieRollModifier::Add {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                                caused_by: None,
+                                filter: Some(filter.clone()),
+                            },
+                        )
+                        .expect("filtered ChainSet is admitted"),
+                    ),
+                },
+            };
+            let pending = crate::types::resolution::PendingDieRoll {
+                source_id: ability.source_id,
+                controller: PlayerId(0),
+                roller: PlayerId(0),
+                quantity_controller: None,
+                scoped_player: None,
+                targets: ability.targets.clone(),
+                sides: 20,
+                results: vec![10],
+                ignore_rules: vec![],
+                results_table: vec![],
+                modifier: Some(modifier),
+                die_result: None,
+                next_index: 0,
+                running_total: 0,
+                rolled_any: false,
+                forced_ignored: vec![],
+                chain_root_targets: ability.context.chain_root_targets.clone(),
+                trigger_context: None,
+                illegal_target_slots: illegal.clone(),
+                chain_root_target_pins: vec![],
+                declared_capture: Some((&captured).into()),
+                local_target_pins: captured.local_pins.clone(),
+                keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+                declared_player: Some(captured.declared_player),
+            };
+            let mut events = Vec::new();
+            crate::game::effects::roll_die::resume_after_ignore(
+                &mut state,
+                pending,
+                Vec::new(),
+                &mut events,
+                None,
+            )
+            .expect("resuming the parked roll must not error");
+            let rolls: Vec<u8> = events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::types::events::GameEvent::DieRolled {
+                        result: Some(total),
+                        ..
+                    } => Some(*total),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rolls,
+                vec![15],
+                "parked member filter {filter:?} must match the selected target (10 + 5)"
+            );
+        }
+    }
+
+    /// R1: live member matching excludes the selected target once its keyed
+    /// pin goes stale — the same guard the parked path must apply.
+    #[test]
+    fn live_member_filter_excludes_selected_target_with_stale_keyed_pin() {
+        let (state, ability) = r1_member_fixture(true);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let aggregate = QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter.clone()),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            };
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &aggregate, &ability),
+                0,
+                "live member filter {filter:?} must exclude the stale-keyed target"
+            );
+        }
+    }
+
+    /// R1: a parked member filter excludes the selected target whose keyed
+    /// pin went stale — the carried guard must restrict, not merely admit
+    /// (natural 10 stays 10 per filter).
+    #[test]
+    fn parked_member_filter_excludes_selected_target_with_stale_keyed_pin() {
+        let (mut state, ability) = r1_member_fixture(true);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        for filter in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 0 },
+        ] {
+            let modifier = crate::types::ability::DieRollModifier::Add {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::PropertyAggregate(
+                        crate::types::ability::PropertyAggregate::new(
+                            AggregateFunction::Sum,
+                            ObjectProperty::Power,
+                            CardTypeSetSource::TrackedSet {
+                                set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                                caused_by: None,
+                                filter: Some(filter.clone()),
+                            },
+                        )
+                        .expect("filtered ChainSet is admitted"),
+                    ),
+                },
+            };
+            let pending = crate::types::resolution::PendingDieRoll {
+                source_id: ability.source_id,
+                controller: PlayerId(0),
+                roller: PlayerId(0),
+                quantity_controller: None,
+                scoped_player: None,
+                targets: ability.targets.clone(),
+                sides: 20,
+                results: vec![10],
+                ignore_rules: vec![],
+                results_table: vec![],
+                modifier: Some(modifier),
+                die_result: None,
+                next_index: 0,
+                running_total: 0,
+                rolled_any: false,
+                forced_ignored: vec![],
+                chain_root_targets: ability.context.chain_root_targets.clone(),
+                trigger_context: None,
+                illegal_target_slots: illegal.clone(),
+                chain_root_target_pins: vec![],
+                declared_capture: Some((&captured).into()),
+                local_target_pins: captured.local_pins.clone(),
+                keyed_target_incarnations: captured.keyed_target_incarnations.clone(),
+                declared_player: Some(captured.declared_player),
+            };
+            let mut events = Vec::new();
+            crate::game::effects::roll_die::resume_after_ignore(
+                &mut state,
+                pending,
+                Vec::new(),
+                &mut events,
+                None,
+            )
+            .expect("resuming the parked roll must not error");
+            let rolls: Vec<u8> = events
+                .iter()
+                .filter_map(|event| match event {
+                    crate::types::events::GameEvent::DieRolled {
+                        result: Some(total),
+                        ..
+                    } => Some(*total),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                rolls,
+                vec![10],
+                "parked member filter {filter:?} must exclude the stale-keyed target (10 + 0)"
+            );
+        }
+    }
+
+    /// R2 fixture: two live unstamped battlefield permanents published to
+    /// the chain tracked set — a 5-power Creature brute (also the ability's
+    /// selected target) and a 7-power Artifact bauble. A CardType
+    /// `SharesQuality` member filter against the selected target admits
+    /// the brute and excludes the bauble, so a power sum reads 5 with the
+    /// non-sharing control embedded. No keyed pins: the live consumer
+    /// reads the first selected target raw, and the parked twin must match
+    /// it exactly.
+    fn r2_shares_fixture() -> (GameState, ResolvedAbility, TargetFilter) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(550),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(551),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        let bauble = create_object(
+            &mut state,
+            CardId(552),
+            PlayerId(0),
+            "Bauble".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let brute_obj = state.objects.get_mut(&brute).unwrap();
+            brute_obj.power = Some(5);
+            brute_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        {
+            let bauble_obj = state.objects.get_mut(&bauble).unwrap();
+            bauble_obj.power = Some(7);
+            bauble_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Artifact];
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        crate::game::effects::publish_tracked_set(&mut state, vec![brute, bauble]);
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        (state, ability, filter)
+    }
+
+    /// R2: live member matching through a Typed `SharesQuality` filter
+    /// reads the first selected target — the sharing brute contributes
+    /// its power 5, the non-sharing bauble nothing.
+    #[test]
+    fn live_shares_member_filter_reads_the_selected_target() {
+        let (state, ability, filter) = r2_shares_fixture();
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "the sharing member contributes 5, the bauble nothing"
+        );
+    }
+
+    /// R2: a parked Typed `SharesQuality` member filter reads the same
+    /// first selected target after a production capture and resume —
+    /// natural 10 + 5 = 15. Dropping the parked authority at the Typed
+    /// property boundary excludes both members and emits 10.
+    #[test]
+    fn parked_shares_member_filter_reads_the_selected_target() {
+        let (mut state, ability, filter) = r2_shares_fixture();
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_targets.len(),
+            1,
+            "reach guard: the selected target must travel"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: ability.source_id,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: ability.context.chain_root_targets.clone(),
+            trigger_context: None,
+            illegal_target_slots: illegal,
+            chain_root_target_pins: vec![],
+            declared_capture: Some((&captured).into()),
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "the sharing member contributes 5 (10 + 5); dropping the parked authority emits 10"
+        );
+    }
+
+    /// R2b fixture: the R2 staged set — a 5-power Creature brute (also the
+    /// ability's selected target) and a 7-power Artifact bauble — except the
+    /// brute REALLY departs: battlefield→graveyard through the production
+    /// zone pipeline, then publication with a per-member `Destroyed` cause,
+    /// so the member carries a verified producing origin and reads its
+    /// departure snapshot through the record door. The live bauble takes no
+    /// cause and keeps the legacy live read. A CardType `SharesQuality`
+    /// member filter against the selected target must admit the departed
+    /// brute (its exit-time Creature type) and exclude the bauble, so a
+    /// power sum reads 5 with the non-sharing control embedded.
+    fn r2b_departed_shares_fixture() -> (GameState, ResolvedAbility, TargetFilter) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(550),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(551),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        let bauble = create_object(
+            &mut state,
+            CardId(552),
+            PlayerId(0),
+            "Bauble".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let brute_obj = state.objects.get_mut(&brute).unwrap();
+            brute_obj.power = Some(5);
+            brute_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        {
+            let bauble_obj = state.objects.get_mut(&bauble).unwrap();
+            bauble_obj.power = Some(7);
+            bauble_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Artifact];
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        // Real departure BEFORE publication: the zone pipeline captures the
+        // exit LKI and journals the transition, so publication stamps the
+        // verified producing origin instead of a hand-built one.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Graveyard, &mut events);
+        crate::game::effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![
+                (brute, Some(crate::types::ability::ThisWayCause::Destroyed)),
+                (bauble, None),
+            ],
+        );
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        (state, ability, filter)
+    }
+
+    /// R2b: reach guard shared by the departed-member tests — the brute must
+    /// read through the Snapshot arm (verified origin + captured exit LKI),
+    /// never legacy-live, or the record door under test is bypassed.
+    fn assert_brute_reads_departure_snapshot(state: &GameState) {
+        let brute = state
+            .objects
+            .iter()
+            .find(|(_, obj)| obj.name == "Brute")
+            .map(|(id, _)| *id)
+            .expect("staged brute");
+        let live_incarnation = state.objects.get(&brute).unwrap().incarnation;
+        let set_id = state
+            .tracked_object_sets
+            .iter()
+            .max_by_key(|(id, _)| id.0)
+            .map(|(id, _)| *id)
+            .expect("published set");
+        assert_eq!(
+            state
+                .tracked_set_member_origins
+                .get(&set_id)
+                .and_then(|origins| origins.get(&brute)),
+            Some(&crate::types::game_state::TrackedMemberOrigin {
+                departed_from: Zone::Battlefield,
+                departure_incarnation: live_incarnation - 1,
+            }),
+            "reach guard: publication must stamp the verified battlefield departure"
+        );
+        assert!(
+            state
+                .lki_by_incarnation
+                .get(&brute)
+                .is_some_and(|history| history.contains_key(&(live_incarnation - 1))),
+            "reach guard: the exit LKI must be captured under the departure incarnation"
+        );
+    }
+
+    /// R2b: a departed member judged through a Typed `SharesQuality` filter
+    /// reads its departure record against the first selected target — the
+    /// exit-time Creature brute contributes its snapshot power 5, the live
+    /// non-sharing bauble nothing. Red while the record door fail-closes
+    /// (0: both members excluded).
+    #[test]
+    fn departed_shares_member_filter_reads_the_departure_record() {
+        let (state, ability, filter) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "the departed sharing member contributes 5, the bauble nothing"
+        );
+    }
+
+    /// R2b keep-pause twin: the departed member reads the same first
+    /// selected target after a production capture and resume — natural 10
+    /// + 5 = 15. Dropping the parked reference at the record-door boundary
+    ///   excludes the departed member and emits 10.
+    #[test]
+    fn parked_departed_shares_member_filter_reads_the_selected_target() {
+        let (mut state, ability, filter) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_targets.len(),
+            1,
+            "reach guard: the selected target must travel"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: ability.source_id,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: ability.context.chain_root_targets.clone(),
+            trigger_context: None,
+            illegal_target_slots: illegal,
+            chain_root_target_pins: vec![],
+            declared_capture: Some((&captured).into()),
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "the departed sharing member contributes 5 (10 + 5); dropping the parked reference emits 10"
+        );
+    }
+
+    /// R2b: `reference = None` is the vacuous per-object pass the live door
+    /// gives (the CR 608.2b group constraint is validated at resolution, not
+    /// per member) — the departed brute and the live bauble are both
+    /// admitted, so the power sum reads 12. Red while the record door
+    /// fail-closes (7: the departed member excluded).
+    #[test]
+    fn none_reference_member_filter_admits_departed_members_vacuously() {
+        let (state, ability, _) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: None,
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            12,
+            "both members admitted vacuously (5 + 7)"
+        );
+    }
+
+    #[test]
+    fn snapshot_unsupported_shared_reference_refuses_only_tracked_sources() {
+        let (mut state, ability, _) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let reference = create_object(
+            &mut state,
+            CardId(553),
+            PlayerId(0),
+            "Live Reference".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::SpecificObject { id: reference })),
+                    relation: crate::types::ability::SharedQualityRelation::DoesNotShare,
+                }]),
+        );
+        let ctx = crate::game::filter::FilterContext::from_ability(&ability);
+        for (source, expected) in [
+            (
+                CardTypeSetSource::Objects {
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                CardTypeSetSource::TrackedSet {
+                    set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(filter.clone()),
+                },
+                0,
+            ),
+        ] {
+            let mut members = 0;
+            visit_characteristic_leaf(
+                &state,
+                &source,
+                QuantityContext::new(ability.source_id),
+                &ctx,
+                PlayerId(0),
+                &mut |_, _, _| members += 1,
+            );
+            assert_eq!(members, expected);
+        }
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(filter),
+                        caused_by: None,
+                        destination: None,
+                    },
+                },
+                &ability,
+            ),
+            1,
+            "the live tracked-size peer still counts the nonsharing artifact"
+        );
+    }
+
+    /// MED1: hand-built refused shapes fail closed at resolution. A
+    /// `DistinctFrom{ParentTarget}` member filter over the R2 staged set
+    /// ([brute 5, bauble 7], ability targeting the brute) contributes
+    /// nothing through either the `TrackedSet` source arm or the
+    /// `FilteredTrackedSetSize` peer — even live, where the ability is in
+    /// scope — because the shape cannot exist past admission.
+    #[test]
+    fn med1_refused_member_filters_fail_closed_at_resolution() {
+        let (state, ability, _) = r2_shares_fixture();
+        let distinct = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                }]),
+        );
+        let filter_ctx = crate::game::filter::FilterContext::from_ability(&ability);
+        let source = CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(distinct.clone()),
+        };
+        let mut members = 0;
+        visit_characteristic_leaf(
+            &state,
+            &source,
+            QuantityContext::new(ability.source_id),
+            &filter_ctx,
+            PlayerId(0),
+            &mut |_, _, _| {
+                members += 1;
+            },
+        );
+        assert_eq!(
+            members, 0,
+            "the refused TrackedSet member filter visits nothing"
+        );
+        let qty = QuantityRef::FilteredTrackedSetSize {
+            filter: Box::new(distinct),
+            caused_by: None,
+            destination: None,
+        };
+        assert_eq!(
+            resolve_ref(
+                &state,
+                &qty,
+                PlayerId(0),
+                QuantityContext::new(ability.source_id),
+                &ability.targets,
+                ability.chosen_x,
+                Some(&ability),
+                None,
+            ),
+            0,
+            "the refused FilteredTrackedSetSize peer counts nothing"
         );
     }
 
@@ -21278,6 +24378,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::TriggeringBatch,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -21355,6 +24456,7 @@ mod tests {
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter: None,
                     },
                 )
                 .unwrap(),
@@ -21493,7 +24595,8 @@ mod tests {
                 ctx.clone(),
                 &[],
                 None,
-                Some(&ability)
+                Some(&ability),
+                None,
             ),
             2
         );
@@ -21530,6 +24633,7 @@ mod tests {
                     &[],
                     None,
                     Some(&ability),
+                    None,
                 ),
                 7,
                 "a union's inclusive leg keeps the current cast regardless of member order",
@@ -21537,7 +24641,16 @@ mod tests {
         }
         ability.cast_occurrence.as_mut().unwrap().turn_journal_index = 0;
         assert_eq!(
-            resolve_ref(&state, &qty, PlayerId(0), ctx, &[], None, Some(&ability)),
+            resolve_ref(
+                &state,
+                &qty,
+                PlayerId(0),
+                ctx,
+                &[],
+                None,
+                Some(&ability),
+                None,
+            ),
             7,
             "a divergent occurrence must not exclude either record"
         );
@@ -21584,6 +24697,7 @@ mod tests {
                 &[],
                 None,
                 Some(&ability),
+                None,
             ),
             6
         );
@@ -21737,6 +24851,62 @@ mod tests {
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), source), 4);
+    }
+
+    /// CR 607.2a + CR 113.7a: the owner scope of a trigger bound to a departed
+    /// incarnation counts owners of cards that incarnation exiled after departing.
+    #[test]
+    fn player_count_owners_of_cards_exiled_by_source_reads_bound_incarnation_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Exiled 31".to_string(),
+            Zone::Exile,
+        );
+        let trigger_source = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        assert!(trigger_source.linked_exile_snapshot.is_empty());
+        let departed = trigger_source.identity.reference.incarnation;
+        state.linked_exile_lki.insert(
+            source,
+            vec![crate::types::game_state::LinkedExileLki {
+                departed,
+                successor: departed,
+                snapshot: vec![crate::types::game_state::LinkedExileSnapshot {
+                    exiled_id: exiled,
+                    owner: PlayerId(1),
+                    mana_value: 0,
+                    incarnation: state.objects[&exiled].incarnation,
+                }],
+            }],
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_trigger_source_recursive(trigger_source);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OwnersOfCardsExiledBySource,
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 1);
     }
 
     #[test]
@@ -22141,6 +25311,119 @@ mod tests {
             inner, 2,
             "inside reflexive scope the enclosing batched trigger count must not \
              shadow the count from the reflexive action"
+        );
+    }
+
+    /// CR 614.6 + CR 615.5 + CR 706.4: a replacement's own action reads the amount
+    /// it owns ahead of a die result, the enclosing trigger's match count and event
+    /// amount, and the resolution's `last_effect_count`, all live at once. Outside
+    /// the scope the die result still wins, and a reflexive ability created inside
+    /// the action does not inherit the owned amount. With no owned amount the
+    /// trigger tiers stay suppressed and the die result is read.
+    #[test]
+    fn event_context_amount_inside_replacement_action_scope_reads_the_owned_amount() {
+        let mut state = GameState::new_two_player(42);
+        state.die_result_this_resolution = Some(17);
+        state.current_trigger_match_count = Some(3);
+        state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {
+            source_id: ObjectId(1),
+            target: TargetRef::Player(PlayerId(0)),
+            amount: 6,
+            is_combat: true,
+            excess: 0,
+            source_incarnation: None,
+        });
+        state.last_effect_count = Some(5);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let read = |state: &GameState| resolve_quantity(state, &expr, PlayerId(0), ObjectId(1));
+
+        assert_eq!(read(&state), 3, "outside any scope the match count wins");
+        assert_eq!(
+            with_replacement_action_scope(Some(2), || read(&state)),
+            2,
+            "the action's owned amount outranks every ambient tier"
+        );
+        assert_eq!(
+            with_replacement_action_scope(Some(2), || {
+                with_reflexive_resolution_scope(|| read(&state))
+            }),
+            17,
+            "a reflexive ability inside the action reads its own cascade"
+        );
+        assert_eq!(
+            with_replacement_action_scope(None, || read(&state)),
+            17,
+            "no owned amount: the trigger tiers stay suppressed"
+        );
+
+        state.current_trigger_match_count = None;
+        assert_eq!(
+            read(&state),
+            17,
+            "outside the scope the die result is unchanged"
+        );
+    }
+
+    /// CR 614.6 + CR 615.5 + CR 608.2c: a replacement action's amount lasts exactly as long as
+    /// its scope. A nested action reads its own amount and hands the outer one back when it
+    /// ends; a resumed action reads its carried amount only while its guard is held; and a
+    /// scope that unwinds restores the enclosing reading, so the amount never reaches work
+    /// outside the action.
+    #[test]
+    fn replacement_action_scope_restores_the_outer_scope_after_nested_work() {
+        let mut state = GameState::new_two_player(42);
+        state.die_result_this_resolution = Some(17);
+        state.current_trigger_match_count = Some(3);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let read = |state: &GameState| resolve_quantity(state, &expr, PlayerId(0), ObjectId(1));
+
+        // Reach-guard: outside any scope the enclosing trigger's match count answers.
+        assert_eq!(read(&state), 3, "outside any scope the match count wins");
+
+        let (inner, after_inner) = with_replacement_action_scope(Some(2), || {
+            let inner = with_replacement_action_scope(Some(5), || read(&state));
+            (inner, read(&state))
+        });
+        assert_eq!(inner, 5, "a nested action reads its own amount");
+        assert_eq!(after_inner, 2, "the outer action's amount is back after it");
+
+        let (resumed, after_resumed) = with_replacement_action_scope(Some(2), || {
+            let guard =
+                resume_replacement_action(Some(crate::types::game_state::ReplacementActionScope {
+                    amount: 7,
+                }));
+            let resumed = read(&state);
+            drop(guard);
+            (resumed, read(&state))
+        });
+        assert_eq!(resumed, 7, "a resumed action reads its carried amount");
+        assert_eq!(
+            after_resumed, 2,
+            "dropping the guard restores the outer action"
+        );
+
+        assert_eq!(
+            with_replacement_action_scope(Some(2), || {
+                with_reflexive_resolution_scope(|| read(&state))
+            }),
+            17,
+            "a reflexive ability inside the action reads its own cascade"
+        );
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_replacement_action_scope(Some(9), || -> i32 {
+                panic!("the action's work unwinds");
+            })
+        }));
+        assert!(unwound.is_err(), "reach-guard: the scope's body unwound");
+        assert_eq!(
+            read(&state),
+            3,
+            "an unwound scope leaves the enclosing reading, not its amount"
         );
     }
 
@@ -24081,7 +27364,12 @@ mod tests {
         add_lands(&mut state, PlayerId(2), 2);
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "precondition: P2 must have actually left the game"
@@ -24723,6 +28011,7 @@ mod tests {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: creature_filter.clone(),
                     caused_by,
+                    destination: None,
                 },
             };
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))
@@ -24999,6 +28288,7 @@ mod tests {
                     source: CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
                         caused_by,
+                        filter: None,
                     },
                 },
             };
@@ -25075,6 +28365,7 @@ mod tests {
                 source: CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: Some(ThisWayCause::Discarded),
+                    filter: None,
                 },
             },
         };
@@ -25831,6 +29122,8 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             roller: root.controller,
+            quantity_controller: None,
+            scoped_player: None,
             targets: Vec::new(),
             sides: 6,
             // Die 0 already resolved (skipped by next_index below); die 1 is
@@ -25850,6 +29143,12 @@ mod tests {
             forced_ignored: Vec::new(),
             chain_root_targets: root.context.chain_root_targets.clone(),
             trigger_context: None,
+            illegal_target_slots: Vec::new(),
+            chain_root_target_pins: Vec::new(),
+            declared_capture: None,
+            local_target_pins: Vec::new(),
+            keyed_target_incarnations: Vec::new(),
+            declared_player: None,
         };
 
         let mut events = Vec::new();
@@ -25858,6 +29157,7 @@ mod tests {
             pending,
             Vec::new(),
             &mut events,
+            None,
         )
         .expect("resuming the die-roll loop must not error");
 
@@ -25927,8 +29227,13 @@ mod tests {
             source_id: spell,
             controller: root.controller,
             flipper: root.controller,
-            targets: Vec::new(),
-            win_effect: Some(Box::new(win_effect)),
+            win_effect: Some(Box::new(
+                crate::game::ability_utils::build_resolved_from_def(
+                    &win_effect,
+                    spell,
+                    root.controller,
+                ),
+            )),
             lose_effect: None,
             kind: crate::types::resolution::PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: root.context.chain_root_targets.clone(),
@@ -26317,6 +29622,120 @@ mod dandan_scoped_zone_tests {
     }
 }
 
+/// CR 109.2a + CR 111.6: a zoned card count excludes tokens even before
+/// CR 111.7 removes them at the next state-based-action check.
+#[cfg(test)]
+mod graveyard_zone_card_population_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_type::Supertype;
+    use crate::types::identifiers::CardId;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn graveyard_land(state: &mut GameState, card: u64, name: &str) -> ObjectId {
+        let id = create_object(state, CardId(card), P1, name.to_string(), Zone::Graveyard);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Land];
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn board() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            P0,
+            "Population Reader".to_string(),
+            Zone::Battlefield,
+        );
+        graveyard_land(&mut state, 2, "Nonbasic Land Card");
+        let basic = graveyard_land(&mut state, 3, "Basic Land Card");
+        let obj = state.objects.get_mut(&basic).unwrap();
+        obj.card_types.supertypes = vec![Supertype::Basic];
+        obj.base_card_types = obj.card_types.clone();
+
+        // Everywhere has all five basic land types but no Basic supertype.
+        // This fixture models its transient graveyard state before token cleanup.
+        let token = graveyard_land(&mut state, 4, "Everywhere");
+        let obj = state.objects.get_mut(&token).unwrap();
+        obj.is_token = true;
+        obj.card_types.subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        obj.base_card_types = obj.card_types.clone();
+        let copy = graveyard_land(&mut state, 5, "Nonbasic Land Copy");
+        state.objects.get_mut(&copy).unwrap().is_copy = true;
+
+        for id in [token, copy] {
+            let obj = &state.objects[&id];
+            assert!(state.players[1].graveyard.contains(&id));
+            assert_eq!(obj.zone, Zone::Graveyard);
+            assert!(obj.card_types.core_types.contains(&CoreType::Land));
+            assert!(!obj.card_types.supertypes.contains(&Supertype::Basic));
+            assert!(!obj.is_represented_by_a_card());
+        }
+        (state, source)
+    }
+
+    fn read(state: &GameState, source: ObjectId, filter: Option<TargetFilter>) -> i32 {
+        resolve_quantity(
+            state,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: Vec::new(),
+                    filter,
+                    scope: CountScope::Opponents,
+                },
+            },
+            P0,
+            source,
+        )
+    }
+
+    #[test]
+    fn opponent_graveyard_nonbasic_land_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        let nonbasic =
+            TargetFilter::Typed(
+                TypedFilter::land().properties(vec![FilterProp::NotSupertype {
+                    value: Supertype::Basic,
+                }]),
+            );
+        assert_eq!(
+            read(&state, source, Some(nonbasic.clone())),
+            1,
+            "neither the nonbasic land token nor the copy is a land card"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, Some(nonbasic)),
+            2,
+            "another real nonbasic land card raises the count"
+        );
+    }
+
+    #[test]
+    fn opponent_graveyard_unfiltered_card_count_excludes_transient_non_cards() {
+        let (mut state, source) = board();
+        assert_eq!(
+            read(&state, source, None),
+            2,
+            "both real land cards count, but the token and copy do not"
+        );
+        graveyard_land(&mut state, 6, "Second Nonbasic Land Card");
+        assert_eq!(
+            read(&state, source, None),
+            3,
+            "an unfiltered count still includes another real card"
+        );
+    }
+}
+
 /// CR 108.2 + CR 109.1 + CR 722.3c: quantities over the CARDS in exile exclude
 /// non-card objects there. Building-block rows: each quantity arm is read
 /// against one real Sorcery card, one non-card copy of a card (the CR 722.3c
@@ -26442,6 +29861,25 @@ mod exile_card_population_tests {
                 zone: ZoneRef::Exile,
                 scope: ControllerRef::TargetPlayer,
                 binding: CountBinding::Anaphoric,
+            },
+            1,
+        );
+    }
+
+    /// Preserves the global-zone path while the card-identity check is shared
+    /// with per-player zones. All three fixture objects match the type list.
+    #[test]
+    fn exile_card_population_zone_card_count_with_type_filters() {
+        assert_counts(
+            QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Exile,
+                card_types: vec![
+                    TypeFilter::Sorcery,
+                    TypeFilter::Instant,
+                    TypeFilter::Artifact,
+                ],
+                filter: None,
+                scope: CountScope::Owner,
             },
             1,
         );

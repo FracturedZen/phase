@@ -25,7 +25,14 @@
  * the production's quantity shape. That guess is the bug the PR removes; the
  * role is now stamped at parse time from grammar.
  *
- * `crates/engine/tests/fixtures/integration_cards.json.gz` is GENERATED (a curated
+ * NOTE: the integration card fixture is no longer one gzip. It is now a directory of
+ * JSON Lines shards (`crates/engine/tests/fixtures/integration_cards/`, see
+ * `scripts/lib/fixture_shards.py`) written only by `scripts/gen-test-fixture.py`. This
+ * one-time migration was applied to the single-file fixture long ago and no longer
+ * rewrites the default fixture; it still migrates an explicit gzip path (and `--state`
+ * dumps). The rest of this comment describes the original single-file situation.
+ *
+ * `integration_cards.json.gz` (the old single-file fixture) was GENERATED (a curated
  * subset of `client/public/card-data.json`) and is git-tracked as canonical
  * gzip whose decompressed JSON is a single minified line. It therefore carries
  * the old encoding and must be migrated
@@ -57,7 +64,7 @@
  *   2. Apply this migration:
  *          node scripts/migrate-mana-target-roles.mjs
  *   3. Verify:
- *          cargo test -p phase-engine --test integration
+ *          cargo test -p phase-engine --test 'integration*'
  *      In particular `mana_role_fixture_migration` asserts Carpet of Flowers is
  *      a CountSource and Belbe is a Recipient — it is the canary for a mapping
  *      that silently flipped.
@@ -282,6 +289,14 @@ const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
 const stateMode = args.includes("--state");
 const fixturePath = args.find((a) => !a.startsWith("--")) ?? DEFAULT_FIXTURE;
+if (!stateMode && fixturePath === DEFAULT_FIXTURE) {
+  console.error(
+    "The integration card fixture is now sharded (crates/engine/tests/fixtures/integration_cards/); " +
+      "this migration rewrites a single gzip. Regenerate the shards with `python3 scripts/gen-test-fixture.py`, " +
+      "or pass an explicit gzip path.",
+  );
+  process.exit(1);
+}
 
 // ---------------------------------------------------------------------------
 // `--state <file.json.gz>`: migrate a PERSISTED GAME-STATE dump instead of the
@@ -459,4 +474,4 @@ if (lineCount !== 1) {
   process.exit(1);
 }
 console.log(`\nWrote ${fixturePath} (canonical gzip -9 -n; ${out.length} JSON bytes).`);
-console.log("Verify with: cargo test -p phase-engine --test integration");
+console.log("Verify with: cargo test -p phase-engine --test 'integration*'");

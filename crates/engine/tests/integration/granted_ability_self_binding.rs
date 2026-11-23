@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
@@ -26,6 +27,8 @@ use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::TargetRef;
+
+use super::support::assert_damage_dealt;
 
 fn equipment_types() -> (Vec<String>, Vec<String>) {
     (vec!["Artifact".to_string()], vec!["Equipment".to_string()])
@@ -1463,6 +1466,7 @@ fn torrent_of_lava_damage_source_channel_not_masked() {
 /// object incarnation; the unbound `ObjectScope::GrantingObject` reads as `Source` in
 /// counter reads.
 mod object_scope_reads {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
     use engine::game::scenario::{GameScenario, P0};
@@ -1687,6 +1691,7 @@ mod object_scope_reads {
 // ---------------------------------------------------------------------------
 
 mod concretizer_seams {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use engine::game::combat::{can_block_pair, AttackTarget};
@@ -1717,9 +1722,9 @@ mod concretizer_seams {
     use engine::types::zones::Zone;
 
     use super::{
-        ARCHERY_TRAINING, DIRE_BLUNDERBUSS, FISHING_POLE, GROTHAMA, GUTTER_GRIME, HANKYU,
-        HELIODS_PUNISHMENT, KROVIKAN_PLAGUE, NETTLEVINE_BLIGHT, SPARE_DAGGER, THE_AETHERSPARK,
-        TRUSTY_BOOMERANG,
+        assert_damage_dealt, ARCHERY_TRAINING, DIRE_BLUNDERBUSS, FISHING_POLE, GROTHAMA,
+        GUTTER_GRIME, HANKYU, HELIODS_PUNISHMENT, KROVIKAN_PLAGUE, NETTLEVINE_BLIGHT, SPARE_DAGGER,
+        THE_AETHERSPARK, TRUSTY_BOOMERANG,
     };
 
     fn counter(kind: &str) -> CounterType {
@@ -1854,6 +1859,14 @@ mod concretizer_seams {
     /// Drives priority, "you may" prompts and trigger ordering until the engine asks
     /// for anything else, answering a trigger target with `target`.
     fn drive(runner: &mut GameRunner, target: Option<TargetRef>) {
+        let _ = drive_and_collect_events(runner, target);
+    }
+
+    fn drive_and_collect_events(
+        runner: &mut GameRunner,
+        target: Option<TargetRef>,
+    ) -> Vec<GameEvent> {
+        let mut events = Vec::new();
         for _ in 0..40 {
             let action = match &runner.state().waiting_for {
                 WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
@@ -1870,9 +1883,9 @@ mod concretizer_seams {
                         target: target.clone(),
                     }
                 }
-                _ => return,
+                _ => return events,
             };
-            runner.act(action).unwrap();
+            events.extend(runner.act(action).unwrap().events);
         }
         panic!("drive did not settle: {:?}", runner.state().waiting_for);
     }
@@ -3249,11 +3262,13 @@ mod concretizer_seams {
         let mut runner = scenario.build();
         relayer(runner.state_mut());
         attack_with(&mut runner, attacker);
-        drive(&mut runner, None);
+        let events = drive_and_collect_events(&mut runner, None);
         let st = runner.state();
         assert_ne!(grothama, attacker);
+        assert_damage_dealt(&events, attacker, TargetRef::Object(grothama), 3, false);
+        assert_damage_dealt(&events, grothama, TargetRef::Object(attacker), 10, false);
+        assert_eq!(st.objects[&grothama].zone, Zone::Battlefield);
         assert_eq!(st.objects[&grothama].damage_marked, 3);
-        assert_eq!(st.objects[&attacker].damage_marked, 10);
         assert_eq!(st.objects[&attacker].zone, Zone::Graveyard);
     }
 
@@ -3497,6 +3512,7 @@ mod granter_stamp {
     use engine::game::effects::attach::attach_to;
     use engine::game::effects::resolve_ability_chain;
     use engine::game::filter::{matches_target_filter, FilterContext};
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::mana_abilities::can_activate_mana_ability_now;
     use engine::game::quantity::resolve_quantity_with_targets;
@@ -5559,6 +5575,7 @@ mod granter_stamp {
 
     mod bound_granter {
         use super::*;
+        use engine::game::game_object::ObjectIncarnationRefExt;
         use engine::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceScope};
         use engine::types::keywords::KeywordKind;
 
@@ -6295,6 +6312,13 @@ mod granted_caster_reference {
     fn foo_bar_gaps(oracle: &str, card_type: &str) -> (Vec<String>, String) {
         let parsed = parse_oracle_text(oracle, "Foo Bar", &[], &[card_type.to_string()], &[]);
         let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        // Merge MTGJSON keywords (empty for synthetic cards) with parser-extracted keywords,
+        // mirroring `merge_extracted_keywords` in synthesis.
+        let mut keywords: Vec<engine::types::keywords::Keyword> = Vec::new();
+        engine::database::synthesis::merge_extracted_keywords(
+            &mut keywords,
+            parsed.extracted_keywords,
+        );
         let gaps = engine::game::coverage::card_face_gaps(&engine::types::card::CardFace {
             name: "Foo Bar".to_string(),
             oracle_text: Some(oracle.to_string()),
@@ -6302,6 +6326,9 @@ mod granted_caster_reference {
             triggers: parsed.triggers,
             static_abilities: parsed.statics,
             replacements: parsed.replacements,
+            keywords,
+            additional_cost: parsed.additional_cost,
+            parse_warnings: parsed.parse_warnings,
             ..Default::default()
         });
         (gaps, json)
@@ -6621,6 +6648,7 @@ fn gutter_grime_token_static_description_names_the_creator() {
 mod toggo_rock {
     use super::{find_effect, sacrifice_target, GUTTER_GRIME, PLACEHOLDER, TOGGO};
     use engine::game::game_object::AttachTarget;
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};

@@ -13,7 +13,7 @@ vi.mock("../../services/llm/catalog", () => catalogMock);
 
 const CATALOG: LlmProviderCatalogEntry[] = [{
   provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
-  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+  defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"],
 }];
 
 /**
@@ -33,6 +33,7 @@ const wasm = vi.hoisted(() => ({
   start_quick_cube_draft: vi.fn(),
   import_draft_session: vi.fn(),
   load_card_database: vi.fn(() => 0),
+  set_draft_pick_enhancements: vi.fn(),
   submit_pick: vi.fn(),
   submit_pick_with_draft_effect: vi.fn(),
   auto_pick: vi.fn(),

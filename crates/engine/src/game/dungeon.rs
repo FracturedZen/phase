@@ -1028,6 +1028,8 @@ pub fn room_effects(
         (DungeonId::BaldursGateWilderness, 5) => {
             let mut ability = simple(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter::land()),
@@ -1191,6 +1193,7 @@ pub fn room_effects(
                         protection_does_not_remove: None,
                         room_door: None,
                         granting_object: None,
+                        bound_actor: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -1515,6 +1518,7 @@ fn patch_ansur_drain(mut root: ResolvedAbility) -> ResolvedAbility {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("Sum over ManaValue of the chain set is statically valid");
@@ -1560,6 +1564,8 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
     );
     let mut change_zone = simple(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::Any,

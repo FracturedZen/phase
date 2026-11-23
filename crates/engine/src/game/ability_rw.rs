@@ -103,8 +103,9 @@
 use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AttachCardinality, AttachSelection, AttachmentReferent,
-    AttackSubject, AttackedYouScope, CardTypeSetSource, ContinuousModification, ControllerRef,
-    Duration, Effect, GuessSubject, KeeperConstraint, ModalChoice, MultiTargetSpec, NameStickerSet,
+    AttackSubject, AttackedYouScope, CardTypeSetSource, CombatRelationSubject,
+    ContinuousModification, ControllerRef, CountScope, Duration, Effect, EffectScope, GuessSubject,
+    KeeperConstraint, LibraryInstructionActor, ModalChoice, MultiTargetSpec, NameStickerSet,
     ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
     StaticCondition, StaticDefinition, TargetFilter, TokenAttackDestination, TriggerCondition,
@@ -146,9 +147,14 @@ pub(crate) enum StateKind {
     /// CR 500 (turn structure) + CR 506.4c (remove from combat) + CR 614.10
     /// (skip step/turn): game-sequencing writes — extra turns/phases, skipped
     /// steps, combat removal. Idempotent/additive among identical siblings (two
-    /// extra turns commute; removing an already-removed creature is a no-op) and
-    /// observed by `AttackedPlayerOrPlaneswalker`'s live combat read, so combat
-    /// removal conflicts with that reader — never the `Other`
+    /// extra turns commute; removing an already-removed creature is a no-op).
+    /// Profiled reads: the attack ledgers — `AbilityCondition` /
+    /// `StaticCondition::PlayerAttackedPlayer` (this-turn pairs, CR 508.6) and
+    /// `StaticCondition::AnyPlayerAttackedYouLastTurn` (last-turn snapshot).
+    /// Ledgers are turn-immutable during resolution, so sibling triggers
+    /// resolving in the same turn cannot change what they read. Combat removal
+    /// is also observed by `AttackedPlayerOrPlaneswalker`'s live combat read,
+    /// so combat removal conflicts with that reader. Never the `Other`
     /// catch-all, which conflicts with every read.
     TurnStructure,
     /// Unclassifiable — conflicts with everything (fail-closed).
@@ -605,6 +611,46 @@ impl CurrentPtReads {
     }
 }
 
+/// CR 603.10a + CR 603.3b: how a resolution's bindings vary across
+/// normalized-identical members. Ordered so `merge` is `max`: a combat-pairing
+/// read is always also a per-member read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum MemberBinding {
+    /// Every member resolves against the same bindings.
+    #[default]
+    Shared,
+    /// Per-source tracked/chosen storage, an attachment, or an event- or
+    /// replacement-context referent: each member reads its own.
+    PerMember,
+    /// CR 509.1g + CR 608.2h: the resolution names creatures by their combat
+    /// relation to the member's own source ("destroy all creatures blocking or
+    /// blocked by it"). A departed source answers from its own departure row,
+    /// so co-departing members touch different creatures, and what each one
+    /// sets off (a leaves trigger, CR 603.6c) lands between them: the batch
+    /// depth must prompt on this alone.
+    SourceCombatPairing,
+}
+
+impl MemberBinding {
+    fn merge(self, other: MemberBinding) -> MemberBinding {
+        self.max(other)
+    }
+
+    fn is_per_member(self) -> bool {
+        match self {
+            MemberBinding::Shared => false,
+            MemberBinding::PerMember | MemberBinding::SourceCombatPairing => true,
+        }
+    }
+
+    fn names_source_combat_pairing(self) -> bool {
+        match self {
+            MemberBinding::Shared | MemberBinding::PerMember => false,
+            MemberBinding::SourceCombatPairing => true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RwProfile {
     /// Source-scoped reads ONLY (live unless the structure freezes them, CR
@@ -630,14 +676,14 @@ pub(crate) struct RwProfile {
     /// D5: one of the 12 retained-prompt event-context refs is present.
     /// Consulted ONLY by the batch branch (commit 2).
     legacy_batch_prompt: bool,
-    /// CR 603.10a (PR-6.75 c5): the resolution consumes a binding resolved per
-    /// member instance — per-source tracked/chosen storage, an attachment, or an
-    /// event/replacement-context referent outside the legacy-12 /
-    /// `writes_event_object` carriers — so members' resolution functions are NOT one
-    /// shared `f`. Refutes batch-T1 (`!reads_member_bound` conjunct). Walk-computed
-    /// single-bit read fact (precedent: `legacy_batch_prompt`); `drop_writes` keeps
-    /// it (a read).
-    reads_member_bound: bool,
+    /// CR 603.10a (PR-6.75 c5): whether the resolution consumes a binding
+    /// resolved per member instance — per-source tracked/chosen storage, an
+    /// attachment, an event/replacement-context referent outside the legacy-12 /
+    /// `writes_event_object` carriers, or the source's own combat pairings — so
+    /// members' resolution functions are NOT one shared `f`. See
+    /// [`MemberBinding`]. Walk-computed read fact (precedent:
+    /// `legacy_batch_prompt`); `drop_writes` keeps it (a read).
+    member_binding: MemberBinding,
     /// CR 613.4b-c: the scopes at which the profile reads live power/toughness
     /// after layer 7c. A `BasePower` read shares the ObjectPt axis for ordinary
     /// conflicts, but ObjectCounters feed only these live subsets. Keeping the
@@ -728,7 +774,7 @@ impl RwProfile {
             reads_frozen: KindSet::EMPTY,
             reads_event_live: false,
             legacy_batch_prompt: false,
-            reads_member_bound: false,
+            member_binding: MemberBinding::Shared,
             current_pt_reads: CurrentPtReads::default(),
             writes_self: KindSet::EMPTY,
             writes_external: KindSet::EMPTY,
@@ -772,7 +818,10 @@ impl RwProfile {
         p.writes_membership_external_ctrl = PlayerSpan::Any;
         // CR 603.10a: an unclassified subtree may consult a per-member binding ⇒
         // fail-closed (refuses batch-T1).
-        p.reads_member_bound = true;
+        // `PerMember`, not `SourceCombatPairing`: the latter is a positive
+        // structural fact about a classified filter, and an unclassified subtree
+        // is already fail-closed through the member-bound and feed rows.
+        p.bind_per_member();
         p.current_pt_reads = CurrentPtReads::SOURCE.merge(CurrentPtReads::BOARD);
         p
     }
@@ -784,7 +833,7 @@ impl RwProfile {
         self.reads_frozen = self.reads_frozen.union(o.reads_frozen);
         self.reads_event_live |= o.reads_event_live;
         self.legacy_batch_prompt |= o.legacy_batch_prompt;
-        self.reads_member_bound |= o.reads_member_bound;
+        self.member_binding = self.member_binding.merge(o.member_binding);
         self.current_pt_reads = self.current_pt_reads.merge(o.current_pt_reads);
         self.writes_self = self.writes_self.union(o.writes_self);
         self.writes_external = self.writes_external.union(o.writes_external);
@@ -812,6 +861,18 @@ impl RwProfile {
             .writes_membership_external_ctrl
             .merge(o.writes_membership_external_ctrl);
         self.reads_player_fused = self.reads_player_fused.union(o.reads_player_fused);
+    }
+
+    /// CR 405: whether the resolution reads the stack's shape, or anything it cannot classify.
+    pub(crate) fn reads_stack(&self) -> bool {
+        [
+            self.reads_src,
+            self.reads_board,
+            self.reads_player,
+            self.reads_frozen,
+        ]
+        .iter()
+        .any(|kinds| kinds.stack_shape || kinds.other)
     }
 
     /// CR 603.3b T1 (§1.2): the resolution function never consults the source
@@ -844,14 +905,25 @@ impl RwProfile {
     }
 
     /// CR 603.10a: true iff the resolution reads per-member-bound storage
-    /// (`member_bound_target_filter` carriers). Test-only read accessor for the
-    /// parity sweep's same-event over-prompt CLASS classifier (mirrors the
-    /// discriminator gate `profiles_conflict`: `if s.same_event && p.reads_member_bound`).
-    /// Production reads the field directly in `profiles_conflict`, so the accessor
-    /// exists only for the cross-module `ordering_parity_tests`.
-    #[cfg(test)]
+    /// (`member_bound_target_filter` carriers, or the source's own combat
+    /// pairings). Also the parity sweep's same-event over-prompt CLASS
+    /// classifier (mirrors the discriminator gate `profiles_conflict`:
+    /// `if s.same_event && p.reads_member_bound()`).
     pub(crate) fn reads_member_bound(&self) -> bool {
-        self.reads_member_bound
+        self.member_binding.is_per_member()
+    }
+
+    /// CR 603.10a: record a per-member binding read.
+    fn bind_per_member(&mut self) {
+        self.member_binding = self.member_binding.merge(MemberBinding::PerMember);
+    }
+
+    /// CR 509.1g + CR 608.2h: record a read of the source's own combat
+    /// pairings (implies a per-member binding, by construction).
+    fn bind_source_combat_pairing(&mut self) {
+        self.member_binding = self
+            .member_binding
+            .merge(MemberBinding::SourceCombatPairing);
     }
 
     /// Drop all writes (deferred-body descent, CR 603.7: writes happen
@@ -1106,7 +1178,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     if s.same_event
         && (s.all_same_source
             || (p.source_independent()
-                && !p.reads_member_bound
+                && !p.reads_member_bound()
                 && !(s.event_object_present && p.reads_and_writes_event_object())))
     {
         return false;
@@ -1118,7 +1190,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     // commutation — prompt fail-closed. Guarded by `s.same_event`; the batch path
     // handles member-bound via its own conjunct plus the freeze/feed rows, so batch
     // ordering decisions are byte-inert.
-    if s.same_event && p.reads_member_bound {
+    if s.same_event && p.reads_member_bound() {
         return true;
     }
     // CR 603.3b + CR 608.2h: the same-event event-object read/write feed
@@ -1146,6 +1218,16 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     if s.all_same_source && !p.reads_event_live {
         return false;
     }
+    // CR 603.3b + CR 608.2h: the batch-depth source-combat-pairing discriminator.
+    // Co-departing members whose resolution names creatures by their own source's
+    // block pairings (each Abu Ja'far destroys its own last known partners) are
+    // distinct functions, and what one resolution sets off (Reveillark's leaves
+    // trigger, CR 603.6c) resolves before the next: the order is observable. The
+    // freeze/feed rows below can't see it, since each source's departure row is
+    // order-stable but names different creatures. Prompt fail-closed.
+    if !s.same_event && p.member_binding.names_source_combat_pairing() {
+        return true;
+    }
     // CR 603.3b batch T1 (PR-6.75 c5): in a controller-uniform co-departure group of
     // normalized-identical members, a resolution that consults neither its source
     // binding (`source_independent`: CR 603.10a), nor per-member bound storage
@@ -1160,7 +1242,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
     if !s.same_event
         && !matches!(s.controller_uniformity, ControllerUniformity::Mixed)
         && p.source_independent()
-        && !p.reads_member_bound
+        && !p.reads_member_bound()
         && !p.reads_event_live
         && !p.writes_event_object.any()
     {
@@ -1299,7 +1381,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
         read_mctrl: effective_span(p.reads_membership_ctrl, board_reads.set_membership),
         write_mctrl: membership_ctrl_of(board_writes, eff_external_ctrl, p.writes_membership_self),
     };
-    if feeds(
+    feeds(
         board_reads,
         board_writes,
         FeedContext::new(
@@ -1313,11 +1395,7 @@ pub(crate) fn profiles_conflict(p: &RwProfile, s: &GroupStructure) -> bool {
             },
             board_spans,
         ),
-    ) {
-        return true;
-    }
-
-    false
+    )
 }
 
 /// The membership-write census applying to an effective write set: external
@@ -1427,7 +1505,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         TargetFilter::SelfRef | TargetFilter::SourceOrPaired | TargetFilter::OriginalSource => {
             WriteScope::SelfSource
         }
-        TargetFilter::TriggeringSource => WriteScope::EventObject,
+        TargetFilter::TriggeringSource | TargetFilter::CastingSpell => WriteScope::EventObject,
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::DeclaredPlayer { .. } => {
@@ -1464,6 +1542,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -1490,6 +1569,10 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3 + CR 508.1d: owner-of-each-affected-member anchor — resolves
+        // per affected member (existing external objects), never the source,
+        // event object, or a creation.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => WriteScope::External,
     }
 }
@@ -1678,7 +1761,10 @@ fn zone_of_zone_ref(z: &ZoneRef) -> Zone {
 
 /// A read filter that provably counts only the member's own source (a `SelfRef`
 /// conjunct) — routes to per-member-private `reads_src` (§2 read-carrier closure).
-fn filter_is_self_scoped(f: &TargetFilter) -> bool {
+/// Also the authority for "this filter names only the carrier": a `valid_card` of
+/// `SelfRef` or `And[SelfRef, ..]` can match only the object hosting the
+/// definition (`printed_cards::is_runtime_target_die_exile_replacement`).
+pub(crate) fn filter_is_self_scoped(f: &TargetFilter) -> bool {
     match f {
         TargetFilter::SelfRef => true,
         TargetFilter::And { filters } => filters.iter().any(filter_is_self_scoped),
@@ -1768,13 +1854,36 @@ fn flag_legacy_write_target(p: &mut RwProfile, target: &TargetFilter) {
     }
 }
 
-/// Set `reads_member_bound` when an effect WRITE target names a per-member-bound
+/// Record a per-member binding (`bind_per_member`) when an effect WRITE target names a per-member-bound
 /// referent (CR 603.10a, PR-6.75 c5) — the write path's counterpart to
-/// `member_bound_target_filter` read-position wiring. A `ChangeZone{TrackedSet}`
-/// return (Day of the Dragons) writes a per-source set ⇒ members diverge.
+/// `member_bound_target_filter` read-position wiring. A
+/// `ChangeZoneAll{origin: Exile, TrackedSetFiltered}` return (Day of the
+/// Dragons) writes a per-source set ⇒ members diverge.
 fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
     if member_bound_target_filter(target) {
-        p.reads_member_bound = true;
+        p.bind_per_member();
+    }
+    flag_source_combat_pairing(p, target);
+}
+
+/// CR 509.1g + CR 608.2h + CR 603.3b: when `target` names creatures by their
+/// combat relation to the resolving source ("blocking or blocked by it", "each
+/// creature it blocked this combat"), each member reads its own source's
+/// pairings: member-bound at both depths, and the batch-depth
+/// `MemberBinding::SourceCombatPairing` row. Read through the exhaustive
+/// `filter_contains_filter_prop` walker, so a relation nested anywhere in the
+/// filter counts.
+fn flag_source_combat_pairing(p: &mut RwProfile, target: &TargetFilter) {
+    if crate::types::ability::filter_contains_filter_prop(target, &|prop| {
+        matches!(
+            prop,
+            FilterProp::CombatRelation {
+                subject: CombatRelationSubject::Source,
+                ..
+            }
+        )
+    }) {
+        p.bind_source_combat_pairing();
     }
 }
 
@@ -1818,12 +1927,8 @@ fn flag_member_bound_write_target(p: &mut RwProfile, target: &TargetFilter) {
 /// `legacy_batch_prompt` (CR 603.3b batch-ordering parity).
 fn contains_legacy_event_ref(a: &ResolvedAbility) -> bool {
     legacy_effect(&a.effect)
-        || a.sub_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
-        || a.else_ability
-            .as_deref()
-            .is_some_and(contains_legacy_event_ref)
+        || a.child_links()
+            .any(|(_, child)| contains_legacy_event_ref(child))
         || a.condition.as_ref().is_some_and(legacy_ability_condition)
         || a.duration.as_ref().is_some_and(legacy_duration)
         || a.player_scope.as_ref().is_some_and(legacy_player_filter)
@@ -1976,6 +2081,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
         // `ControllerRef` analogues, so the monarch subject axis stays here.
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -2025,6 +2131,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::EventOutcomeWon
         | AbilityCondition::CoinFlipOutcome { .. }
+        | AbilityCondition::ChosenLabelIs { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::AbilityUseCountThisTurn { .. }
         | AbilityCondition::RevealedHasCardType { .. }
@@ -2068,6 +2175,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::FirstCombatPhaseOfTurn
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
+        | AbilityCondition::PlayerAttackedPlayer { .. }
         | AbilityCondition::DayNightIs { .. } => false,
     }
 }
@@ -2103,7 +2211,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
@@ -2128,6 +2236,9 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         // `legacy_trigger_condition` sibling arm for the same reasoning.
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: no `legacy_player_scope` classifier exists — same
+        // reasoning as the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2144,6 +2255,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::PlayerAttackedPlayer { .. }
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::None => false,
@@ -2212,6 +2324,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2239,6 +2352,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
         | QuantityRef::FilteredTrackedSetSize { .. }
@@ -2252,6 +2366,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::ChosenNumber
         | QuantityRef::PlayerChosenNumber { .. }
         | QuantityRef::NotedNumber
@@ -2280,14 +2395,16 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsCycled { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -2342,7 +2459,10 @@ fn legacy_player_filter(x: &PlayerFilter) -> bool {
         PlayerFilter::PlayerAttribute { attr, value, .. } => {
             legacy_quantity_ref(attr) || legacy_quantity_expr(value)
         }
-        PlayerFilter::AllExcept { exclude } => legacy_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => legacy_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => filters.iter().any(legacy_player_filter),
         // The damage-source narrowing is a nested object population.
         PlayerFilter::OpponentDealtDamage { source, .. } => {
@@ -2421,6 +2541,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
@@ -2479,6 +2600,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -2494,6 +2616,9 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // Brand-new anchor (post-freeze): not one of the 12 frozen
+        // event-context tags.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -2518,7 +2643,8 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
             legacy_quantity_expr(value)
         }
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`, so
         // whether this prop nests a frozen-12 event-context tag is exactly
@@ -2621,6 +2747,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -2685,6 +2812,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // and `writes_event_object` carriers).
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        // CR 603.10a + CR 608.2c: fail-closed — a per-ability record keyed to population
+        // members; a missed TRUE is the CR 603.3b under-prompt.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ChosenCard
@@ -2734,6 +2864,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -2765,6 +2896,11 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::DefendingPlayer
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3: owner-partition-commutative among identical members — same
+        // rationale as `Owner` above: each member's owner-slice is disjoint
+        // and the per-member graft aggregate is order-free, so no
+        // member-bound refusal is needed.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -2819,11 +2955,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(member_bound_target_filter)
         }
-        FilterProp::Counters { count, .. } => rw_quantity_expr(count).reads_member_bound,
+        FilterProp::Counters { count, .. } => rw_quantity_expr(count).reads_member_bound(),
         FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
-            rw_quantity_expr(value).reads_member_bound
+            rw_quantity_expr(value).reads_member_bound()
         }
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`
         // resolved against the reading ability's OWN source (an
@@ -2869,13 +3006,30 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::AttachedTo {
             to: AttachmentReferent::Host { filter },
         } => member_bound_target_filter(filter),
+        // CR 509.1g + CR 608.2h + CR 603.3b: a source-subject combat relation reads
+        // that member's own pairings (live combat, or its departure row's
+        // `block_pairs` once it has left) or its own block-history records, so
+        // two co-triggering sources touch different creatures and are not one
+        // shared function. Two such triggers from one event must prompt (the
+        // same-event discriminator); two Abu Ja'fars dying together prompt through
+        // the batch `MemberBinding::SourceCombatPairing` row. A parent-target subject is
+        // a declared target, closed by the target gate. An anaphoric subject is the
+        // same read: the delayed ability that carries it holds its frozen target in
+        // `targets`, so `trigger_has_no_ordering_input` refuses the group first.
+        FilterProp::CombatRelation {
+            relation: _,
+            subject: CombatRelationSubject::Source,
+        } => true,
+        FilterProp::CombatRelation {
+            relation: _,
+            subject: CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget,
+        } => false,
         FilterProp::Token
         | FilterProp::NonToken
         | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
-        | FilterProp::CombatRelation { .. }
         | FilterProp::BlockStatus { .. }
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
@@ -2931,6 +3085,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -3031,6 +3186,9 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // CR 613.1b + CR 725.5: designation-anchored control carries no
+        // frozen event-context tag (scalar designation payload only).
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         // CR 612.8 + 613.1c: Layer-3 name-set from source's chosen name (Psychic
@@ -3067,6 +3225,11 @@ fn legacy_trigger_definition(td: &TriggerDefinition) -> bool {
             .is_some_and(legacy_static_condition)
         || td.valid_card.as_ref().is_some_and(legacy_target_filter)
         || td.valid_source.as_ref().is_some_and(legacy_target_filter)
+        || td
+            .blocker_count
+            .as_ref()
+            .and_then(|threshold| threshold.blocker.as_ref())
+            .is_some_and(legacy_target_filter)
 }
 
 /// D5: every effect position where a frozen tag can appear. `{ .. }` elides
@@ -3166,7 +3329,11 @@ fn legacy_effect(x: &Effect) -> bool {
         // the per-kind magnitude is a plain enum with no batch-prompt semantics.
         | Effect::ReproduceEventCounters { target, .. } => legacy_target_filter(target),
 
-        Effect::PutOnTopOrBottom { target, chooser } => {
+        Effect::PutOnTopOrBottom {
+            target,
+            chooser,
+            top_position: _,
+        } => {
             legacy_target_filter(target) || legacy_target_filter(chooser)
         }
 
@@ -3265,12 +3432,18 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Discover {
             mana_value_limit: count,
             player: target,
-        }
-        | Effect::ExileTop {
-            count,
-            player: target,
-            ..
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::ExileTop {
+            count,
+            player,
+            position: _,
+            face_down: _,
+            actor,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(player)
+                || legacy_library_instruction_actor(actor)
+        }
         Effect::ExileFaceDownPile {
             object,
             player,
@@ -3666,6 +3839,7 @@ fn legacy_effect(x: &Effect) -> bool {
                 || legacy_quantity_expr(count)
         }
         Effect::ChangeZone {
+            actor,
             target,
             enters_under,
             enter_with_counters,
@@ -3673,7 +3847,8 @@ fn legacy_effect(x: &Effect) -> bool {
             enters_modified_if,
             ..
         } => {
-            legacy_target_filter(target)
+            legacy_library_instruction_actor(actor)
+                || legacy_target_filter(target)
                 || ocr(enters_under)
                 || enter_with_counters
                     .iter()
@@ -3684,12 +3859,14 @@ fn legacy_effect(x: &Effect) -> bool {
                 || otf(enters_modified_if)
         }
         Effect::ChangeZoneAll {
+            actor,
             target,
             enters_under,
             enter_with_counters,
             ..
         } => {
-            legacy_target_filter(target)
+            legacy_library_instruction_actor(actor)
+                || legacy_target_filter(target)
                 || ocr(enters_under)
                 || enter_with_counters
                     .iter()
@@ -3738,7 +3915,7 @@ fn legacy_effect(x: &Effect) -> bool {
         // batch prompt this flag feeds is never consulted for it.
         Effect::EpicCopy { .. } => false,
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
-        Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
+        Effect::CreateDrawReplacement { replacement_effect } => legacy_definition(replacement_effect),
         Effect::RollDie { count, results, .. } => {
             legacy_quantity_expr(count) || results.iter().any(|r| legacy_definition(&r.effect))
         }
@@ -3795,6 +3972,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptionsFromRollDifference
@@ -3803,6 +3981,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::GiftDelivery { .. }
         | Effect::SetDayNight { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::HeistExile
@@ -3813,7 +3992,21 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ManifestDread
         | Effect::Choose { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
+        | Effect::HordePlayCard { .. } => false,
         | Effect::Unimplemented { .. } => false,
+    }
+}
+
+/// D5: the frozen tags an instruction's performing player can carry
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`,
+/// `Effect::ChangeZoneAll.actor`; CR 608.2c).
+fn legacy_library_instruction_actor(x: &LibraryInstructionActor) -> bool {
+    match x {
+        // Fieldless: the controller and the library's owner (the instruction's
+        // own `player`, visited by the calling arm) carry no tag here.
+        LibraryInstructionActor::Controller | LibraryInstructionActor::LibraryPlayer => false,
+        LibraryInstructionActor::Player { player } => legacy_target_filter(player),
     }
 }
 
@@ -3838,7 +4031,7 @@ fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
         | crate::types::ability::ChoiceType::OddOrEven
         | crate::types::ability::ChoiceType::BasicLandType
         | crate::types::ability::ChoiceType::CardType { .. }
-        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::CardName { .. }
         | crate::types::ability::ChoiceType::NumberRange { .. }
         | crate::types::ability::ChoiceType::Labeled { .. }
         | crate::types::ability::ChoiceType::LandType
@@ -3940,7 +4133,7 @@ fn legacy_ref() -> RwProfile {
 /// filters, fail-closed at the scope positions that never route through a filter.
 fn member_bound_read() -> RwProfile {
     let mut p = RwProfile::empty();
-    p.reads_member_bound = true;
+    p.bind_per_member();
     p
 }
 
@@ -3955,7 +4148,10 @@ fn member_bound_read() -> RwProfile {
 /// the ones still in the declared zone(s), so it carries both channels too.
 fn zone_choice_candidate_source_read(source: ZoneChoiceCandidateSource) -> RwProfile {
     match source {
-        ZoneChoiceCandidateSource::Direct => reads_zone_membership(),
+        // `LibraryTop` reads the top of the declared library: live zone membership.
+        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::LibraryTop => {
+            reads_zone_membership()
+        }
         ZoneChoiceCandidateSource::Tracked
         | ZoneChoiceCandidateSource::Legacy
         | ZoneChoiceCandidateSource::CostPaidObjects
@@ -4014,7 +4210,10 @@ fn board_membership_read(filter: &TargetFilter) -> RwProfile {
     p.reads_membership_ctrl = ctrl_span_of_filter(filter);
     // CR 603.10a (PR-6.75 c5): a read whose filter names a per-member-bound set /
     // attachment / chosen referent is member-distinct ⇒ refuses batch-T1.
-    p.reads_member_bound |= member_bound_target_filter(filter);
+    if member_bound_target_filter(filter) {
+        p.bind_per_member();
+    }
+    flag_source_combat_pairing(&mut p, filter);
     p
 }
 
@@ -4118,14 +4317,33 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // rule is about following a spell's instructions in the order written,
         // which is why a "this way" reference HAS a referent at all — it says
         // nothing about reading membership.
-        CardTypeSetSource::Zone { .. }
-        | CardTypeSetSource::ExiledBySource
-        | CardTypeSetSource::TrackedSet { .. } => reads_zone_membership(),
+        CardTypeSetSource::Zone { .. } | CardTypeSetSource::ExiledBySource => {
+            reads_zone_membership()
+        }
+        // CR 608.2i (look-back membership, as above) plus the member filter's
+        // own board read when present: an OMITTED read is FAIL-OPEN for the
+        // CR 603.3b gate, so a filter that names controller-scoped members
+        // must merge its profile rather than ride on the zone default.
+        //
+        // CR 603.3b + CR 603.10a: EVERY tracked-set read is member-bound,
+        // filtered or not — the storage is per-source (member A reads A's
+        // set, member B reads B's), so the identical-function proof behind
+        // the `profiles_conflict` fast path breaks either way and the group
+        // must prompt. The filter only narrows WHICH members; it is not
+        // what binds the read to the source.
+        CardTypeSetSource::TrackedSet { filter, .. } => {
+            let mut profile = reads_zone_membership();
+            if let Some(filter) = filter {
+                profile.merge(board_membership_read(filter));
+            }
+            profile.bind_per_member();
+            profile
+        }
         // CR 608.2i: the cast journal is read by looking BACK at actions already
         // taken this turn — the recorded spells have left the stack (CR 400.7)
         // and are read from their snapshots, not from the board. That is why
         // this classifies as turn-scoped player state rather than a board read.
-        // Mirrors `QuantityRef::SpellsCastThisTurn`'s own `JournalCast` read so
+        // Mirrors `QuantityRef::SpellsCast`'s own `JournalCast` read so
         // the two readings of the same population agree.
         //
         // NOT CR 601.2a, which this comment used to cite: 601.2a describes how a
@@ -4134,6 +4352,16 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         CardTypeSetSource::TurnJournal { journal, .. } => match journal {
             TurnJournalKind::SpellsCast => reads_player_of(StateKind::JournalCast),
         },
+        // CR 608.2c + CR 115.1: the resolving ability's announcement-bound
+        // targets (CR 601.2c), read by identity with an LKI fallback. Reports
+        // the SAME profile as the canonical slot filter it denotes (via the
+        // single `targeted_objects_filter` authority) — in particular a zone
+        // census is never claimed here (C-7: not `reads_zone_membership()`),
+        // and member-boundness follows the canonical filter (slot: member-
+        // bound; every-target: not), never a hardcoded constant.
+        CardTypeSetSource::TargetedObjects { slot } => {
+            board_membership_read(&CardTypeSetSource::targeted_objects_filter(slot))
+        }
         // The union reads everything its members read. Deliberately UNCITED: no
         // CR rule defines set union of populations — "among <A> and <B>" is
         // English, and each member carries its own citation above. (This arm
@@ -4187,6 +4415,171 @@ fn board_value_aggregate_read(filter: &TargetFilter, value: StateKind) -> RwProf
     p
 }
 
+/// CR 608.2h: the reads a filter's membership test makes through its own
+/// operands, wherever the filter grammar nests them — inside `AnyOf` / `Not`
+/// props, inside the `TargetFilter`s other props box, and across the player axis
+/// (`ControllerMatches` / `DealtDamageThisTurn` → `PlayerFilter`), the same reach
+/// `member_bound_filter_prop` classifies. The walk is `filter_grammar_any`; each
+/// node contributes only its own operand reads, and the walk visits the nodes it
+/// nests separately.
+fn filter_threshold_quantity_reads(filter: &TargetFilter) -> RwProfile {
+    use crate::types::ability::FilterGrammarNode;
+    let reads = std::cell::RefCell::new(RwProfile::empty());
+    crate::types::ability::filter_grammar_any(filter, &|node| {
+        let node_reads = match node {
+            FilterGrammarNode::Prop(prop) => filter_prop_operand_reads(prop),
+            // A player predicate reads its own operands
+            // (`ControlsCount { count }`, `PlayerAttribute { attr, value }`).
+            FilterGrammarNode::Player(player) => rw_player_filter(player),
+            // A `TargetFilter` node's reads are those of the props it carries,
+            // which the walk visits as `Prop` nodes.
+            FilterGrammarNode::Filter(_) => RwProfile::empty(),
+        };
+        reads.borrow_mut().merge(node_reads);
+        // Never stop early: every operand in the filter contributes.
+        false
+    });
+    reads.into_inner()
+}
+
+/// CR 608.2h: the reads ONE `FilterProp` makes through its own operands, not
+/// counting the props, filters and player filters it nests (the
+/// `filter_grammar_any` walk visits those as their own nodes). Exhaustive and
+/// wildcard-free, so a future operand-carrying prop must be classified here.
+fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
+    match prop {
+        // CR 122.1 + CR 202.3 + CR 208.1: a compared threshold is evaluated with
+        // the filter, so whatever it reads (e.g. the source's counters) is read.
+        FilterProp::Counters { count: value, .. }
+        | FilterProp::Cmc { value, .. }
+        | FilterProp::PtComparison { value, .. } => rw_quantity_expr(value),
+        // CR 208.1: "with power greater than this creature's" reads the source's
+        // power.
+        FilterProp::PowerGTSource => {
+            let mut p = reads_src_of(StateKind::ObjectPt);
+            p.current_pt_reads.add(PtReadScope::Source);
+            p
+        }
+        // Props whose only operands are nested filters / props / player filters,
+        // which the walk visits as their own nodes.
+        FilterProp::CanEnchant { .. }
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Not { .. }
+        | FilterProp::AnyOf { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::DealtDamageThisTurn { .. } => RwProfile::empty(),
+        // No quantity or source operand. Other mutable predicates (tapped state,
+        // keywords, ...) are outside this profile's covered axes.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => RwProfile::empty(),
+    }
+}
+
 /// Read an object characteristic at a given scope (§2 read-carrier closure):
 /// Source ⇒ `reads_src`; Recipient ⇒ nothing (read-modify-write); event objects
 /// ⇒ `reads_event_live`; other object scopes ⇒ `reads_board`.
@@ -4204,7 +4597,7 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
         // member-bound like `TargetFilter::GrantingObject`.
         ObjectScope::GrantingObject => {
             let mut p = reads_board_of(kind);
-            p.reads_member_bound = true;
+            p.bind_per_member();
             p
         }
         ObjectScope::AmassedArmy => member_bound_read(),
@@ -4315,6 +4708,7 @@ fn walk_ability(
         effect,
         sub_ability,
         else_ability,
+        coin_branches,
         condition,
         duration,
         player_scope,
@@ -4334,7 +4728,8 @@ fn walk_ability(
         declares_return_result: _, // producer effect accounts for publication
         reads_return_result,      // instruction-local result is member-bound
         source_id: _,
-        cast_occurrence: _,    // finalized-cast provenance, no read/write effect
+        cast_occurrence: _, // finalized-cast provenance, no read/write effect
+        cycling_occurrence: _,
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         announced_source_incarnation: _, // announcement-time source epoch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
@@ -4348,6 +4743,7 @@ fn walk_ability(
         illegal_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         unjudged_target_slots: _, // CR 608.2b resolution legality stamp, no read/write effect
         illegal_local_target_slots: _, // CR 608.2b node-local legality stamp, no read/write effect
+        declared_player_target_slots: _, // CR 115.1 announced player-role identity, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -4392,10 +4788,14 @@ fn walk_ability(
         target_reads: _, // origin of `Target` reads; the reads are profiled on condition/effect
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         replacement_applied: _,
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
+        control_change_instruction: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for
@@ -4405,10 +4805,20 @@ fn walk_ability(
         .map_or(pscope_in, player_span_of_filter);
     let (eff, own_scope) = rw_effect(effect, chain_root, pscope, chain_move_owner);
     acc.merge(eff);
-    acc.reads_member_bound |= reads_return_result.is_some();
+    if reads_return_result.is_some() {
+        acc.bind_per_member();
+    }
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
+    if let Some(branches) = coin_branches {
+        for child in [branches.won.as_ref(), branches.lost.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            walk_ability(child, child_root, child_move_owner, pscope, acc);
+        }
+    }
     if let Some(sub) = sub_ability {
         walk_ability(sub, child_root, child_move_owner, pscope, acc);
     }
@@ -4529,6 +4939,8 @@ fn walk_definition(
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        repeat_timing: _, // CR 608.2 iteration-relation tag; read only by the CR 101.4 admission authority (`simultaneous_unless::admits`)
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -4537,8 +4949,12 @@ fn walk_definition(
         // intact, and no runtime path reaches such a tree. See
         // `types::ability::UnloweredGuard`.)
         unlowered_guard: _,
+        linked_exile_return: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // read or write — creates no resolution-time dependency.
+        grant_chain: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -4548,7 +4964,9 @@ fn walk_definition(
         .map_or(pscope_in, player_span_of_filter);
     let (eff, own_scope) = rw_effect(effect, chain_root, pscope, chain_move_owner);
     acc.merge(eff);
-    acc.reads_member_bound |= reads_return_result.is_some();
+    if reads_return_result.is_some() {
+        acc.bind_per_member();
+    }
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
@@ -4710,6 +5128,9 @@ fn damage_writes(target: &TargetFilter) -> RwProfile {
         p.writes_membership_external_zones.merge(ZoneSpan::Any);
     }
     flag_legacy_write_target(&mut p, target);
+    // CR 509.1g + CR 603.3b: damage to the source's own combat partners
+    // ("each creature it blocked this combat") is per member.
+    flag_source_combat_pairing(&mut p, target);
     p
 }
 
@@ -4796,6 +5217,10 @@ fn rw_effect(
             // CR 704.5g: SBA deaths move battlefield → graveyard (fail-closed Any).
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             flag_legacy_write_target(&mut p, target);
+            // CR 509.1g + CR 603.3b: damage to the source's own combat partners
+            // (Cathedral Membrane's "each creature it blocked this combat") is
+            // per member.
+            flag_source_combat_pairing(&mut p, target);
             if player_filter.is_some() {
                 p.merge(life_writes());
             }
@@ -4854,7 +5279,7 @@ fn rw_effect(
                 board_value_aggregate_read(target, StateKind::ObjectCounters)
             };
             p.merge(rw_target_filter(target));
-            p.reads_member_bound = true;
+            p.bind_per_member();
             (p, None)
         }
         // CR 122.1 + CR 122.6 + CR 603.10a (PR-6.75 c5): adds `count` counters of the
@@ -4867,7 +5292,7 @@ fn rw_effect(
             target_condition,
         } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
-            p.reads_member_bound = true;
+            p.bind_per_member();
             p.merge(rw_quantity_expr(count));
             if let Some(condition) = target_condition {
                 p.merge(reads_board_of(StateKind::ObjectCounters));
@@ -5058,13 +5483,39 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, sc)
         }
+        // CR 122.1: both scopes write the counters of the objects `target` names
+        // (one chosen object, or the population for scope:All). Unlike the
+        // PutCounter / PutCounterAll pair above, scope:All also records its
+        // population reads below.
         Effect::RemoveCounter {
             counter_type: _,
             count,
             target,
+            scope,
         } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.merge(rw_quantity_expr(count));
+            match scope {
+                EffectScope::Single => {}
+                // CR 608.2h + CR 609.3: a mass removal's population is every
+                // battlefield object the filter matches when it resolves (a live
+                // membership census), and what it removes from each is bounded by
+                // the counters that object has then. Both are reads a sibling's
+                // counter write feeds — the filter can test counters ("each artifact
+                // with two or more charge counters on it"). The covered axes are
+                // membership, counters and P/T (counters change P/T, CR 613.4c, as
+                // for a present-tense `TargetMatchesFilter`); other mutable filter
+                // predicates (e.g. tapped state) are not recorded here.
+                EffectScope::All => {
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectCounters));
+                    p.merge(board_value_aggregate_read(target, StateKind::ObjectPt));
+                    // CR 608.2h: the membership test also evaluates the filter's
+                    // own threshold operands ("each other artifact with at least as
+                    // many charge counters on it as its source" reads the source's
+                    // counters), so their reads are reads of this effect.
+                    p.merge(filter_threshold_quantity_reads(target));
+                }
+            }
             (p, sc)
         }
         Effect::MultiplyCounter {
@@ -5135,7 +5586,7 @@ fn rw_effect(
         // channeled DEFERRED ETB metadata keyed to a future self-cast (mirrors
         // AddPendingETBCounters above, WriteScope::SelfSource): it reads no
         // event-live state (reads_event_live = false), no member-bound state
-        // (reads_member_bound = false), and writes no event object
+        // (`MemberBinding::Shared`), and writes no event object
         // (writes_event_object = EMPTY) — all inherited from self_write →
         // RwProfile::empty. CR 400.1: SetMembership is the membership state kind.
         // SOUNDNESS (CR 603.3b fail-open axis): AddSubtype/AddType carry NO
@@ -5246,6 +5697,7 @@ fn rw_effect(
             (p, sc)
         }
         Effect::ChangeZone {
+            actor,
             origin,
             destination,
             target,
@@ -5259,6 +5711,7 @@ fn rw_effect(
             conditional_enter_with_counters,
             face_down_profile: _,
             enters_modified_if: _,
+            library_shuffle: _,
         } => {
             let (mut p, sc) = mem(target, *origin, *destination);
             // §4.3.6 / §10.4 ENGINE COUPLING (CR 110.2 + CR 110.2a; the entering
@@ -5291,9 +5744,11 @@ fn rw_effect(
             for (_f, _ct, q) in conditional_enter_with_counters {
                 p.merge(rw_quantity_expr(q));
             }
+            p.merge(rw_library_instruction_actor(actor));
             (p, sc)
         }
         Effect::ChangeZoneAll {
+            actor,
             origin,
             destination,
             target,
@@ -5310,12 +5765,14 @@ fn rw_effect(
             for (_ct, q) in enter_with_counters {
                 p.merge(rw_quantity_expr(q));
             }
+            p.merge(rw_library_instruction_actor(actor));
             (p, sc)
         }
         Effect::Mill {
             count,
             target: _,
             destination: _,
+            position: _,
         } => {
             let mut p = RwProfile::empty();
             place_membership_write(
@@ -5333,7 +5790,7 @@ fn rw_effect(
             count,
             position: _,
             face_down: _,
-            actor: _,
+            actor,
         } => {
             let mut p = RwProfile::empty();
             place_membership_write(
@@ -5344,6 +5801,7 @@ fn rw_effect(
                 Zone::Exile,
             );
             p.merge(rw_quantity_expr(count));
+            p.merge(rw_library_instruction_actor(actor));
             (p, None)
         }
         Effect::ExileFaceDownPile {
@@ -5393,6 +5851,7 @@ fn rw_effect(
             keep_count: _,
             up_to: _,
             rest_destination: _,
+            rest_remainder: _,
             rest_order: _,
             reveal: _,
             enter_tapped: _,
@@ -5456,6 +5915,10 @@ fn rw_effect(
             filter,
             candidate_source,
             reciprocal_role,
+            // `..` covers `gather_role`: it names only the tracked set the pick
+            // is published into (a `SetMembership` write, below); the pool is
+            // read via `candidate_source`, and neither role reads the set's
+            // members.
             ..
         } => {
             let mut p = ext_write(StateKind::SetMembership);
@@ -5505,6 +5968,18 @@ fn rw_effect(
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
             p.merge(rw_quantity_expr(mana_value_limit));
+            (p, None)
+        }
+        // Turtle Team-Up "play a card": reveals library cards into play — the
+        // Discover shape (library membership → anywhere), minus the stack:
+        // Boss libraries are all-token, so nothing is ever cast. The
+        // any-census/any-zone membership write covers creature ETBs, Event
+        // graveyarding, and the Events' own damage/destroy/life writes.
+        Effect::HordePlayCard { .. } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
             (p, None)
         }
         Effect::RevealUntil {
@@ -5698,6 +6173,17 @@ fn rw_effect(
             p.merge(rw_token_attack_destination(attack_destination));
             (p, Some(WriteScope::Created))
         }
+        // CR 707.13: same write profile as a conjure — a new object appears
+        // (never in a hand or library), and the copy's `count` is a read.
+        Effect::CreateCardCopyByName { name: _, count } => {
+            let mut p = RwProfile::empty();
+            p.writes_external.set(StateKind::SetMembership);
+            p.writes_created.set(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            (p, Some(WriteScope::Created))
+        }
         Effect::Conjure {
             cards: _,
             destination,
@@ -5883,10 +6369,6 @@ fn rw_effect(
         // ---- Control (SetMembership external) ----
         Effect::GainControl { target: _ }
         | Effect::GainControlAll { target: _ }
-        | Effect::GiveControl {
-            target: _,
-            recipient: _,
-        }
         | Effect::ExchangeControl {
             target_a: _,
             target_b: _,
@@ -5894,6 +6376,22 @@ fn rw_effect(
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            (p, Some(WriteScope::External))
+        }
+        // CR 603.10a + CR 608.2c: the handoff reads its object filter AND its
+        // recipient filter, and either can name a per-member-bound referent — the
+        // per-object assignment (`ChoiceAssignment`) is a record the resolving
+        // ability keyed to its own population members. Both are profiled through
+        // the one filter profiler (which also records the member-bound bit), so a
+        // same-event group of distinct sources cannot take the auto-order path.
+        Effect::GiveControl { target, recipient } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            flag_legacy_write_target(&mut p, target);
+            flag_member_bound_write_target(&mut p, target);
+            p.merge(rw_target_filter(target));
+            p.merge(rw_target_filter(recipient));
             (p, Some(WriteScope::External))
         }
 
@@ -6018,11 +6516,7 @@ fn rw_effect(
                 .unwrap_or_else(RwProfile::empty),
             None,
         ),
-        Effect::CreateDrawReplacement { replacement_effect } => {
-            let (mut b, _) = rw_effect(replacement_effect, None, pscope, chain_move_owner);
-            b.drop_writes();
-            (b, None)
-        }
+        Effect::CreateDrawReplacement { replacement_effect } => (deferred(replacement_effect), None),
         Effect::PreventDamage {
             amount_dynamic,
             target: _,
@@ -6200,6 +6694,7 @@ fn rw_effect(
         | Effect::RingTemptsYou
         | Effect::TimeTravel
         | Effect::Planeswalk
+        | Effect::AbandonScheme
         | Effect::VentureIntoDungeon
         | Effect::SolveCase => (ext_write(StateKind::Other), None),
         // CR 725.1 + CR 725.3: the designation write, plus the chosen-target
@@ -6313,6 +6808,7 @@ fn rw_effect(
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut p = RwProfile::empty();
             if let Some(q) = count {
@@ -6325,6 +6821,12 @@ fn rw_effect(
             target: _,
             amount: _,
             is_combat: _,
+        }
+        | Effect::ResumeDamageBatch {
+            kind: _,
+            replaced: _,
+            remaining: _,
+            awaiting: _,
         }
         | Effect::Cleanup {
             clear_remembered: _,
@@ -6363,11 +6865,16 @@ fn rw_effect(
         // (`chosen_attributes`) that a later resolution reads ⇒ member-bound; a
         // resolution-local choice (`persist: false`) leaves no cross-member binding
         // (slithermuse's `Choose{Opponent, persist:false}`).
-        Effect::Choose { persist, .. } => {
+        Effect::Choose { persist, chooser, .. } => {
             let mut p = RwProfile::empty();
             if *persist {
-                p.reads_member_bound = true;
+                p.bind_per_member();
             }
+            // CR 608.2d + CR 109.4: the chooser is read at resolution (who is
+            // prompted). Controller / declared-target reads are
+            // sibling-immutable (empty); per-source refs resolve through the
+            // shared `rw_controller_ref` authority.
+            p.merge(rw_controller_ref(chooser));
             (p, None)
         }
         Effect::SwapChosenLabels {
@@ -6544,7 +7051,7 @@ fn rw_guess_subject(subject: &GuessSubject) -> RwProfile {
             let mut p = rw_choice_type(choice_type);
             // CR 608.2d + CR 603.10a: a committed-value guess consumes the source's
             // persisted choice, so same-event sibling instances are member-bound.
-            p.reads_member_bound = true;
+            p.bind_per_member();
             p
         }
         GuessSubject::Proposition {
@@ -6570,7 +7077,7 @@ fn rw_choice_type(choice_type: &crate::types::ability::ChoiceType) -> RwProfile 
         | crate::types::ability::ChoiceType::OddOrEven
         | crate::types::ability::ChoiceType::BasicLandType
         | crate::types::ability::ChoiceType::CardType { .. }
-        | crate::types::ability::ChoiceType::CardName
+        | crate::types::ability::ChoiceType::CardName { .. }
         | crate::types::ability::ChoiceType::NumberRange { .. }
         | crate::types::ability::ChoiceType::Labeled { .. }
         | crate::types::ability::ChoiceType::LandType
@@ -6598,6 +7105,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
+        // CR 103.2a: the starting-deck latch lives on the player — same
+        // player-scope read profile as the starting-life snapshot.
+        QuantityRef::StartingDeckSize { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
@@ -6612,6 +7122,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_event_live()
         }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
+        // Turtle Team-Up: a command-zone pile census — zone membership like
+        // GraveyardSize, global (not per-source member-bound).
+        QuantityRef::DeployedBossCount => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
         | QuantityRef::ObjectCountBySharedQuality { filter, .. }
@@ -6631,9 +7144,27 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                 crate::types::ability::UNION_DEPTH_BUDGET,
                 &mut |leaf| match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // A member filter narrows which members resolve, not
+                    // whether the leaf reads tracked-set membership.
                     CardTypeSetSource::TrackedSet { .. } => {
                         reads_live_object = true;
                         reads_tracked = true;
+                    }
+                    // CR 608.2c + CR 115.1: the leaf reads live objects by
+                    // identity (state.objects with LKI fallback) whenever a
+                    // resolving ability is in scope. Member-boundness follows
+                    // the canonical slot filter via the single
+                    // `targeted_objects_filter` authority (indexed slot:
+                    // member-bound; every-target: not) — never a hardcoded
+                    // constant, so the flag cannot drift from the filter's.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        reads_live_object = true;
+                        // CR 603.3b: OR-accumulate — an earlier union member
+                        // may already read a tracked set, and a later
+                        // every-target leaf must not clear that bit.
+                        reads_tracked |= member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
                     }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
@@ -6653,7 +7184,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
                 }
             }
             if reads_tracked {
-                profile.reads_member_bound = true;
+                profile.bind_per_member();
             }
             profile
         }
@@ -6711,7 +7242,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::DistinctColorsAmong { source } => characteristic_source_read_bounded(source),
         // CR 603.10a (PR-6.75 c5): promoted out of the fail-closed group below to
         // its own arm so the next field addition is compiler-visible (a read-bearing
-        // field must force a re-audit). `reads_member_bound = true` is the HONEST
+        // field must force a re-audit). `bind_per_member()` is the HONEST
         // classification for BOTH sources, not conservative-by-reflex:
         //   - `ChainSet` is per-instance chain-published storage (same as the group
         //     below), so it is member-bound.
@@ -6748,7 +7279,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::VoteCount { .. } => {
             let mut p = RwProfile::empty();
-            p.reads_member_bound = true;
+            p.bind_per_member();
             p
         }
         // Resolution-local / turn- / commander-scoped: no per-source binding
@@ -6762,6 +7293,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::PreviousEffectCount
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         // CR 701.65b/701.66b/701.67c: controller-scoped per-turn accumulator; no
@@ -6831,14 +7363,31 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // (Fairgrounds Trumpeter). Fail-closed on a departure reentry hazard.
         QuantityRef::CounterAddedThisTurn { .. } => reads_frozen_of(StateKind::ObjectCounters),
         // Player-resource journals.
-        QuantityRef::LifeLostThisTurn { player: _ }
+        QuantityRef::LifeLost {
+            player: _,
+            window: _,
+        }
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
+        | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
-        QuantityRef::SpellsCastThisTurn { .. }
+        QuantityRef::CardsCycled {
+            scope,
+            window: _,
+            name: _,
+        } => {
+            // CR 603.3b + CR 608.2h: This reads a player journal, with a per-source
+            // binding only when the scope uses that source's persisted player choice.
+            let mut profile = reads_player_of(StateKind::JournalCards);
+            if matches!(scope, CountScope::SourceChosenPlayer) {
+                profile.bind_per_member();
+            }
+            profile
+        }
+        QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. } => reads_player_of(StateKind::JournalCast),
@@ -6908,23 +7457,60 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // counter on ~" (Taborax / Uglúk / Venom / Locus Cobra / Overgrowth
         // Elemental / Magnanimous Magistrate / Prowling Geistcatcher).
         AbilityCondition::TargetMatchesFilter {
-            filter: _,
+            filter,
             use_lki,
             subject_slot,
+            subject,
         } => {
+            // CR 603.2: the shared scope mapper (exhaustive over `ObjectScope`) decides whether the
+            // subject is an event object; no scope is classified here by a one-variant test.
+            let event_bound = read_object_scope(subject, StateKind::ObjectPt).reads_event_live;
             let mut p = if *use_lki {
                 frozen_source_read()
+            } else if event_bound
+                && crate::types::ability::filter_contains_filter_prop(
+                    filter,
+                    &crate::game::filter::filter_prop_reads_only_mana_cost,
+                )
+                && !crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+                    !crate::game::filter::filter_prop_reads_only_mana_cost(prop)
+                })
+            {
+                // CR 603.2 + CR 608.2h + CR 202.3: an event-bound predicate whose only properties
+                // read the mana cost (mana value, parity, printed cost) reads the event object,
+                // recorded below as `reads_event_live`, exactly as
+                // `TriggerCondition::TriggeringSpellMatchesFilter` does; the same-event
+                // event-object discriminator orders it against a sibling that writes that object.
+                // A board P/T read would make a sibling's write to its OWN counters look like a
+                // feed (Prismari Apprentice and Herald of Ilharg observing one cast). Residual,
+                // shared with that precedent: a board-wide write that changes the event object's
+                // mana value (turn face down, copy) is not an event-object write.
+                filter_threshold_quantity_reads(filter)
             } else {
                 let mut p = reads_board_of(StateKind::ObjectPt);
                 p.current_pt_reads.add(PtReadScope::Board);
                 p
             };
+            // CR 122.1 + CR 603.3b: a counter leaf reads the referent's counters, so a
+            // sibling that puts or removes counters must feed this condition (Hadana's
+            // Climb, the Ordeals); a fail-open read would let two such triggers auto-order.
+            if !*use_lki
+                && crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+                    matches!(prop, FilterProp::Counters { .. })
+                })
+            {
+                p.merge(reads_board_of(StateKind::ObjectCounters));
+            }
+            // CR 603.2: an event-object subject reads the object the trigger event names.
+            if event_bound {
+                p.merge(reads_event_live());
+            }
             // CR 608.2c (PR-6.75 c5): Some(n) tests a specific DECLARED chain slot
             // resolved per member instance — the same per-member binding
             // member_bound_target_filter flags for TargetFilter::ParentTargetSlot.
             // Fail-closed: refuse batch-T1 (a member-bound read).
             if subject_slot.is_some() {
-                p.reads_member_bound = true;
+                p.bind_per_member();
             }
             p
         }
@@ -6960,10 +7546,22 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
         // in-resolution signal, same read-bucket as `EventOutcomeWon`.
         AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
-        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
-        // by this ability's own `(source_id, ability_index)` — the same read
-        // bucket for `Resolved` (`ability_resolutions_this_turn`) and
-        // `Activated` (`activated_abilities_this_turn`). Neither field selects a
+        // CR 607.2d + CR 608.2c: reads the named-choice continuation
+        // (`named_label_this_resolution`), written by the preceding `Choose {
+        // Labeled }` head's bind — NOT the source's persisted
+        // `ChosenAttribute::Label` history the `StaticCondition` /
+        // `TriggerCondition` mirrors read. Still `RwProfile::empty()`: the
+        // write→read is intra-chain (same resolving ability, CR 608.2c
+        // in-order steps), and the same-event gate orders DISTINCT abilities
+        // — no other ability writes this resolution's label. An event-live
+        // read would spuriously pair against every event-object writer
+        // (damage, counters).
+        AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
+        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal: the
+        // `Resolved` tally reads `ability_resolutions_this_turn` keyed by
+        // `(source_id, ability_index)`, while the `Activated` tally reads
+        // `activated_abilities_this_turn` keyed by the per-acquisition
+        // `AbilityUsageKey` (CR 602.5c). Neither field selects a
         // different KIND or SCOPE of state, so the profile is unchanged by the
         // tally axis; both are destructured without `..` so a future field
         // forces re-classification.
@@ -7042,6 +7640,9 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::FirstEndStepOfTurn
         | AbilityCondition::DayNightIsNeither
         | AbilityCondition::DayNightIs { .. } => RwProfile::empty(),
+        // CR 508.6: this-turn player-pair attack ledger; same turn-structure
+        // player read as the static last-turn analog (`rw_static_condition`).
+        AbilityCondition::PlayerAttackedPlayer { .. } => reads_player_of(StateKind::TurnStructure),
     }
 }
 
@@ -7055,6 +7656,15 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // holder's installed boons; like the monarch designation the read
         // profile is entirely determined by the subject scope.
         TriggerCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: poison is a player counter (CR 122.1f defines "poisoned"
+        // as having one or more poison counters). The read profile records the
+        // PlayerLife kind (where poison counters live) and merges the subject
+        // scope classification from rw_player_scope.
+        TriggerCondition::IsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -7204,6 +7814,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // entirely determined by the monarch subject scope.
         StaticCondition::IsMonarch { player } => rw_player_scope(player),
         StaticCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: the poison predicate reads the scoped player's poison
+        // total (the sibling-mutable `PlayerLife` row), exactly like the
+        // `TriggerCondition::IsPoisoned` sibling — never a designation.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {
@@ -7257,6 +7875,12 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             p.merge(frozen_source_read());
             p
         }
+        // CR 508.6: this-turn player-pair attack ledger
+        // (`attacked_players_directly_this_turn`); same turn-structure
+        // player read as the last-turn analog above.
+        StaticCondition::PlayerAttackedPlayer { .. } => {
+            reads_player_of(StateKind::TurnStructure)
+        }
         // CR 500.8 + CR 506.1: the phase-occurrence gate reads whether the
         // turn's first combat phase is the one in progress — the same
         // sequencing channel `Effect::AdditionalPhase` writes (an added combat
@@ -7289,7 +7913,7 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceIsBlocking
         | StaticCondition::SourceIsBlocked
         | StaticCondition::SourceEnteredThisTurn
-        | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceIsSaddled
         | StaticCondition::SourceIsEquipped
         | StaticCondition::SourceIsEnchanted
@@ -7360,6 +7984,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
@@ -7447,6 +8072,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -7458,12 +8084,18 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        // CR 108.3: owner-of-each-affected-member anchor — a read-free
+        // selector here (mirrors `Owner`); the member-bound bit is added by
+        // the trailing `member_bound_target_filter` union below.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => RwProfile::empty(),
     };
     // CR 603.10a (PR-6.75 c5): a member-bound referent used as a read carrier
     // (target_chooser / nested filter) refuses batch-T1. Position-agnostic —
     // `member_bound_target_filter` descends composites itself.
-    p.reads_member_bound |= member_bound_target_filter(x);
+    if member_bound_target_filter(x) {
+        p.bind_per_member();
+    }
     p
 }
 
@@ -7481,6 +8113,9 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             source,
             kind: _,
             min_sources: _,
+            // Static candidate-population selector; no read/write impact (same
+            // as `ControlsCount.relation` below).
+            relation: _,
         } => {
             let mut p = reads_player_of(StateKind::JournalLife);
             if let Some(source) = source.as_deref() {
@@ -7516,7 +8151,10 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             p.merge(rw_quantity_expr(value));
             p
         }
-        PlayerFilter::AllExcept { exclude } => rw_player_filter(exclude),
+        PlayerFilter::AllExcept {
+            exclude,
+            relation: _,
+        } => rw_player_filter(exclude),
         PlayerFilter::AnyOf { filters } => {
             let mut p = RwProfile::empty();
             for f in filters {
@@ -7593,6 +8231,27 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         // from a value/quantity/player-selection position.
         | PlayerScope::SpecificPlayer { .. }
         | PlayerScope::DefendingPlayer => RwProfile::empty(),
+    }
+}
+
+/// CR 608.2c: the reads of the player who performs an instruction
+/// (`Effect::ExileTop.actor`, `Effect::ChangeZone.actor`,
+/// `Effect::ChangeZoneAll.actor`); the resolvers (`effects/exile_top.rs`,
+/// `effects/change_zone.rs`) resolve a named subject's player filter at
+/// resolution.
+fn rw_library_instruction_actor(x: &LibraryInstructionActor) -> RwProfile {
+    match x {
+        // The spell or ability's controller — a `ResolvedAbility` field, not a
+        // filter read.
+        LibraryInstructionActor::Controller => RwProfile::empty(),
+        // The library's owner — the instruction's own `player` selector. The rw
+        // walk does not profile that selector (the library-player convention
+        // shared with Dig/Mill/RevealTop); its frozen tags reach `legacy_effect`.
+        LibraryInstructionActor::LibraryPlayer => RwProfile::empty(),
+        // A named subject other than the library's owner ("Target opponent
+        // looks at the top card of your library, then exiles it face down" —
+        // Vulcan Mind-Meld) reads whatever its player filter reads.
+        LibraryInstructionActor::Player { player } => rw_target_filter(player),
     }
 }
 
@@ -7724,6 +8383,29 @@ mod tests {
         assert_eq!(profile(AttackSubject::You), RwProfile::empty());
     }
 
+    /// CR 103.2a: the starting-deck latch profiles exactly like the
+    /// starting-life snapshot for every player scope. The revert (an empty
+    /// profile) would drop the latch from read/write ordering.
+    #[test]
+    fn starting_deck_size_profiles_like_starting_life_total() {
+        for scope in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::Target,
+        ] {
+            assert_eq!(
+                rw_quantity_ref(&QuantityRef::StartingDeckSize {
+                    player: scope.clone()
+                }),
+                rw_quantity_ref(&QuantityRef::StartingLifeTotal { player: scope }),
+            );
+        }
+        // The latch is not one of the 12 frozen legacy tags.
+        assert!(!legacy_quantity_ref(&QuantityRef::StartingDeckSize {
+            player: PlayerScope::Controller,
+        }));
+    }
+
     #[test]
     fn property_aggregate_source_rw_profiles_are_exhaustive() {
         use crate::types::ability::{
@@ -7738,9 +8420,21 @@ mod tests {
             source.try_for_each_member(crate::types::ability::UNION_DEPTH_BUDGET, &mut |leaf| {
                 match leaf {
                     CardTypeSetSource::TurnJournal { .. } => {}
+                    // Test mirror of the production arm above: membership
+                    // flags, unaffected by member narrowing.
                     CardTypeSetSource::TrackedSet { .. } => {
                         live = true;
                         tracked = true;
+                    }
+                    // Test mirror of the `TargetedObjects` production arm:
+                    // the canonical slot filter's target read (live), with
+                    // member-boundness following the canonical filter
+                    // (slot: bound; every-target: not) — never hardcoded.
+                    CardTypeSetSource::TargetedObjects { slot } => {
+                        live = true;
+                        tracked |= member_bound_target_filter(
+                            &CardTypeSetSource::targeted_objects_filter(slot),
+                        );
                     }
                     CardTypeSetSource::Zone { .. }
                     | CardTypeSetSource::ExiledBySource
@@ -7752,7 +8446,7 @@ mod tests {
                 profile.merge(reads_board_of(StateKind::ObjectPt));
             }
             if tracked {
-                profile.reads_member_bound = true;
+                profile.bind_per_member();
             }
             profile
         }
@@ -7775,13 +8469,29 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::TriggeringBatch,
                 caused_by: None,
+                filter: None,
             },
+            CardTypeSetSource::TargetedObjects { slot: None },
+            CardTypeSetSource::TargetedObjects { slot: Some(1) },
             journal.clone(),
             CardTypeSetSource::any_of(vec![objects, journal]).unwrap(),
+            // F7: a union whose tracked leaf must survive a later
+            // every-target leaf — a plain assignment erases the tracked bit
+            // and wrongly clears the same-event ordering gate.
+            CardTypeSetSource::any_of(vec![
+                CardTypeSetSource::TrackedSet {
+                    set: TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: None,
+                },
+                CardTypeSetSource::TargetedObjects { slot: None },
+            ])
+            .unwrap(),
         ];
         for source in sources {
             let qty = QuantityRef::PropertyAggregate(
@@ -7807,7 +8517,9 @@ mod tests {
     /// fails here.
     #[test]
     fn characteristic_source_reads_are_exact_per_population() {
-        use crate::types::ability::{CardTypeSetSource, TurnJournalKind, TypeFilter, TypedFilter};
+        use crate::types::ability::{
+            CardTypeSetSource, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter,
+        };
 
         let board_filter = TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You),
@@ -7834,7 +8546,7 @@ mod tests {
         );
 
         // (a) CR 601.2a: a turn journal is turn-scoped PLAYER state. It must
-        // declare the same `JournalCast` read `QuantityRef::SpellsCastThisTurn`
+        // declare the same `JournalCast` read `QuantityRef::SpellsCast`
         // declares, and must NOT claim a board read.
         let journal_profile = characteristic_source_read(&journal);
         assert_eq!(
@@ -7843,7 +8555,7 @@ mod tests {
             "a cast journal must read player journal state, not the board"
         );
         assert!(
-            !journal_profile.reads_member_bound,
+            !journal_profile.reads_member_bound(),
             "a journal read is not member-bound"
         );
 
@@ -7874,6 +8586,49 @@ mod tests {
             union_profile,
             RwProfile::empty(),
             "a fold that collapses to empty is FAIL-OPEN for CR 603.3b"
+        );
+
+        // (e) CR 603.3b: a member-filtered chain set merges the filter's
+        // board read onto the zone-membership base — omitting it is
+        // fail-open (the controller span would silently narrow), while an
+        // unfiltered chain set keeps exactly the base profile.
+        let filtered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: Some(board_filter.clone()),
+        };
+        let mut expected_filtered = reads_zone_membership();
+        expected_filtered.merge(board_membership_read(&board_filter));
+        expected_filtered.bind_per_member();
+        assert_eq!(
+            characteristic_source_read(&filtered_chain),
+            expected_filtered,
+            "a filtered chain set must merge its member filter's board read"
+        );
+        assert_ne!(
+            characteristic_source_read(&filtered_chain),
+            reads_zone_membership(),
+            "a merge that drops the member filter's controller span must fail"
+        );
+        assert!(
+            characteristic_source_read(&filtered_chain).reads_member_bound(),
+            "F7: a filtered chain set read is member-bound — each source reads its own set (CR 603.3b)"
+        );
+        let unfiltered_chain = CardTypeSetSource::TrackedSet {
+            set: TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter: None,
+        };
+        let mut expected_unfiltered = reads_zone_membership();
+        expected_unfiltered.bind_per_member();
+        assert_eq!(
+            characteristic_source_read(&unfiltered_chain),
+            expected_unfiltered,
+            "an unfiltered chain set keeps the zone-membership profile plus member-boundness"
+        );
+        assert!(
+            characteristic_source_read(&unfiltered_chain).reads_member_bound(),
+            "an unfiltered chain set read is member-bound — each source reads its own set (CR 603.10a)"
         );
 
         // Idempotence: a union of two identical members equals that member.
@@ -8000,6 +8755,37 @@ mod tests {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
     }
 
+    /// CR 603.3b: only a `Source` subject is a per-member referent.
+    /// A target subject, in either form, is closed by the target gate, so it binds
+    /// no member and names no `SourceCombatPairing` row.
+    #[test]
+    fn combat_relation_subject_decides_member_binding() {
+        for (subject, bound) in [
+            (CombatRelationSubject::Source, true),
+            (CombatRelationSubject::ParentTarget, false),
+            (CombatRelationSubject::AnaphoricTarget, false),
+        ] {
+            let profile = ability_rw_profile(&ra(Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        relation: crate::types::ability::CombatRelation::BlockPairing {
+                            direction: crate::types::ability::BlockPairDirection::Either,
+                            scope: Some(CombatHistoryScope::ThisTurn),
+                        },
+                        subject,
+                    },
+                ])),
+                cant_regenerate: false,
+            }));
+            assert_eq!(profile.reads_member_bound(), bound, "{subject:?}");
+            assert_eq!(
+                profile.member_binding.names_source_combat_pairing(),
+                bound,
+                "{subject:?}"
+            );
+        }
+    }
+
     fn zone_choice_for_rw(
         candidate_source: ZoneChoiceCandidateSource,
         reciprocal_role: Option<ReciprocalZoneChoiceRole>,
@@ -8013,6 +8799,7 @@ mod tests {
             chooser: ZoneChoiceChooser::Controller,
             candidate_source,
             reciprocal_role,
+            gather_role: None,
             up_to: false,
             selection: Default::default(),
             constraint: None,
@@ -8135,6 +8922,7 @@ mod tests {
             counter_type: None,
             count: qfix(1),
             target,
+            scope: crate::types::ability::EffectScope::Single,
         }
     }
     fn gain_life(amount: QuantityExpr) -> Effect {
@@ -8280,8 +9068,161 @@ mod tests {
         }
     }
 
+    fn exile_top_performed_by(actor: LibraryInstructionActor) -> Effect {
+        Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count: qfix(1),
+            position: crate::types::ability::LibraryPosition::Top,
+            face_down: true,
+            actor,
+        }
+    }
+
+    /// CR 608.2c: the player who performs a library exile is profiled through
+    /// its own filter. The controller and library-owner roles carry no filter
+    /// and add nothing; a named subject adds what its player filter reads —
+    /// Vulcan Mind-Meld's bare targeted opponent nothing, a chosen-label
+    /// subject a player read.
+    /// Revert-probe: bind `actor: _` in the `rw_effect` `ExileTop` arm ⇒ the
+    /// chosen-label row equals the controller row.
+    #[test]
+    fn exile_top_actor_is_profiled_as_its_player_filter() {
+        let profile = |actor| ability_rw_profile(&ra(exile_top_performed_by(actor)));
+        let named = |player| LibraryInstructionActor::Player { player };
+        let controller = profile(LibraryInstructionActor::Controller);
+        assert_eq!(
+            profile(LibraryInstructionActor::LibraryPlayer),
+            controller,
+            "the library owner adds nothing beyond the instruction's `player`"
+        );
+        assert_eq!(
+            profile(named(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))),
+            controller,
+            "a bare targeted opponent reads nothing"
+        );
+        assert_ne!(
+            profile(named(TargetFilter::PlayerWhoChoseLabel {
+                label: "chosen".to_string(),
+            })),
+            controller,
+            "a chosen-label subject is a player read the controller form is not"
+        );
+    }
+
+    /// D5 (CR 603.10a): a frozen event-context tag on the performing player —
+    /// nested inside a composite filter, and on an `ExileTop` that is a
+    /// sub-ability — sets `legacy_batch_prompt`; the fieldless roles do not.
+    /// Revert-probe: bind `actor: _` (or restore `..`) in the `legacy_effect`
+    /// `ExileTop` arm ⇒ the tagged rows read `false`.
+    #[test]
+    fn exile_top_actor_frozen_tag_reaches_legacy_visitor() {
+        let tagged = LibraryInstructionActor::Player {
+            player: TargetFilter::Not {
+                filter: Box::new(TargetFilter::TriggeringPlayer),
+            },
+        };
+        assert!(!legacy_effect(&exile_top_performed_by(
+            LibraryInstructionActor::Controller
+        )));
+        assert!(!legacy_effect(&exile_top_performed_by(
+            LibraryInstructionActor::LibraryPlayer
+        )));
+        assert!(legacy_effect(&exile_top_performed_by(tagged.clone())));
+
+        let with_exile = |actor| {
+            ra(Effect::GainLife {
+                amount: qfix(1),
+                player: TargetFilter::Controller,
+            })
+            .sub_ability(ra(exile_top_performed_by(actor)))
+        };
+        assert!(
+            !ability_rw_profile(&with_exile(LibraryInstructionActor::Controller))
+                .legacy_batch_prompt()
+        );
+        assert!(ability_rw_profile(&with_exile(tagged)).legacy_batch_prompt());
+    }
+
+    fn zone_moves_performed_by(actor: LibraryInstructionActor) -> [Effect; 2] {
+        let pick = Effect::ChangeZone {
+            actor: actor.clone(),
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::default(),
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let mass = Effect::ChangeZoneAll {
+            actor,
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        };
+        [pick, mass]
+    }
+
+    /// CR 608.2c: a zone move's performer is profiled through its player
+    /// filter on both zone-move variants, as `ExileTop`'s is: the controller
+    /// adds nothing, a chosen-label subject adds a player read.
+    /// Revert-probe: bind `actor: _` in either `rw_effect` zone-move arm ⇒
+    /// that variant's chosen-label row equals its controller row.
+    #[test]
+    fn zone_move_actor_is_profiled_as_its_player_filter() {
+        let controller = zone_moves_performed_by(LibraryInstructionActor::Controller);
+        let named = zone_moves_performed_by(LibraryInstructionActor::Player {
+            player: TargetFilter::PlayerWhoChoseLabel {
+                label: "chosen".to_string(),
+            },
+        });
+        for (controller, named) in controller.into_iter().zip(named) {
+            assert_ne!(
+                ability_rw_profile(&ra(named)),
+                ability_rw_profile(&ra(controller)),
+                "a chosen-label performer is a player read the controller form is not"
+            );
+        }
+    }
+
+    /// D5 (CR 603.10a): a frozen event-context tag on a zone move's performer
+    /// ("that player exiles …" bound to the triggering player) sets
+    /// `legacy_batch_prompt`; the controller does not.
+    /// Revert-probe: bind `actor: _` (or restore `..`) in either
+    /// `legacy_effect` zone-move arm ⇒ that variant's tagged row reads `false`.
+    #[test]
+    fn zone_move_actor_frozen_tag_reaches_legacy_visitor() {
+        for effect in zone_moves_performed_by(LibraryInstructionActor::Controller) {
+            assert!(!legacy_effect(&effect));
+        }
+        for effect in zone_moves_performed_by(LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        }) {
+            assert!(legacy_effect(&effect));
+        }
+    }
+
     fn change_zone(origin: Option<Zone>, dest: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination: dest,
             target,
@@ -8463,7 +9404,7 @@ mod tests {
             QuantityRef::ConvokedCreatureCount,
         ] {
             assert!(
-                rw_quantity_ref(&r).reads_member_bound,
+                rw_quantity_ref(&r).reads_member_bound(),
                 "quantity member-bound expected for {r:?}"
             );
         }
@@ -8477,7 +9418,7 @@ mod tests {
             },
         ] {
             assert!(
-                !rw_quantity_ref(&r).reads_member_bound,
+                !rw_quantity_ref(&r).reads_member_bound(),
                 "quantity member-unbound expected for {r:?}"
             );
         }
@@ -8488,16 +9429,17 @@ mod tests {
     #[test]
     fn b7_choose_persist_member_bound() {
         let choose = |persist: bool| Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist,
             selection: TargetSelectionMode::default(),
         };
         assert!(
-            ability_rw_profile(&ra(choose(true))).reads_member_bound,
+            ability_rw_profile(&ra(choose(true))).reads_member_bound(),
             "persist:true ⇒ member-bound"
         );
         assert!(
-            !ability_rw_profile(&ra(choose(false))).reads_member_bound,
+            !ability_rw_profile(&ra(choose(false))).reads_member_bound(),
             "persist:false ⇒ member-unbound"
         );
     }
@@ -8542,7 +9484,7 @@ mod tests {
             "T1 != Mixed conjunct: Mixed ⇒ gate off ⇒ membership feed prompts"
         );
         let mut mb = feed();
-        mb.reads_member_bound = true;
+        mb.bind_per_member();
         assert!(
             profiles_conflict(&mb, &batch_uniform()),
             "T1 !reads_member_bound conjunct: member-bound ⇒ T1 refused ⇒ feed prompts"
@@ -8942,6 +9884,118 @@ mod tests {
         assert!(conflicts(&rerooted, &se()));
     }
 
+    /// CR 608.2h + CR 609.3: a mass counter removal (`scope: All`) reads its
+    /// population live — membership and each member's counters — so a same-event
+    /// sibling that also puts a counter on its own source feeds it. The single
+    /// scope keeps its write-only profile, and a source-independent mass removal
+    /// stays on the identical-function fast path.
+    #[test]
+    fn mass_counter_removal_records_population_reads() {
+        let charge = CounterType::Generic("charge".to_string());
+        let artifacts_with_two_charge =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: qfix(2),
+                },
+            ]));
+        let removal = |scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: artifacts_with_two_charge.clone(),
+            scope,
+        };
+        let put_on_source = Effect::PutCounter {
+            count: qfix(1),
+            target: TargetFilter::SelfRef,
+            counter_type: charge.clone(),
+        };
+
+        let mass = ability_rw_profile(&ra(removal(EffectScope::All)));
+        assert!(mass.reads_board.object_counters, "{mass:?}");
+        assert!(mass.reads_board.set_membership, "{mass:?}");
+        assert!(mass.reads_board.object_pt, "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(EffectScope::Single)));
+        assert!(
+            single.reads_board.is_empty(),
+            "the single scope's profile is unchanged: {single:?}"
+        );
+
+        // CodeRabbit's trace (A=2, B=1 charge): removing from each artifact with
+        // two or more, then charging its own source, ends differently by order.
+        let mass_then_charge = ra(removal(EffectScope::All)).sub_ability(ra(put_on_source));
+        assert!(conflicts(&mass_then_charge, &se_phase()));
+        // The bare mass removal is one shared function of the board.
+        assert!(!conflicts(&ra(removal(EffectScope::All)), &se_phase()));
+    }
+
+    /// CR 208.1 + CR 608.2h: a mass removal whose filter compares against the
+    /// source's power ("each creature with power greater than this creature's")
+    /// reads the source's P/T, through `AnyOf` / `Not` nesting too, so it is not
+    /// source-independent. The single scope's profile is unchanged.
+    #[test]
+    fn mass_counter_removal_power_gt_source_reads_source_pt() {
+        let removal = |prop: FilterProp, scope| Effect::RemoveCounter {
+            counter_type: Some(CounterType::Plus1Plus1),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+            scope,
+        };
+        let nested = FilterProp::Not {
+            prop: Box::new(FilterProp::AnyOf {
+                props: vec![FilterProp::Tapped, FilterProp::PowerGTSource],
+            }),
+        };
+        for prop in [FilterProp::PowerGTSource, nested] {
+            let mass = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::All)));
+            assert!(mass.reads_src.object_pt, "{prop:?}: {mass:?}");
+            assert!(!mass.source_independent(), "{prop:?}: {mass:?}");
+            let single = ability_rw_profile(&ra(removal(prop.clone(), EffectScope::Single)));
+            assert!(single.reads_src.is_empty(), "{prop:?}: {single:?}");
+        }
+        // Control: a source-free predicate in the same position reads no source.
+        let tapped = ability_rw_profile(&ra(removal(FilterProp::Tapped, EffectScope::All)));
+        assert!(tapped.reads_src.is_empty(), "{tapped:?}");
+    }
+
+    /// CR 608.2h: a mass removal whose counter threshold is read from its own
+    /// source ("each artifact with at least as many charge counters as this
+    /// permanent") reads the source's counters, so it is not
+    /// source-independent. The single scope's profile is unchanged, and a
+    /// fixed threshold reads no source.
+    ///
+    /// No printed card has a mass counter removal whose filter threshold reads
+    /// its source. This row guards the general `filter_threshold_quantity_reads`
+    /// merge that CodeRabbit asked to pin; the nearest printed card is Aether
+    /// Snap ("Remove all counters from all permanents and exile all tokens."),
+    /// a mass removal whose population has no source-relative threshold.
+    #[test]
+    fn mass_counter_removal_source_scoped_threshold_reads_source_counters() {
+        let charge = CounterType::Generic("charge".to_string());
+        let removal = |threshold: QuantityExpr, scope| Effect::RemoveCounter {
+            counter_type: Some(charge.clone()),
+            count: qfix(1),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Counters {
+                    counters: crate::types::counter::CounterMatch::OfType(charge.clone()),
+                    comparator: Comparator::GE,
+                    count: threshold,
+                },
+            ])),
+            scope,
+        };
+
+        let mass = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::All)));
+        assert!(mass.reads_src.object_counters, "{mass:?}");
+        assert!(!mass.source_independent(), "{mass:?}");
+        let single = ability_rw_profile(&ra(removal(qref(counters_src()), EffectScope::Single)));
+        assert!(single.reads_src.is_empty(), "{single:?}");
+        // Control: a fixed threshold in the same position reads no source.
+        let fixed = ability_rw_profile(&ra(removal(qfix(2), EffectScope::All)));
+        assert!(fixed.reads_src.is_empty(), "{fixed:?}");
+    }
+
     // ===================== (vi) event-object disjointness =====================
 
     #[test]
@@ -9241,7 +10295,7 @@ mod tests {
         ];
         for read in reads {
             let mut expected = rw_quantity_ref(&read(bound));
-            expected.reads_member_bound = true;
+            expected.bind_per_member();
             assert_eq!(
                 rw_quantity_ref(&read(ObjectScope::GrantingObject)),
                 expected
@@ -9404,6 +10458,7 @@ mod tests {
                 filter: creature(),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
@@ -9418,11 +10473,196 @@ mod tests {
                 filter: creature(),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
             conflicts(&neg, &se()),
             "live 'is X' read × self counter ⇒ conflict"
+        );
+    }
+
+    /// CR 122.1 + CR 603.3b: a referent condition whose filter tests counters reads the
+    /// referent's counters, wherever the counter property sits in the filter. The shared
+    /// `filter_contains_filter_prop` walker reaches a property nested in `AnyOf` / `Not`,
+    /// which a walk that treats the typed properties as leaves does not.
+    #[test]
+    fn target_matches_filter_counter_property_nested_in_a_prop_reads_counters() {
+        let counters = FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::Any,
+            comparator: Comparator::GE,
+            count: qfix(1),
+        };
+        let reads_counters = |filter: TargetFilter, use_lki: bool| {
+            rw_ability_condition(&AbilityCondition::TargetMatchesFilter {
+                filter,
+                use_lki,
+                subject_slot: None,
+                subject: ObjectScope::Target,
+            })
+            .reads_board
+            .object_counters
+        };
+        let typed =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        // POS: the counter leaf directly, nested in `AnyOf`, nested in `Not`, under a filter `Not`.
+        assert!(reads_counters(typed(vec![counters.clone()]), false));
+        assert!(reads_counters(
+            typed(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, counters.clone()],
+            }]),
+            false
+        ));
+        assert!(reads_counters(
+            typed(vec![FilterProp::Not {
+                prop: Box::new(counters.clone()),
+            }]),
+            false
+        ));
+        assert!(reads_counters(
+            TargetFilter::Not {
+                filter: Box::new(typed(vec![counters.clone()])),
+            },
+            false
+        ));
+        // NEG: no counter property anywhere, and a past-tense (frozen last-known) read.
+        assert!(!reads_counters(
+            typed(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, FilterProp::NonToken],
+            }]),
+            false
+        ));
+        assert!(!reads_counters(typed(vec![counters]), true));
+    }
+
+    /// CR 603.2 + CR 608.2h: an event-bound `TargetMatchesFilter` whose properties only compare
+    /// mana value is an event-object read, not a board P/T read, so two observers of one event
+    /// that each put counters on THEMSELVES (Prismari Apprentice, Herald of Ilharg) commute. A
+    /// predicate that does read P/T or counters, a sibling that writes the event object, and a
+    /// non-event subject all stay dependent.
+    #[test]
+    fn event_bound_mana_value_predicate_is_an_event_read_not_a_board_pt_read() {
+        let mv_at_least_5 = || {
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::GE,
+                value: qfix(5),
+            }]))
+        };
+        let power_at_least_3 = || {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: Default::default(),
+                    comparator: Comparator::GE,
+                    value: qfix(3),
+                },
+            ]))
+        };
+        let gated = |filter: TargetFilter, subject: ObjectScope, effect: Effect| {
+            cond(
+                ra(effect),
+                AbilityCondition::TargetMatchesFilter {
+                    filter,
+                    use_lki: false,
+                    subject_slot: None,
+                    subject,
+                },
+            )
+        };
+        // POS: the class. Own-counter write under an event-bound mana-value gate: no board
+        // P/T read, an event-live read, and the distinct-source same-event pair auto-orders.
+        let observer = gated(
+            mv_at_least_5(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        let profile = ability_rw_profile(&observer);
+        assert!(profile.reads_event_live, "reads the event object");
+        assert!(
+            profile.reads_board.is_empty()
+                && !profile.current_pt_reads.contains(PtReadScope::Board),
+            "a mana-value read is not a board P/T read"
+        );
+        assert!(
+            !conflicts(&observer, &se()),
+            "two such observers of one event commute (CR 603.3b)"
+        );
+        // GUARD 1: the same predicate on a declared target stays a live board P/T read.
+        let target_scoped = gated(
+            mv_at_least_5(),
+            ObjectScope::Target,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            conflicts(&target_scoped, &se()),
+            "a Target-scoped read keeps the board P/T read and the feed from own counters"
+        );
+        // GUARD 2: an event-bound predicate that reads power stays a board P/T read.
+        let power_reader = gated(
+            power_at_least_3(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&power_reader).reads_board.object_pt,
+            "an event-bound power read is a board P/T read"
+        );
+        assert!(
+            conflicts(&power_reader, &se()),
+            "a live board P/T reader is still dependent on a sibling's counters"
+        );
+        // GUARD 2b: any other event-bound property (here face-down state, which a turn-face-down
+        // write changes) is outside the mana-value allow-list and keeps the board P/T read.
+        let face_down = gated(
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::FaceDown])),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&face_down).reads_board.object_pt && conflicts(&face_down, &se()),
+            "a non-mana-value event-bound property keeps the board P/T read"
+        );
+        // GUARD 2c: one mana-value property next to a power property in the same event-bound
+        // filter is not "only mana value" (the allow-list is all-of, not any-of).
+        let mixed = gated(
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: qfix(5),
+                },
+                FilterProp::PtComparison {
+                    stat: crate::types::ability::PtStat::Power,
+                    scope: Default::default(),
+                    comparator: Comparator::GE,
+                    value: qfix(3),
+                },
+            ])),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&mixed).reads_board.object_pt && conflicts(&mixed, &se()),
+            "a mixed mana-value and power filter keeps the board P/T read"
+        );
+        // GUARD 2d: a filter with no mana-value property at all is not narrowed.
+        let prop_free = gated(
+            TargetFilter::Typed(TypedFilter::creature()),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::SelfRef),
+        );
+        assert!(
+            ability_rw_profile(&prop_free).reads_board.object_pt,
+            "an event-bound filter without a mana-value property keeps the board P/T read"
+        );
+        // GUARD 3: a sibling that writes the EVENT object under the mana-value read feeds it.
+        let event_writer = gated(
+            mv_at_least_5(),
+            ObjectScope::EventSource,
+            put_counter(qfix(2), TargetFilter::TriggeringSource),
+        );
+        assert!(
+            conflicts(&event_writer, &se()),
+            "an event-object write read back by the live event read is order-observable"
         );
     }
 
@@ -9696,6 +10936,7 @@ mod tests {
                 filter: creature(),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
@@ -9817,6 +11058,7 @@ mod tests {
             filter: creature(),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         });
         let mut neg = ra(base());
         neg.mode_abilities = vec![def(put_counter_all(qfix(1), creature())), reader];
@@ -9936,11 +11178,12 @@ mod tests {
             player: PlayerScope::Controller,
         });
         assert!(
-            !any_turn.reads_member_bound && !any_turn.reads_event_live,
+            !any_turn.reads_member_bound() && !any_turn.reads_event_live,
             "AnyTurn is a pure timing referent — no state read"
         );
         assert_eq!(
-            any_turn.reads_member_bound, controller.reads_member_bound,
+            any_turn.reads_member_bound(),
+            controller.reads_member_bound(),
             "AnyTurn and Controller durations profile identically"
         );
     }
@@ -9989,6 +11232,8 @@ mod tests {
     }
     fn change_zone_under(target: TargetFilter, enters_under: Option<ControllerRef>) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target,
@@ -10316,5 +11561,104 @@ mod attacked_referent_classification_tests {
             ),
             "distinct-event siblings: one's damage can remove the other's recipient"
         );
+    }
+}
+
+#[cfg(test)]
+mod poison_condition_rw_tests {
+    use super::*;
+
+    use crate::types::ability::AggregateFunction;
+
+    /// CR 122.1f: the poison predicate reads the player's poison-counter total,
+    /// which rides the sibling-mutable `PlayerLife` row (the same proxy as
+    /// `QuantityRef::PlayerCounter`). `rw_player_scope` classifies only the
+    /// subject and is empty for `DefendingPlayer`, so the profile must record
+    /// the player read itself — otherwise a same-event poison write cannot be
+    /// ordered against the trigger.
+    #[test]
+    fn poison_predicate_reads_the_player_poison_total() {
+        let expected = reads_player_of(StateKind::PlayerLife);
+        for player in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::DefendingPlayer,
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+        ] {
+            let profile = trigger_condition_rw_profile(&TriggerCondition::IsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                profile, expected,
+                "a poison read is a player-state read ({player:?})"
+            );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same ordering model and must record the same player read.
+            let static_profile = rw_static_condition(&StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                static_profile, expected,
+                "the static sibling arm records the same player read ({player:?})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod cycling_quantity_rw_tests {
+    use super::*;
+    use crate::types::ability::{Comparator, CyclingHistoryWindow};
+    use crate::types::{identifiers::ObjectId, player::PlayerId};
+
+    #[test]
+    fn phase3_v5_cycling_footprint_tracks_only_the_player_journal_and_bound_choice() {
+        let name = "Yidaro, Wandering Monster".to_owned();
+        let fixed = |value| QuantityExpr::Fixed { value };
+        let profiles = |lhs: QuantityExpr| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+            ability.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: lhs.clone(),
+                comparator: Comparator::GE,
+                rhs: fixed(4),
+            });
+            let trigger = TriggerCondition::QuantityComparison {
+                lhs,
+                comparator: Comparator::GE,
+                rhs: fixed(2),
+            };
+            [
+                ability_rw_profile(&ability),
+                trigger_condition_rw_profile(&trigger),
+            ]
+        };
+        for (window, name) in [
+            (CyclingHistoryWindow::ThisGame, Some(name)),
+            (CyclingHistoryWindow::ThisTurn, None),
+        ] {
+            for (scope, bound) in [
+                (CountScope::Controller, false),
+                (CountScope::SourceChosenPlayer, true),
+            ] {
+                for profile in profiles(QuantityExpr::Ref {
+                    qty: QuantityRef::CardsCycled {
+                        scope,
+                        window,
+                        name: name.clone(),
+                    },
+                }) {
+                    assert_eq!(profile.reads_player, KindSet::one(StateKind::JournalCards));
+                    assert_eq!(profile.reads_member_bound(), bound);
+                    assert!(!profile.legacy_batch_prompt());
+                    assert!(!profile.reads_event_live);
+                    assert!(!profile.writes_event_object.any());
+                }
+            }
+        }
+        for profile in profiles(fixed(0)) {
+            assert_eq!(profile, RwProfile::empty());
+        }
     }
 }
