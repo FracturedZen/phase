@@ -4115,7 +4115,7 @@ pub(super) fn match_exiled(
     state: &GameState,
 ) -> bool {
     if let GameEvent::ZoneChanged {
-        object_id,
+        object_id: _,
         from,
         to,
         record,
@@ -4127,14 +4127,22 @@ pub(super) fn match_exiled(
             return false;
         }
         // CR 603.6c: "is exiled from [zone]" restricts the source zone; the
-        // unconstrained form keeps `OriginConstraint::Any`.
-        if !zone_change_origin(trigger, None).matches_from(from) {
-            return false;
-        }
-        if !valid_card_matches(trigger, state, *object_id, source_context) {
-            return false;
-        }
-        true
+        // unconstrained form keeps `OriginConstraint::Any`. CR 603.6a + CR 603.10a:
+        // the subject is read off the zone-change record like any other zone-change
+        // trigger, so "when ~ is exiled from the battlefield" (a leaves-the-battlefield
+        // ability that looks back in time) still recognises its own pre-move
+        // incarnation as `SelfRef` (Market Gnome, #10195).
+        zone_change_clause_matches(
+            &zone_change_origin(trigger, None),
+            Some(&Zone::Exile),
+            &trigger.destination_constraint,
+            trigger.valid_card.as_ref(),
+            from,
+            to,
+            record,
+            source_context,
+            state,
+        )
     } else {
         false
     }
