@@ -4272,7 +4272,11 @@ fn selected_battlefield_departures<'a>(
 /// is not enough: also read the activation snapshot's printed `base_cost`, which
 /// still carries `ExileMaterials` for the whole activation (including the craft
 /// permanent's own self-exile after materials are paid).
-fn craft_cost_activator(pending: &PendingCast, player: PlayerId) -> Option<PlayerId> {
+fn craft_cost_activator(
+    state: &GameState,
+    pending: &PendingCast,
+    player: PlayerId,
+) -> Option<PlayerId> {
     let from_residual = pending
         .activation_cost
         .as_ref()
@@ -4283,7 +4287,20 @@ fn craft_cost_activator(pending: &PendingCast, player: PlayerId) -> Option<Playe
         .as_ref()
         .and_then(|snap| super::casting::find_craft_materials_cost(&snap.base_cost))
         .is_some();
-    (from_residual || from_snapshot).then_some(player)
+    // CR 702.167a + CR 602.2: the ability being activated is itself the craft
+    // ability when its definition's cost carries `ExileMaterials`. This holds
+    // even when neither the residual (the choice detour removed that leg) nor a
+    // snapshot (absent on some activation paths) still shows it, and it must be
+    // known before the moves run: cost-move triggers are collected when the
+    // moves settle, so a stamp applied after that is never seen (issue #10195).
+    let from_definition = pending.activation_ability_index.is_some_and(|index| {
+        super::casting::activation_ability_definition(state, pending.object_id, index)
+            .and_then(|def| def.cost)
+            .as_ref()
+            .and_then(super::casting::find_craft_materials_cost)
+            .is_some()
+    });
+    (from_residual || from_snapshot || from_definition).then_some(player)
 }
 
 /// CR 702.167a + CR 603.6c: Record on each cost move of a `chosen` object into
@@ -4366,7 +4383,7 @@ fn move_cost_objects(
     ledger: &mut CostMoveLedger,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let craft_activator = craft_cost_activator(pending, player);
+    let craft_activator = craft_cost_activator(state, pending, player);
     // CR 702.167a + CR 616.1: a resumed call's span opens with the paused move's
     // replacement-delivered event; stamp it like a move this call performs.
     stamp_craft_cost_moves(craft_activator, &mut events[cost_event_start..], chosen);
