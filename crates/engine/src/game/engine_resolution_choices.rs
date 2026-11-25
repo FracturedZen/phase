@@ -8658,11 +8658,37 @@ pub(super) fn handle_resolution_choice(
                     // the library authority without constructing a zone-change proposal
                     // or consulting zone-change replacements, while cards entering from
                     // other zones consult replacements.
+                    // CR 401.4 (#10216): cards put "Nth from the top" land as one
+                    // group counted against the cards that stay put. A selected
+                    // card already in its library is not one of those, so the
+                    // per-member route (each card inserted at the fixed index as
+                    // it arrives) would let its own lift shift the slot under the
+                    // members already placed. Without an owner-arrangement seed,
+                    // deliver only the arrivals through the replacement-consulting
+                    // batch and let the completion settle the whole group, the
+                    // library-origin members included, in one arrangement.
+                    let library_origin: Vec<ObjectId> = if seeds.is_empty()
+                        && matches!(library_position, LibraryPosition::NthFromTop { .. })
+                    {
+                        chosen
+                            .iter()
+                            .copied()
+                            .filter(|card_id| {
+                                state
+                                    .objects
+                                    .get(card_id)
+                                    .is_some_and(|object| object.zone == Zone::Library)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let requests = effect_zone_library_placement_order(
                         departures.as_deref().unwrap_or(&chosen),
                         &library_position,
                     )
                     .into_iter()
+                    .filter(|card_id| !library_origin.contains(card_id))
                     .map(|card_id| {
                         crate::game::zone_pipeline::ZoneMoveRequest::effect(
                             card_id,
@@ -8675,18 +8701,26 @@ pub(super) fn handle_resolution_choice(
                     // CR 701.20d: the arrangement is one reorder of each affected
                     // library; the delivery authority settles it before the tail's
                     // reveal cleanup and carries it across a CR 616.1 pause.
-                    let library_reorder = zones::LibraryReorderOperation::begin(state, &chosen);
+                    // A library-origin member reorders in the completion's own
+                    // CR 701.20d operation, so this one covers only the arrivals.
+                    let batch_members: Vec<ObjectId> = chosen
+                        .iter()
+                        .copied()
+                        .filter(|card_id| !library_origin.contains(card_id))
+                        .collect();
+                    let library_reorder =
+                        zones::LibraryReorderOperation::begin(state, &batch_members);
                     let completion =
                         crate::types::game_state::BatchCompletion::EffectZonePutAtLibraryPositionComplete {
                             player,
                             source_id,
                             chosen: chosen.clone(),
-                            // CR 401.4: this batch delivers every selected member,
-                            // library-origin included, so there is no legacy
-                            // reposition subset. A restored non-empty set belongs
-                            // to a completion parked by a build that queued only
-                            // the non-library moves.
-                            library_origin: Vec::new(),
+                            // CR 401.4: Top and Bottom deliver every selected
+                            // member, library-origin included, through this batch,
+                            // so the set is empty. An "Nth from the top" group
+                            // records its library-origin members here for the
+                            // completion to place with the arrivals as one group.
+                            library_origin,
                             library_position,
                         };
                     crate::game::zone_pipeline::move_owner_arranged_batch_then(
@@ -11812,14 +11846,13 @@ pub(crate) fn run_batch_completion(
             library_origin,
             library_position,
         } => {
-            // CR 401.4 + CR 400.3 + CR 608.2c: A completion parked by a build
-            // that queued only the non-library moves carries those selected
-            // members in `library_origin` for this tail to reposition. A current
-            // completion writes it empty because the replacement-consulting batch
-            // delivers every selected member. Settle the legacy shape here so a
-            // restored save resumes to the complete chosen arrangement instead of
-            // draining its non-library moves and leaving the library-origin
-            // members in their old order.
+            // CR 401.4 + CR 400.3 + CR 608.2c: `library_origin` holds the
+            // selected members the batch left in their library: an "Nth from
+            // the top" group (#10216), or a completion parked by a build that
+            // queued only the non-library moves. Settle the whole group here so
+            // it lands as one arrangement counted against the cards that stay
+            // put, instead of leaving the library-origin members in their old
+            // order.
             if !library_origin.is_empty() {
                 reposition_library_origins_after_batch_delivery(
                     state,
