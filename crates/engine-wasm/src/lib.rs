@@ -37,14 +37,16 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
-    evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
-    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
-    is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
+    can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
+    estimate_bracket_for_request, evaluate_deck_compatibility, filter_events_for_viewer,
+    filter_state_for_viewer, infer_commander,
+    is_card_commander_eligible_for_format as engine_is_card_commander_eligible_for_format,
+    is_commander_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
-    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
+    CommanderDeckComposition, CommanderInferenceRow, DeckCompatibilityRequest, DeckList,
+    PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
@@ -315,15 +317,26 @@ fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-fn parse_initialize_format_config(
-    decoded: Result<FormatConfig, String>,
-) -> Result<FormatConfig, serde_json::Value> {
+fn parse_initialize_config<T>(
+    decoded: Result<T, String>,
+    what: &str,
+) -> Result<T, serde_json::Value> {
     decoded.map_err(|error| {
         serde_json::json!({
             "error": true,
-            "reasons": [format!("Format config deserialization failed: {error}")],
+            "reasons": [format!("{what} deserialization failed: {error}")],
         })
     })
+}
+
+/// An absent match config is the default; one that fails to decode is refused.
+fn initialize_match_config(
+    decoded: Option<Result<MatchConfig, String>>,
+) -> Result<MatchConfig, serde_json::Value> {
+    decoded.map_or_else(
+        || Ok(MatchConfig::default()),
+        |decoded| parse_initialize_config(decoded, "Match config"),
+    )
 }
 
 #[cfg(test)]
@@ -623,7 +636,7 @@ mod external_format_config_tests {
         let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
             .map_err(|error| error.to_string());
 
-        let error = parse_initialize_format_config(decoded)
+        let error = parse_initialize_config(decoded, "Format config")
             .expect_err("malformed JS config must not fall back to Standard");
 
         assert_eq!(error["error"], true);
@@ -631,6 +644,50 @@ mod external_format_config_tests {
             .as_str()
             .expect("error reason is a string")
             .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn undecodable_initialize_match_config_is_refused_not_defaulted() {
+        let decode = |json: serde_json::Value| {
+            serde_json::from_value::<MatchConfig>(json).map_err(|error| error.to_string())
+        };
+
+        let error = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Bogus" },
+        }))))
+        .expect_err("an undecodable match config must not fall back to the default");
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Match config deserialization failed"));
+
+        let decoded = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Interactive" },
+        }))))
+        .expect("a decodable match config passes through");
+        assert_eq!(decoded.match_type, MatchType::Bo3);
+        assert_eq!(
+            decoded.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
+
+        assert_eq!(
+            initialize_match_config(None).expect("an absent match config is the default"),
+            MatchConfig::default()
+        );
+
+        let legacy = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo1",
+            "loop_detection": { "type": "On" },
+        }))))
+        .expect("a stored legacy `On` match config still loads");
+        assert_eq!(
+            legacy.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
     }
 
     #[test]
@@ -1059,18 +1116,30 @@ fn ai_session_for(state: &GameState) -> Arc<AiSession> {
     })
 }
 
-/// Resolve the seat whose live prompt owns an AI decision. The requested seat
-/// is retained for simultaneous prompts where it is still entitled to act.
-fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> PlayerId {
-    if state.waiting_for.acting_players().contains(&requested_ai) {
-        requested_ai
-    } else {
-        state
-            .waiting_for
-            .acting_player()
-            .or_else(|| state.waiting_for.acting_players().first().copied())
-            .unwrap_or(requested_ai)
+/// Resolve the seat whose live prompt owns the requested AI seat's decision.
+/// The requested seat keeps its own decision first, then a controlled owner
+/// it submits for — else nothing: a seat with no decision must get no
+/// proposal, not another seat's (CR 723.5).
+///
+/// CR 805.5a: on a shared-team priority window every living teammate is
+/// entitled — the window parks on the representative, but any member may
+/// act — so entitlement is the engine's pending decision bindings, not the
+/// narrow acting players (which name only the parked holder). Retaining a
+/// non-representative teammate here is what lets an explicitly requested P1
+/// keep its own proposal instead of being rebound to P0.
+fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> Option<PlayerId> {
+    let bindings = engine::game::turn_control::pending_decision_bindings(state);
+    // The seat's own decision: it both owns and may submit it.
+    if bindings.iter().any(|binding| {
+        binding.semantic_owner == requested_ai && binding.authorized_actor == requested_ai
+    }) {
+        return Some(requested_ai);
     }
+    // A controlled owner the requested seat submits for.
+    bindings
+        .iter()
+        .find(|binding| binding.authorized_actor == requested_ai)
+        .map(|binding| binding.semantic_owner)
 }
 
 /// Mint an opaque proposal only after the engine's current decision contract
@@ -1576,68 +1645,7 @@ pub fn is_card_commander_eligible_for_format(name: &str, format: JsValue) -> boo
         let Some(face) = db.get_face_by_name(name) else {
             return false;
         };
-        // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
-        // `GameFormat::CommanderDraft` silently answer "no card can be your
-        // commander" the moment the format became selectable. A wildcard here
-        // re-arms that for the next format, so every arm is named.
-        match format {
-            GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
-            // designate commanders under Commander's own predicate.
-            GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
-            // CR 904.13a + CR 903.3: Archenemy Commander decks designate
-            // commanders under Commander's own predicate.
-            GameFormat::ArchenemyCommander => is_commander_eligible(face),
-            GameFormat::PauperCommander => is_commander_eligible(face),
-            // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
-            // affects PAIRING, not eligibility, so Commander Draft uses
-            // Commander's own predicate.
-            GameFormat::CommanderDraft => is_commander_eligible(face),
-            GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
-            GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
-            GameFormat::Oathbreaker => face.is_oathbreaker,
-            GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
-            // Horde is per-config (Commander-format survivors designate a
-            // standard-EDH-eligible commander; Constructed survivors have no
-            // commander slot and never consult this). Answer the EDH
-            // predicate: the only caller that can exist is the Commander
-            // horde's deck builder, and `false` here would silently tell it
-            // no card can be its commander.
-            GameFormat::Horde => is_commander_eligible(face),
-            // CR 903.3's commander eligibility test applies unchanged —
-            // planar doesn't change eligibility.
-            GameFormat::PlanechaseCommander => is_commander_eligible(face),
-            // Formats with no command zone: nothing can be designated.
-            GameFormat::Standard
-            | GameFormat::Pioneer
-            | GameFormat::Modern
-            | GameFormat::Premodern
-            | GameFormat::Legacy
-            | GameFormat::Vintage
-            | GameFormat::Historic
-            | GameFormat::Timeless
-            | GameFormat::Pauper
-            | GameFormat::Momir
-            | GameFormat::Planechase
-            | GameFormat::Archenemy
-            | GameFormat::FreeForAll
-            | GameFormat::TwoHeadedGiant
-            | GameFormat::Limited
-            | GameFormat::Freeform
-            | GameFormat::Dandan => false,
-            // Phase 1d wired a real custom-format deck-legality evaluator
-            // (`evaluate_custom_format`), but it is scoped to non-command-zone
-            // (constructed-shaped) custom formats — a command-zone custom
-            // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
-            // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
-            // This function also only ever receives a bare `GameFormat`, never
-            // the resolved `CommanderEligibilityRule` a command-zone custom
-            // format declares, so eligibility genuinely cannot be answered
-            // here regardless. `false` is the fail-closed reading — a
-            // permissive `true` would offer an unvalidated card as a
-            // commander.
-            GameFormat::Custom(_) => false,
-        }
+        engine_is_card_commander_eligible_for_format(face, format)
     })
 }
 
@@ -2001,6 +2009,47 @@ pub fn signature_spell_selection_policy_js(request: JsValue) -> Result<JsValue, 
     })
 }
 
+/// Returns available commander candidates in deck order.
+#[wasm_bindgen(js_name = commanderCandidates)]
+pub fn commander_candidates_js(request: JsValue, composition: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    let composition: CommanderDeckComposition = serde_wasm_bindgen::from_value(composition)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander deck composition: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&commander_candidates(db, &request, composition)))
+    })
+}
+
+/// Infers a commander from counted main-deck rows.
+#[wasm_bindgen(js_name = inferCommander)]
+pub fn infer_commander_js(
+    main: JsValue,
+    selected_format: Option<String>,
+) -> Result<JsValue, JsValue> {
+    let main: Vec<CommanderInferenceRow> = serde_wasm_bindgen::from_value(main)
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    let selected_format = selected_format
+        .map(|tag| tag.parse::<GameFormat>())
+        .transpose()
+        .map_err(|e| JsValue::from_str(&format!("Invalid commander inference request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&infer_commander(db, &main, selected_format)))
+    })
+}
+
 /// Returns legal Commander-family companion candidates from the main deck.
 #[wasm_bindgen(js_name = companionCandidates)]
 pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
@@ -2334,7 +2383,8 @@ fn occupied_refusal(reason: &str) -> JsValue {
 /// Initialize a new game for local (single-player / AI) play.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
-/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
+/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined; an
+/// undecodable one is refused with `{error, reasons}`.
 /// player_count: number of players — defaults to 2 if not provided.
 /// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
@@ -2571,11 +2621,14 @@ fn initialize_game_impl(
             serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
                 .map_err(|error| error.to_string())
         });
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
+    let match_config = match initialize_match_config(
+        (!match_config_js.is_null() && !match_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(config) => config,
+        Err(error) => return to_js(&error),
     };
     match initialize_game_inner(
         deck_data,
@@ -2610,8 +2663,9 @@ fn initialize_game_inner(
     // default must be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`).
     let decoded_format_config = match format_config {
-        Some(config) => Some(parse_initialize_format_config(
+        Some(config) => Some(parse_initialize_config(
             config.and_then(decode_initialize_format_config),
+            "Format config",
         )?),
         None => None,
     };
@@ -3990,6 +4044,56 @@ mod codec_bridge_tests {
         ] {
             assert!(state_codec_decode_inner(bytes, None).is_err());
         }
+    }
+
+    #[test]
+    fn viewer_codec_carries_marked_art_only_for_disclosed_faces() {
+        let (mut state, [hand, _]) = install_hidden_state();
+        let public = engine::game::zones::create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Forest".into(),
+            Zone::Battlefield,
+        );
+        let marked = serde_json::json!({
+            "set_code":"m21","collector_number":"272","automatic_art_catalog_version":1
+        });
+        let foretold = engine::game::zones::create_object(
+            &mut state,
+            CardId(904),
+            PlayerId(0),
+            "Foretold Forest".into(),
+            Zone::Exile,
+        );
+        let object = state.objects.get_mut(&foretold).unwrap();
+        object.face_down = true;
+        object.foretold = true;
+        for id in [public, hand, foretold] {
+            let printing = serde_json::from_value(marked.clone()).unwrap();
+            let object = state.objects.get_mut(&id).unwrap();
+            object.printing =
+                engine::types::display_only::DisplayOnly::new(Some(std::sync::Arc::new(printing)));
+            object.base_printing = object.printing.clone();
+        }
+        GAME_STATE.with(|cell| cell.set(Some(state)));
+        for viewer in [0, 1] {
+            let wire: serde_json::Value =
+                serde_json::from_str(&live_handle(Some(viewer)).json_inner()).unwrap();
+            for carrier in ["printing", "base_printing"] {
+                assert_eq!(wire["objects"][public.0.to_string()][carrier], marked);
+                for id in [hand, foretold] {
+                    let private = &wire["objects"][id.0.to_string()];
+                    assert!(private.is_object());
+                    if viewer == 0 {
+                        assert_eq!(private[carrier], marked);
+                    } else {
+                        assert!(private.get(carrier).is_none());
+                    }
+                }
+            }
+        }
+        clear_game_state();
     }
 
     #[test]
@@ -6392,17 +6496,105 @@ mod restored_card_db_requirements_tests {
 
     /// A routing probe, apart from the hand-back sequence: during the turn
     /// Mindslaver hands to P2, P1's decision asked as P1's own seat, which the
-    /// controller never does, is still P2's to make (CR 723.5) and goes out
-    /// with no thread.
+    /// controller never does, is P2's to make (CR 723.5), so P1 is asked
+    /// nothing. The refused build leaves P1's thread as it was.
     #[test]
-    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_uses_no_thread() {
+    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_builds_no_request() {
         use engine::game::scenario::P1;
         let mut log = Vec::new();
         reach_the_turn_mindslaver_controls(&mut log);
 
-        let as_owner = build_llm_decision(P1, &log);
-        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
-        assert!(as_owner["threadTurn"].is_null(), "{as_owner}");
+        let history = serde_json::to_string(&log).expect("the log serializes");
+        let as_owner = build_llm_decision_request_inner(
+            "Medium",
+            P1.0,
+            THREADED_ENDPOINT,
+            &history,
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(as_owner, serde_json::Value::Null);
+        assert!(
+            has_open_llm_thread(P1),
+            "a refused build leaves the owner's thread open"
+        );
+
+        clear_game_state();
+    }
+
+    /// Issue #10999: a seat is asked only a decision it may make. While P1
+    /// holds priority, P0 has none, so a build for P0 returns no request
+    /// instead of P1's decision rendered from P1's view, P1's hand included.
+    #[test]
+    fn a_build_for_a_seat_with_no_decision_returns_no_request() {
+        let asked = PlayerId(0);
+        let acting = PlayerId(1);
+        install_llm_decision(acting);
+
+        let built = build_llm_decision_request_inner(
+            "Medium",
+            asked.0,
+            THREADED_ENDPOINT,
+            "[]",
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(built, serde_json::Value::Null);
+
+        // Reach guard: asked as the seat that holds it, the decision builds.
+        build_llm_decision(acting, &[]);
+
+        clear_game_state();
+    }
+
+    /// Issue #10939 under CR 723.1 + CR 723.4 + CR 723.5, on the printed card: during the
+    /// turn Mindslaver hands to P2, P2 casts P1's Lightning Bolt for P1, and
+    /// the target choice is P1's decision, asked as P2. Its options name each
+    /// target as P1's board does: P1 is "You" in both, every other seat is
+    /// named by number.
+    #[test]
+    fn the_targets_of_a_decision_mindslaver_controls_are_named_as_its_owners_board_names_them() {
+        use engine::game::scenario::P1;
+        let p2 = PlayerId(2);
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
+
+        assert_eq!(authorized_seat(), p2);
+        let (bolt, card_id) = with_state(|state| {
+            let bolt = state.players[usize::from(P1.0)]
+                .hand
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Lightning Bolt")
+                .expect("P1 holds its Lightning Bolt");
+            (bolt, state.objects[&bolt].card_id)
+        })
+        .expect("the game is installed");
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        );
+
+        let delegated = build_llm_decision(p2, &log);
+        let body = delegated["request"]["body"]
+            .as_str()
+            .expect("a request body");
+        assert!(body.contains("You are Player 1."), "{body}");
+        for option in [
+            "Choose Target (Target: Player 0)",
+            "Choose Target (Target: You)",
+            "Choose Target (Target: Player 2)",
+        ] {
+            assert!(body.contains(option), "{option}\n{body}");
+        }
 
         clear_game_state();
     }
@@ -6846,6 +7038,166 @@ mod production_restore_owner_regression_tests {
     use engine::types::format::ChallengeDeck;
     use engine::types::phase::Phase;
 
+    fn start_basic_art_restore_fixture(player: Option<PlayerDeckList>) {
+        use engine::types::card_type::{CardType, CoreType, Supertype};
+        use serde_json::json;
+
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let forest = engine::types::card::CardFace {
+            name: "Forest".into(),
+            scryfall_oracle_id: Some("b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6".into()),
+            card_type: CardType {
+                supertypes: vec![Supertype::Basic],
+                core_types: vec![CoreType::Land],
+                subtypes: vec!["Forest".into()],
+            },
+            ..Default::default()
+        };
+        let control = engine::types::card::CardFace {
+            name: "Control".into(),
+            scryfall_oracle_id: Some("uncovered-control".into()),
+            card_type: CardType {
+                core_types: vec![CoreType::Land],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db =
+            CardDatabase::from_json_str(&json!({"forest": forest, "control": control}).to_string())
+                .unwrap();
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(db)));
+        let seat = PlayerDeckList {
+            main_deck: vec!["Forest".into(); 12],
+            ..Default::default()
+        };
+        initialize_game_inner(
+            Some(Ok(DeckList {
+                player: player.clone().unwrap_or_else(|| seat.clone()),
+                opponent: if player.is_some() {
+                    PlayerDeckList {
+                        main_deck: vec!["Control".into(); 12],
+                        ..Default::default()
+                    }
+                } else {
+                    seat
+                },
+                ..Default::default()
+            })),
+            4910,
+            Some(Ok(serde_json::to_value(FormatConfig::freeform()).unwrap())),
+            MatchConfig::default(),
+            2,
+            Some(0),
+            None,
+            InitSessionKind::Local,
+        )
+        .expect("solo Freeform game starts");
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_preserves_saved_appearance() {
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(None);
+        let saved: Value = serde_json::from_str(&export_game_state_json().unwrap()).unwrap();
+        let id = ObjectId(1);
+        let key = id.0.to_string();
+        let card_id = saved["state"]["objects"][&key]["card_id"].clone();
+        assert!(!card_id.is_null());
+        let stamp = json!({
+            "set_code": "m21",
+            "collector_number": "273",
+            "automatic_art_catalog_version": 1,
+        });
+        for expected in [Some(&stamp), None] {
+            let mut input = saved.clone();
+            let object = input["state"]["objects"][&key].as_object_mut().unwrap();
+            for field in ["printing", "base_printing"] {
+                match expected {
+                    Some(stamp) => {
+                        object.insert(field.into(), stamp.clone());
+                    }
+                    None => {
+                        object.remove(field);
+                    }
+                }
+                assert_eq!(object.get(field), expected);
+            }
+            restore_game_state_inner(&input.to_string()).expect("the trusted save restores");
+            let (installed, wire) = with_installed_state(|state| {
+                (
+                    serde_json::to_value(&state.objects[&id]).unwrap(),
+                    serde_json::to_value(local_seat_client_state(state)).unwrap(),
+                )
+            })
+            .unwrap();
+            let visible = &wire["state"]["objects"][&key];
+            for object in [&installed, visible] {
+                assert_eq!(object["name"], "Forest");
+                assert_eq!(object["card_id"], card_id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object.get(field), expected);
+                }
+            }
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn owner_printing_trusted_restore_round_trips_automatic_copy_mapping() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        use serde_json::{json, Value};
+
+        start_basic_art_restore_fixture(Some(PlayerDeckList {
+            main_deck: ["Forest", "Forest", "Forest", "Control"]
+                .map(str::to_string)
+                .into(),
+            printings: vec![DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Forest".into(),
+                count: 1,
+                printing: CardPrinting::owner("m21", "272"),
+            }],
+            ..Default::default()
+        }));
+        let saved = export_game_state_json().unwrap();
+        let envelope: Value = serde_json::from_str(&saved).unwrap();
+        restore_game_state_inner(&saved).expect("the assigned game restores");
+        let wire = with_installed_state(|state| {
+            serde_json::to_value(local_seat_client_state(state)).unwrap()
+        })
+        .unwrap();
+        for (id, name, stamp) in [
+            (
+                1,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272", "automatic_art_catalog_version":1}),
+            ),
+            (2, "Control", Value::Null),
+            (
+                3,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"273", "automatic_art_catalog_version":1}),
+            ),
+            (
+                4,
+                "Forest",
+                json!({"set_code":"m21", "collector_number":"272"}),
+            ),
+        ] {
+            for snapshot in [&envelope, &wire] {
+                let object = &snapshot["state"]["objects"][id.to_string()];
+                assert_eq!(object["name"], name);
+                assert_eq!(object["card_id"], id);
+                for field in ["printing", "base_printing"] {
+                    assert_eq!(object[field], stamp);
+                }
+            }
+        }
+        clear_game_state();
+    }
+
     #[test]
     fn production_restore_owner_repairs_revealed_smackdown_ref_on_first_serialized_snapshot() {
         clear_game_state();
@@ -7262,6 +7614,181 @@ mod combat_prompt_restore_tests {
     }
 }
 
+/// CR 400.7 + CR 603.7c: released v0.128.0 saves whose triggered ability names its damage
+/// recipient by event context, saved before event-referent identity pins existed.
+#[cfg(test)]
+mod legacy_event_referent_restore_tests {
+    use std::io::Read;
+
+    use super::*;
+    use engine::types::actions::GameAction;
+    use engine::types::zones::Zone;
+
+    /// A save written by the released v0.128.0 engine; see `v0_128_0.provenance`.
+    macro_rules! v128 {
+        ($name:literal) => {{
+            let mut json = String::new();
+            flate2::read::GzDecoder::new(
+                &include_bytes!(concat!(
+                    "../../engine/tests/fixtures/legacy_saves/v0_128_0/",
+                    $name,
+                    ".json.gz"
+                ))[..],
+            )
+            .read_to_string(&mut json)
+            .expect("the fixture inflates");
+            json
+        }};
+    }
+
+    /// Restores through the production decoder and resolves the pending Hunter trigger.
+    fn resolve_saved_trigger(json: &str) -> Zone {
+        assert!(
+            !json.contains("target_incarnations"),
+            "reach: the released save carries no event-referent pin"
+        );
+        load_minimal_test_card_database();
+        let mut state = decode_and_rehydrate_restored_game_state(json, |_| Ok(()))
+            .expect("the released save restores")
+            .state;
+        let dino = state
+            .objects
+            .iter()
+            .find(|(_, o)| o.name == "Colossal Dreadmaw")
+            .map(|(id, _)| *id)
+            .expect("the Dreadmaw is in the save");
+        assert_eq!(state.stack.len(), 1, "reach: Hunter's trigger is pending");
+        while !state.stack.is_empty() {
+            let actor = state
+                .waiting_for
+                .acting_player()
+                .expect("a player holds priority");
+            engine::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("pass priority");
+        }
+        state.objects[&dino].zone
+    }
+
+    #[test]
+    fn released_save_hunter_trigger_still_destroys() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending")),
+            Zone::Graveyard
+        );
+    }
+
+    /// CR 400.7: the blinked Dreadmaw is a new object; the saved trigger can't find it.
+    #[test]
+    fn released_save_hunter_trigger_spares_blinked_dreadmaw() {
+        assert_eq!(
+            resolve_saved_trigger(&v128!("hunter_trigger_pending_after_blink")),
+            Zone::Battlefield
+        );
+    }
+
+    const RECTOR: &str = "When this creature dies, you may exile it. If you do, search your library for an enchantment card, put that card onto the battlefield, then shuffle.";
+
+    /// CR 603.10a + CR 608.2c: Academy Rector's trigger parks at "you may exile it"; the save
+    /// taken there restores through the decoder with the dead Rector's event pin, and accepting
+    /// exiles that Rector and fetches the enchantment.
+    #[test]
+    fn parked_optional_rector_survives_save_and_resume() {
+        use engine::game::scenario::{GameRunner, GameScenario, P0};
+        use engine::types::card_type::CoreType;
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let rector = scenario
+            .add_creature_from_oracle(P0, "Academy Rector", 1, 2, RECTOR)
+            .id();
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+            .id();
+        let anthem = scenario.add_card_to_library_top(P0, "Glorious Anthem");
+        let mut runner = scenario.build();
+        let card = runner.state_mut().objects.get_mut(&anthem).unwrap();
+        card.card_types.core_types.push(CoreType::Enchantment);
+        card.base_card_types = card.card_types.clone();
+        runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+        runner.cast(shock).target_objects(&[rector]).commit();
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "reach: the Rector prompt is parked: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Graveyard);
+        let pin = engine::types::identifiers::ObjectIncarnationRef::of(
+            rector,
+            runner.state().objects[&rector].incarnation,
+        );
+
+        let mut state = runner.state().clone();
+        state.capture_rng_word_pos();
+        let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("the host exports its state");
+        load_minimal_test_card_database();
+        let restored = decode_and_rehydrate_restored_game_state(&json, |_| Ok(()))
+            .expect("the save restores")
+            .state;
+        assert!(
+            restored
+                .active_optional_effect_frame()
+                .expect("the parked optional frame restores")
+                .ability
+                .target_incarnations
+                .contains(&pin),
+            "the parked ability keeps the Rector's event pin after reload"
+        );
+        assert!(matches!(
+            restored.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+
+        let mut runner = GameRunner::from_state(restored);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("P0 accepts");
+        for _ in 0..8 {
+            if let WaitingFor::SearchChoice { cards, .. } = &runner.state().waiting_for {
+                assert_eq!(cards, &vec![anthem], "reach: the enchantment is offered");
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![anthem],
+                    })
+                    .expect("P0 fetches the enchantment");
+                continue;
+            }
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                || runner.state().stack.is_empty()
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert_eq!(runner.state().objects[&rector].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&anthem].zone, Zone::Battlefield);
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod legacy_pending_cast_timing_restore_tests {
     use std::io::Read;
@@ -7492,7 +8019,7 @@ mod legacy_pending_cast_timing_restore_tests {
         let before = pool(&restored);
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 kicks Gnarlid Colony");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
@@ -7672,10 +8199,15 @@ mod legacy_pending_cast_timing_restore_tests {
         };
         match &restored.waiting_for {
             WaitingFor::OptionalCostChoice {
-                cost:
-                    AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+                cost: AdditionalCost::Choice(costs),
                 ..
-            } => assert_eq!((alt, cost), (&wubrg, &printed)),
+            } => {
+                let (alt, cost) = match costs.as_slice() {
+                    [AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }] => (alt, cost),
+                    other => panic!("expected Fist of Suns' mana alternatives, got {other:?}"),
+                };
+                assert_eq!((alt, cost), (&wubrg, &printed))
+            }
             other => panic!("expected Fist of Suns' offer, got {other:?}"),
         }
         assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
@@ -7686,7 +8218,7 @@ mod legacy_pending_cast_timing_restore_tests {
 
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 accepts Fist of Suns' cost");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
@@ -8581,7 +9113,9 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         // decision slot. The live prompt is the sole authority for semantic
         // ownership; this matters when control effects make its authorized
         // submitter a different player.
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8613,7 +9147,9 @@ pub fn get_ai_tactical_action_proposal(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let mut config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8647,7 +9183,9 @@ pub fn get_ai_action_proposal_with_diagnostics(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8685,7 +9223,9 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
     let ai_difficulty = AiDifficulty::from_label(difficulty);
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return Ok(JsValue::NULL);
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let mut config =
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
@@ -8785,14 +9325,8 @@ pub fn get_ai_action_proposal_from_scores(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
+        let Some(semantic_owner) = ai_semantic_owner(state, requested_ai) else {
+            return Ok(JsValue::NULL);
         };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
@@ -8837,14 +9371,8 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
+        let Some(semantic_owner) = ai_semantic_owner(state, requested_ai) else {
+            return Ok(JsValue::NULL);
         };
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
@@ -9013,9 +9541,17 @@ fn build_llm_decision_request_inner(
 
     with_installed_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            return serde_json::Value::Null;
+        };
         let contract = AiDecisionContract::issue(state, semantic_owner);
-        if contract.candidates.is_empty() {
+        // Only the seat the engine authorizes to submit this decision is asked
+        // it: its owner, or the owner's controller (CR 723.5). The `None`
+        // short-circuit above already refuses every seat with no binding, so
+        // the actor half of this guard is now defense-in-depth; the empty
+        // domain half still fires. Refused before the standing pass and the
+        // thread memory are consulted, so a refused build changes nothing.
+        if contract.authorized_actor != PlayerId(player_id) || contract.candidates.is_empty() {
             return serde_json::Value::Null;
         }
         let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
@@ -9153,7 +9689,11 @@ fn get_ai_action_proposal_from_llm_response_inner(
     let usage = phase_llm::token_usage(reply.provider, response_body);
     with_installed_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
+        let Some(semantic_owner) = ai_semantic_owner(state, PlayerId(player_id)) else {
+            // No decision for this seat: refuse without touching the thread
+            // memory, so no reply is recorded against another seat's decision.
+            return llm_failure(&phase_llm::LlmError::StaleDecision, usage);
+        };
         let admitted = admit_llm_reply(state, semantic_owner, fingerprint, reply);
         // The engine's verdict decides where the seat's message thread goes
         // next: on from this reply, dropped after a thread error or a stored
@@ -12927,7 +13467,7 @@ mod deck_list_seat_validation_tests {
         let decoded: Result<FormatConfig, String> =
             serde_json::from_value(serde_json::to_value(config).unwrap())
                 .map_err(|error| error.to_string());
-        let decoded = parse_initialize_format_config(decoded)
+        let decoded = parse_initialize_config(decoded, "Format config")
             .map_err(|envelope| envelope["reasons"][0].as_str().unwrap().to_string())?;
         resolve_initialize_format_config(Some(decoded), 2, draft_session_min_deck_size)
     }
@@ -13260,10 +13800,7 @@ mod deck_list_seat_validation_tests {
             section: DeckSection::MainDeck,
             name: "Plains".to_string(),
             count: 1,
-            printing: CardPrinting {
-                set_code: set_code.to_string(),
-                collector_number: "1".to_string(),
-            },
+            printing: CardPrinting::owner(set_code, "1"),
         }
     }
 
@@ -14623,5 +15160,793 @@ mod hosted_takeback_tests {
             installed().waiting_for,
             WaitingFor::BetweenGamesSideboard { player: P0, .. }
         ));
+    }
+}
+
+/// CR 805.5a browser AI: an explicitly requested teammate keeps its own
+/// proposal while the window parks on its representative, and the full
+/// mint/submit path drives that teammate's land play, action, and pass.
+#[cfg(test)]
+mod teammate_browser_ai_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const P2: PlayerId = PlayerId(2);
+
+    /// VM-W1: an explicitly requested P1 is retained on a P0-parked team
+    /// window (the reported failure rebound it to P0); a seat with no
+    /// decision — an opponent, a controlled subject, a passed member —
+    /// resolves to nothing instead of another seat's proposal (CR 723.5).
+    #[test]
+    fn ai_semantic_owner_retains_a_teammate_on_a_parked_team_window() {
+        use engine::game::turn_control::DecisionBinding;
+
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert_eq!(ai_semantic_owner(&state, P1), Some(P1));
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+        // INTENDED DELTA (the bug F2 fixes): base minted P0's proposal for P2.
+        assert_eq!(ai_semantic_owner(&state, P2), None);
+
+        // Controlled: P2 submits for the team, so P2 resolves to the first
+        // controlled owner while the subjects resolve to nothing.
+        state.turn_decision_controller = Some(P2);
+        assert_eq!(
+            engine::game::turn_control::pending_decision_bindings(&state),
+            vec![
+                DecisionBinding {
+                    semantic_owner: P0,
+                    authorized_actor: P2,
+                },
+                DecisionBinding {
+                    semantic_owner: P1,
+                    authorized_actor: P2,
+                },
+            ],
+            "reach: the authority pairs each owner with the controller"
+        );
+        assert_eq!(ai_semantic_owner(&state, P2), Some(P0));
+        assert_eq!(ai_semantic_owner(&state, P0), None);
+        assert_eq!(ai_semantic_owner(&state, P1), None);
+
+        // Strict-pending consequence: a passed member owes no decision
+        // (base resolved the passer to itself; an unfiltered-owners
+        // implementation reds here).
+        state.turn_decision_controller = None;
+        state.priority_passes.insert(P1);
+        assert_eq!(ai_semantic_owner(&state, P1), None);
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+
+        // Sibling: a non-Priority prompt resolves its acting seat the same way.
+        state.priority_passes.clear();
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: P0,
+            pending_cast: Box::new(engine::types::game_state::PendingCast::new(
+                ObjectId(1),
+                engine::types::identifiers::CardId(1),
+                engine::types::ability::ResolvedAbility::new(
+                    engine::types::ability::Effect::NoOp,
+                    Vec::new(),
+                    ObjectId(1),
+                    P0,
+                ),
+                engine::types::mana::ManaCost::NoCost,
+            )),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: Vec::new(),
+                optional: false,
+                chooser: None,
+                effect_kind: engine::types::ability::EffectKind::NoOp,
+                effect_detail: engine::types::game_state::TargetEffectDetail::None,
+            }],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress::default(),
+        };
+        assert_eq!(ai_semantic_owner(&state, P0), Some(P0));
+        assert_eq!(ai_semantic_owner(&state, P2), None);
+    }
+
+    fn installed() -> GameState {
+        with_installed_state(GameState::clone).expect("a game is installed")
+    }
+
+    fn owners_of(state: &GameState) -> Vec<engine::game::turn_control::DecisionBinding> {
+        engine::game::derived_views::derive_views(state, None).priority_decision_bindings
+    }
+
+    /// Mint a token for `owner`'s `action` through the production registry
+    /// and submit it as the contract's authorized actor, returning the
+    /// submission the browser would receive.
+    fn submit_own(owner: PlayerId, action: GameAction) -> AiProposalSubmission {
+        let contract = AiDecisionContract::issue(&installed(), owner);
+        let actor = contract.authorized_actor;
+        let token = issue_ai_proposal_token(contract).expect("a proposal token");
+        submit_ai_action_proposal_inner(&token, actor, action)
+    }
+
+    /// The browser path drives P1's own land play, action, and pass while
+    /// priority stays parked on P0: owner resolution, the derived scheduler
+    /// list, and every submit stay on the teammate's own decision slot.
+    #[test]
+    fn browser_path_drives_teammate_land_action_and_pass_on_a_parked_window() {
+        clear_game_state();
+        let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        let forest = sc.add_land_to_hand(P1, "Forest").id();
+        let bolt = sc.add_bolt_to_hand(P1);
+        sc.with_mana_pool(
+            P1,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        let victim = sc.add_creature(P2, "Target", 0, 8).id();
+        let mut runner = sc.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        GAME_STATE.with(|cell| cell.set(Some(runner.state().clone())));
+
+        assert_eq!(
+            owners_of(&installed()),
+            vec![
+                engine::game::turn_control::DecisionBinding {
+                    semantic_owner: P0,
+                    authorized_actor: P0,
+                },
+                engine::game::turn_control::DecisionBinding {
+                    semantic_owner: P1,
+                    authorized_actor: P1,
+                },
+            ]
+        );
+        assert_eq!(ai_semantic_owner(&installed(), P1), Some(P1));
+
+        // P1's own land play.
+        let card_id = installed().objects[&forest].card_id;
+        assert!(
+            matches!(
+                submit_own(
+                    P1,
+                    GameAction::PlayLand {
+                        object_id: forest,
+                        card_id,
+                    }
+                ),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate land play must apply through the proposal path"
+        );
+        assert_eq!(installed().objects[&forest].zone, Zone::Battlefield);
+
+        // P1's own action: Bolt the opposing creature.
+        let card_id = installed().objects[&bolt].card_id;
+        assert!(
+            matches!(
+                submit_own(
+                    P1,
+                    GameAction::CastSpell {
+                        object_id: bolt,
+                        card_id,
+                        targets: vec![],
+                        payment_mode: CastPaymentMode::Auto,
+                    }
+                ),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate cast must apply through the proposal path"
+        );
+        assert!(
+            matches!(
+                installed().waiting_for,
+                WaitingFor::TargetSelection { player, .. } if player == P1
+            ),
+            "teammate cast must park on P1 targeting, got {:?}",
+            installed().waiting_for
+        );
+        let targeting = submit_own(
+            P1,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            },
+        );
+        assert!(
+            matches!(targeting, AiProposalSubmission::Applied { .. }),
+            "teammate targeting must apply through the proposal path, got {targeting:?}"
+        );
+        assert!(
+            installed().stack.iter().any(|entry| entry.controller == P1),
+            "teammate spell must reach the stack under P1 control"
+        );
+
+        // P1's own pass over the stack it made.
+        assert!(
+            matches!(
+                submit_own(P1, GameAction::PassPriority),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate pass must apply through the proposal path"
+        );
+        // The verified stack-pass path installs its rechecking session and
+        // records the semantic owner — never the parked representative.
+        let session = installed()
+            .stack_resolution_session
+            .clone()
+            .expect("the verified pass installs a rechecking session");
+        assert!(session.verified_pass_owners.contains(&P1));
+        assert!(!session.verified_pass_owners.contains(&P0));
+        assert!(installed().priority_passes.contains(&P1));
+        assert!(
+            !installed().priority_passes.contains(&P0),
+            "P1's pass must not pass for P0"
+        );
+
+        // The window never left the representative. Only the still-unpassed
+        // P0 remains, so the scheduler list is omitted and the browser falls
+        // back to the parked holder.
+        assert!(
+            matches!(
+                installed().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ),
+            "priority must stay parked on P0, got {:?}",
+            installed().waiting_for
+        );
+        assert!(owners_of(&installed()).is_empty());
+    }
+
+    const W2_ENDPOINT: &str = r#"{"provider":"Anthropic","apiKey":"key","model":"claude-test","decisionContext":"messageThread"}"#;
+
+    fn w2_clock(ms: u64) -> phase_llm::ClockReading {
+        phase_llm::ClockReading {
+            wall_ms: ms,
+            monotonic_ms: ms,
+        }
+    }
+
+    fn w2_thread_snapshot() -> phase_llm::LlmThreadMemory {
+        LLM_THREAD_MEMORY.with(|cell| cell.borrow().clone())
+    }
+
+    /// Install a 2HG game parked on P0 with P0 and P1 each holding a land, so
+    /// both teammates' decisions offer more than the forced pass.
+    fn install_w2_parked_window() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        sc.add_land_to_hand(P0, "Forest");
+        sc.add_land_to_hand(P1, "Forest");
+        let mut runner = sc.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        install_game_state(Some(runner.state().clone()));
+    }
+
+    fn w2_minted_token_count() -> usize {
+        AI_PROPOSALS.with(|registry| registry.borrow().proposals.len())
+    }
+
+    /// VM-W2: every proposal/LLM endpoint short-circuits a seat with no
+    /// decision to its no-proposal value — a NULL proposal, a null LLM
+    /// build, and a stale-decision LLM refusal that records nothing.
+    ///
+    /// Native observability: a returned `JsValue` cannot be inspected
+    /// natively (`is_null`/`==` are wasm imports — every `JsValue`-asserting
+    /// test in this file is `wasm32`-gated), so the NULL legs assert the
+    /// native-observable equivalent: the endpoint returns `Ok` while minting
+    /// no proposal token (the NULL arm returns before the registry). At base
+    /// this same call mints P0's token and then panics in `to_js` — red
+    /// either way.
+    #[test]
+    fn proposal_endpoints_return_null_for_seat_with_no_decision() {
+        install_w2_parked_window();
+
+        // P2 has no decision on P0's parked window.
+        assert_eq!(ai_semantic_owner(&installed(), P2), None);
+
+        // Proposal endpoint: Ok with no token minted, not P0's proposal.
+        let tokens_before = w2_minted_token_count();
+        get_ai_action_proposal("Medium", 2).expect("a proposal result");
+        assert_eq!(
+            w2_minted_token_count(),
+            tokens_before,
+            "a seat with no decision must mint no proposal token"
+        );
+        // Positive control: the registry observation is live — a direct mint
+        // for P1's own decision registers exactly one token.
+        let p1_contract = AiDecisionContract::issue(&installed(), P1);
+        assert!(
+            issue_ai_proposal_token(p1_contract).is_some(),
+            "reach: the registry mints outside the refused path"
+        );
+        assert_eq!(w2_minted_token_count(), tokens_before + 1);
+
+        // Positive legs (same state): the None is seat-specific, not a dead
+        // engine — P1 resolves to its own decision and builds a real request.
+        assert_eq!(ai_semantic_owner(&installed(), P1), Some(P1));
+        let teammate_build =
+            build_llm_decision_request_inner("Medium", 1, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("the teammate decision builds");
+        assert!(
+            teammate_build["request"].is_object(),
+            "P1 must build a real request on the same state: {teammate_build}"
+        );
+
+        // LLM build for the seat with no decision: null, before the thread
+        // memory is touched.
+        let refused_build =
+            build_llm_decision_request_inner("Medium", 2, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("a refused build is still Ok");
+        assert!(
+            refused_build.is_null(),
+            "a seat with no decision must build null: {refused_build}"
+        );
+
+        // LLM reply for the seat with no decision: refused as stale even when
+        // the reply names P0's own live decision — and the thread memory is
+        // untouched, so nothing is recorded against P0.
+        let p0_build =
+            build_llm_decision_request_inner("Medium", 0, W2_ENDPOINT, "[]", 0, w2_clock(0))
+                .expect("P0's decision builds");
+        assert!(
+            p0_build["request"].is_object(),
+            "P0 must build a real request: {p0_build}"
+        );
+        let thread_turn = p0_build["threadTurn"]
+            .as_u64()
+            .map(|turn| u32::try_from(turn).expect("a thread turn id"));
+        let threads_before = w2_thread_snapshot();
+        let resolved = get_ai_action_proposal_from_llm_response_inner(
+            2,
+            p0_build["fingerprint"].as_str().expect("a fingerprint"),
+            thread_turn,
+            "Anthropic",
+            200,
+            &serde_json::json!({
+                "id": "msg_w2",
+                "type": "message",
+                "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "{\"choice\": 0}" }],
+                "usage": { "input_tokens": 900, "output_tokens": 20 },
+            })
+            .to_string(),
+            w2_clock(0),
+        )
+        .expect("a refused reply is still Ok");
+        assert!(
+            resolved["proposal"].is_null(),
+            "no proposal may be minted for a seat with no decision: {resolved}"
+        );
+        assert_eq!(
+            resolved["errorKind"]["kind"],
+            serde_json::json!("staleDecision"),
+            "the refusal must be a stale decision: {resolved}"
+        );
+        assert_eq!(
+            w2_thread_snapshot(),
+            threads_before,
+            "the refused reply must record nothing in the thread memory"
+        );
+
+        // Hostile: with a takeback vote open, a seat with no decision still
+        // resolves to NULL (the token gate composes — no hang).
+        set_multiplayer_mode(true);
+        install_game_state(Some(installed()));
+        let submitted = submit_action_inner(P0, GameAction::PassPriority).expect("installed");
+        assert!(
+            matches!(submitted, SubmittedAction::Applied { .. }),
+            "reach: a pass must apply so the ledger has a last action"
+        );
+        let reply = request_takeback_inner(P0, vec![]).expect("installed");
+        assert!(
+            matches!(reply, TakebackReply::Requested(_)),
+            "reach: the vote must be open, got {reply:?}"
+        );
+        let tokens_before_vote = w2_minted_token_count();
+        get_ai_action_proposal("Medium", 2).expect("a proposal result");
+        assert_eq!(
+            w2_minted_token_count(),
+            tokens_before_vote,
+            "takeback-open + no decision still mints nothing (no hang)"
+        );
+
+        cancel_takeback_inner(P0).expect("installed");
+        set_multiplayer_mode(false);
+        clear_game_state();
+    }
+}
+/// PR #10440 B2: an old save (no `dealt_damage_kinds`, the OLD `Unrecognized`
+/// Ruric static) restored through `restore_game_state_inner`. Rows i, ii, iii,
+/// ix and x of the shared recipe (the engine file
+/// `tests/integration/ruric_thar_magecrusher_hexproof.rs` holds the real-combat
+/// rows); the latch recovery is the engine's `prepare_for_restore` authority,
+/// shared with server-core.
+#[cfg(test)]
+mod ruric_legacy_restore_tests {
+    use super::*;
+    use engine::database::mtgjson::AtomicCard;
+    use engine::database::synthesis::build_oracle_face;
+    use engine::game::keywords::has_hexproof;
+    use engine::game::layers::flush_layers;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::{
+        ContinuousModification, DamageKindFilter, StaticCondition, StaticDefinition, TargetRef,
+    };
+    use engine::types::card::PrintedCardRef;
+    use engine::types::game_state::{DamageRecord, PersistedGameState};
+    use engine::types::keywords::Keyword;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+    use serde_json::{json, Map, Value};
+
+    /// Verbatim Oracle text of Ruric Thar, Magecrusher.
+    const RURIC_ORACLE_TEXT: &str = "This spell can't be countered.\nReach, vigilance, trample\nRuric Thar has hexproof as long as they haven't dealt combat damage yet. (They can't be the target of spells or abilities your opponents control.)";
+    const RURIC_NAME: &str = "Ruric Thar, Magecrusher";
+    const RURIC_ORACLE_ID: &str = "ruric-thar-test-oracle";
+    /// The condition the pre-PR parser wrote for Ruric's hexproof static.
+    const OLD_RURIC_CONDITION_TEXT: &str = "they haven't dealt combat damage yet";
+
+    fn current_ruric_condition() -> StaticCondition {
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceHasDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+            }),
+        }
+    }
+
+    fn hexproof_conditions<'a>(
+        defs: impl IntoIterator<Item = &'a StaticDefinition>,
+    ) -> Vec<Option<StaticCondition>> {
+        defs.into_iter()
+            .filter(|def| {
+                def.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Hexproof
+                        }
+                    )
+                })
+            })
+            .map(|def| def.condition.clone())
+            .collect()
+    }
+
+    /// F1: one-face database whose Ruric face comes from the real card-data
+    /// pipeline (`build_oracle_face`), with the current-static face guard.
+    fn ruric_face_db() -> CardDatabase {
+        let atomic: AtomicCard = serde_json::from_value(json!({
+            "name": RURIC_NAME,
+            "manaCost": "{5}{G}{G}",
+            "colors": ["G"],
+            "colorIdentity": ["G"],
+            "power": "7",
+            "toughness": "7",
+            "text": RURIC_ORACLE_TEXT,
+            "layout": "normal",
+            "type": "Legendary Creature — Ogre Warrior",
+            "types": ["Creature"],
+            "subtypes": ["Ogre", "Warrior"],
+            "supertypes": ["Legendary"],
+            "keywords": ["Reach", "Trample", "Vigilance"],
+            "manaValue": 7.0,
+            "identifiers": {
+                "scryfallOracleId": RURIC_ORACLE_ID,
+                "scryfallId": "ruric-thar-test-face"
+            }
+        }))
+        .expect("MTGJSON-shaped Ruric deserializes");
+        let face = build_oracle_face(&atomic, Some(RURIC_ORACLE_ID.to_string()));
+        assert_eq!(
+            hexproof_conditions(&face.static_abilities),
+            vec![Some(current_ruric_condition())],
+            "face guard: the parser emits the current Ruric static"
+        );
+        let face_json = serde_json::to_value(&face).expect("CardFace serializes");
+        assert!(!face_json.to_string().contains("\"Unrecognized\""));
+        let mut export = Map::new();
+        export.insert(face.name.to_lowercase(), face_json);
+        CardDatabase::from_json_str(&Value::Object(export).to_string())
+            .expect("one-face export parses")
+    }
+
+    /// F3: rewrite the object's hexproof static in both static lists to the
+    /// OLD `Unrecognized` condition; returns the patch count.
+    fn patch_old_static(value: &mut Value, id: ObjectId) -> usize {
+        match value {
+            Value::Object(map) => {
+                let mut patched = 0;
+                if map.get("id") == Some(&json!(id)) && map.contains_key("static_definitions") {
+                    for key in ["static_definitions", "base_static_definitions"] {
+                        if let Some(Value::Array(defs)) = map.get_mut(key) {
+                            for def in defs.iter_mut() {
+                                let gated = def.get("condition").is_some_and(|c| {
+                                    c.to_string().contains("SourceHasDealtDamage")
+                                });
+                                if gated {
+                                    def["condition"] = json!({
+                                        "type": "Unrecognized",
+                                        "text": OLD_RURIC_CONDITION_TEXT
+                                    });
+                                    patched += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                for child in map.values_mut() {
+                    patched += patch_old_static(child, id);
+                }
+                patched
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .map(|item| patch_old_static(item, id))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Remove `source_incarnation` from every damage record of `source` (a
+    /// save written before that field existed).
+    fn strip_record_incarnation(value: &mut Value, source: ObjectId) -> usize {
+        match value {
+            Value::Object(map) => {
+                let mut removed = 0;
+                if let Some(Value::Array(records)) = map.get_mut("damage_dealt_this_turn") {
+                    for record in records.iter_mut() {
+                        if record.get("source_id") == Some(&json!(source)) {
+                            if let Some(record) = record.as_object_mut() {
+                                removed +=
+                                    usize::from(record.remove("source_incarnation").is_some());
+                            }
+                        }
+                    }
+                }
+                for child in map.values_mut() {
+                    removed += strip_record_incarnation(child, source);
+                }
+                removed
+            }
+            Value::Array(items) => items
+                .iter_mut()
+                .map(|item| strip_record_incarnation(item, source))
+                .sum(),
+            _ => 0,
+        }
+    }
+
+    /// Damage history installed by typed mutation, exactly what an old build
+    /// wrote (the latch is left empty). The record shape is pinned against
+    /// real combat by the engine guard test
+    /// `s_guard_adapter_record_shape_matches_real_combat_record`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum History {
+        /// Row x control: no damage history.
+        None,
+        /// Rows i and x: combat damage this turn, entered a previous turn.
+        SameTurnCombat,
+        /// Row iii: an Any-set entry from an earlier turn, no record.
+        PreviousTurn,
+        /// Row ii: entered this turn, one trusted noncombat record.
+        SameTurnNoncombatEntrant,
+        /// Row ix: row ii with the record's `source_incarnation` key removed.
+        PreFieldNoncombatEntrant,
+    }
+
+    const HISTORIES: [History; 5] = [
+        History::None,
+        History::SameTurnCombat,
+        History::PreviousTurn,
+        History::SameTurnNoncombatEntrant,
+        History::PreFieldNoncombatEntrant,
+    ];
+
+    impl History {
+        /// `None`: the save cannot prove its combat history and Ruric\'s static
+        /// reads it, so the restore is refused (CR 120.2a + CR 120.2b).
+        /// (combat latch, noncombat latch, hexproof) after restore.
+        fn expected(self) -> Option<(bool, bool, bool)> {
+            match self {
+                History::None => Some((false, false, true)),
+                History::SameTurnCombat => Some((true, false, false)),
+                // Unprovable earlier history is refused, never attributed to a kind.
+                History::PreviousTurn => None,
+                History::SameTurnNoncombatEntrant => Some((false, true, true)),
+                // An incarnation-less record is not trusted: refused.
+                History::PreFieldNoncombatEntrant => None,
+            }
+        }
+    }
+
+    /// F2 + F3: a printed Ruric (`add_real_card`, carrying `printed_ref`) with
+    /// `history`, captured, then rewritten into an old save (no latch key, the
+    /// OLD `Unrecognized` static in both lists). Returns the pre-save state,
+    /// Ruric and the old-format JSON.
+    fn old_save(db: &CardDatabase, history: History) -> (GameState, ObjectId, Value) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ruric = scenario.add_real_card(P0, RURIC_NAME, Zone::Battlefield, db);
+        let mut state = scenario.build().state().clone();
+        assert_eq!(
+            state.objects[&ruric].printed_ref,
+            Some(PrintedCardRef {
+                oracle_id: RURIC_ORACLE_ID.to_string(),
+                face_name: RURIC_NAME.to_string(),
+            })
+        );
+        assert_eq!(
+            hexproof_conditions(state.objects[&ruric].static_definitions.0.iter()),
+            vec![Some(current_ruric_condition())]
+        );
+        let incarnation = state.objects[&ruric].incarnation;
+        let turn = state.turn_number;
+        if matches!(
+            history,
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+        ) {
+            state
+                .objects
+                .get_mut(&ruric)
+                .unwrap()
+                .entered_battlefield_turn = Some(turn);
+        }
+        let record = |is_combat: bool| -> DamageRecord {
+            serde_json::from_value(json!({
+                "source_id": ruric,
+                "source_controller": P0,
+                "target": TargetRef::Player(P1),
+                "amount": 7,
+                "is_combat": is_combat,
+                "source_incarnation": incarnation,
+            }))
+            .expect("old-format damage record decodes")
+        };
+        match history {
+            History::None => {}
+            History::SameTurnCombat => {
+                state.objects_that_dealt_damage.insert(ruric);
+                state.damage_dealt_this_turn.push_back(record(true));
+            }
+            History::PreviousTurn => {
+                state.objects_that_dealt_damage.insert(ruric);
+            }
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant => {
+                state.objects_that_dealt_damage.insert(ruric);
+                state.damage_dealt_this_turn.push_back(record(false));
+            }
+        }
+        state.layers_dirty.mark_full();
+        flush_layers(&mut state);
+        let obj = &state.objects[&ruric];
+        assert!(
+            obj.dealt_damage_kinds.is_empty(),
+            "an old build wrote no latch"
+        );
+        if matches!(
+            history,
+            History::SameTurnNoncombatEntrant | History::PreFieldNoncombatEntrant
+        ) {
+            assert_eq!(obj.entered_battlefield_turn, Some(state.turn_number));
+            assert_eq!(
+                state.damage_dealt_this_turn[0].source_incarnation,
+                Some(obj.incarnation)
+            );
+        } else {
+            assert_ne!(obj.entered_battlefield_turn, Some(state.turn_number));
+        }
+        // The unmigrated live reading: an empty latch leaves the current
+        // static TRUE, so a FALSE after restore comes from the recovery.
+        assert!(
+            has_hexproof(obj),
+            "pre-save: the empty latch reads as hexproof"
+        );
+
+        let mut json = serde_json::to_value(PersistedGameState::capture(state.clone()))
+            .expect("persisted state serializes");
+        assert!(
+            !json.to_string().contains("dealt_damage_kinds"),
+            "old format: the empty latch is elided, no latch key is saved"
+        );
+        assert_eq!(
+            patch_old_static(&mut json, ruric),
+            2,
+            "both static lists patched"
+        );
+        let saved = json.to_string();
+        assert!(
+            !saved.contains("SourceHasDealtDamage"),
+            "only the old static is saved"
+        );
+        assert!(saved.contains(OLD_RURIC_CONDITION_TEXT));
+        assert!(saved.contains("printed_ref"));
+        if history == History::PreFieldNoncombatEntrant {
+            assert_eq!(strip_record_incarnation(&mut json, ruric), 1);
+        }
+        (state, ruric, json)
+    }
+
+    /// The restored-state assertions shared by every adapter row.
+    fn assert_restored(history: History, pre: &GameState, restored: &GameState, ruric: ObjectId) {
+        let obj = &restored.objects[&ruric];
+        assert_eq!(
+            hexproof_conditions(obj.static_definitions.0.iter()),
+            vec![Some(current_ruric_condition())],
+            "{history:?}: reapply replaced the saved Unrecognized static"
+        );
+        assert_eq!(
+            hexproof_conditions(obj.base_static_definitions.iter()),
+            vec![Some(current_ruric_condition())],
+            "{history:?}"
+        );
+        assert_eq!(
+            restored.objects_that_dealt_damage.contains(&ruric),
+            pre.objects_that_dealt_damage.contains(&ruric),
+            "{history:?}: the Any-set entry survives restore"
+        );
+        assert_eq!(
+            restored.damage_dealt_this_turn.len(),
+            pre.damage_dealt_this_turn.len(),
+            "{history:?}: the records survive restore"
+        );
+        if history == History::PreFieldNoncombatEntrant {
+            assert!(restored.damage_dealt_this_turn[0]
+                .source_incarnation
+                .is_none());
+            assert!(!restored.damage_dealt_this_turn[0].is_combat);
+        }
+        assert!(
+            !restored.layers_dirty.is_dirty(),
+            "{history:?}: the restore finalized with layers flushed"
+        );
+        let latch = &obj.dealt_damage_kinds;
+        assert_eq!(
+            (
+                latch.has(DamageKindFilter::CombatOnly),
+                latch.has(DamageKindFilter::NoncombatOnly),
+                has_hexproof(obj),
+            ),
+            history
+                .expected()
+                .expect("a restored history has expectations"),
+            "{history:?}: (combat latch, noncombat latch, hexproof)"
+        );
+    }
+
+    #[test]
+    fn restore_game_state_inner_recovers_old_save_damage_kinds() {
+        let db = std::sync::Arc::new(ruric_face_db());
+        for history in HISTORIES {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            CARD_DB.with(|cell| *cell.borrow_mut() = Some(std::sync::Arc::clone(&db)));
+            let (pre, ruric, json) = old_save(&db, history);
+            let result = restore_game_state_inner(&json.to_string());
+            if history.expected().is_none() {
+                let error = result
+                    .err()
+                    .unwrap_or_else(|| panic!("{history:?}: an ambiguous save must be refused"));
+                assert!(
+                    error.to_string().contains("ambiguous"),
+                    "{history:?}: refused for the ambiguity, got: {error}"
+                );
+                continue;
+            }
+            result.unwrap_or_else(|error| panic!("{history:?}: restore failed: {error}"));
+            let restored =
+                with_installed_state(|state| state.clone()).expect("restored state installed");
+            assert_restored(history, &pre, &restored, ruric);
+        }
+        clear_game_state();
     }
 }

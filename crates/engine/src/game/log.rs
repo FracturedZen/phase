@@ -398,7 +398,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
@@ -462,6 +462,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: bookkeeping the engine publishes so meta-triggers can
         // observe a chapter ability finishing; the chapter's own effects carry
@@ -608,7 +609,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -633,6 +634,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: neither good nor bad news on its own — the drain or token
         // the observing trigger produces is what carries tone.
@@ -745,8 +747,11 @@ fn should_exclude_event(event: &GameEvent) -> bool {
             ..
         } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
-        // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
-        GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
+        // the meaningful info is in SpellCast/AbilityActivated and EffectResolved.
+        // AbilityTriggered is the observer-matcher bookkeeping beside StackPushed.
+        GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
+        | GameEvent::StackResolved { .. } => true,
         // ReplacementApplied is engine bookkeeping. The resulting life,
         // counter, zone, or damage event carries the player-facing outcome.
         GameEvent::ReplacementApplied { .. } => true,
@@ -955,7 +960,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
@@ -964,6 +969,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: a chapter ability finishing resolution is a stack event.
         | GameEvent::SagaChapterAbilityResolved { .. }
@@ -1142,12 +1148,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
         ],
 
-        GameEvent::PhaseChanged { phase } => {
-            vec![text(phase_label(*phase))]
-        }
-        // CR 805.4d: a fanned occurrence logs its phase like the production
-        // event; the bound player is firing context, not log content.
-        GameEvent::PhaseChangedForPlayer { phase, .. } => {
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => {
             vec![text(phase_label(*phase))]
         }
 
@@ -1301,6 +1302,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::StackPushed { object_id } => {
             vec![card_seg(state, *object_id), text(" added to stack")]
+        }
+
+        GameEvent::AbilityTriggered { source_id, .. } => {
+            vec![card_seg(state, *source_id), text("'s ability triggered")]
         }
 
         GameEvent::StackResolved { object_id } => {
@@ -1750,6 +1755,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            ..
         } => vec![
             exact_u32_segment(*count),
             text(" "),
@@ -1857,7 +1863,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             num(*level as i32),
         ],
 
-        GameEvent::DayNightChanged { new_state } => {
+        GameEvent::DayNightChanged { new_state, .. } => {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
@@ -1946,7 +1952,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" commits a crime")]
         }
 
-        GameEvent::PlayerLost { player_id } => {
+        GameEvent::PlayerLost { player_id, .. } => {
             vec![player_seg(state, *player_id), text(" loses the game")]
         }
 
@@ -2010,6 +2016,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             sides,
             result,
+            ..
         } => match result {
             // CR 706: a numeric die roll renders its face value.
             Some(r) => vec![
@@ -2496,6 +2503,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: ObjectId(7),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         assert!(!should_exclude_event(&cast));
     }
@@ -2646,6 +2655,8 @@ mod tests {
             controller: PlayerId(0),
             object_id: id,
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         };
         let entries = resolve_log_entries(&[event], &state, &state);
         assert_eq!(entries.len(), 1);
@@ -3126,6 +3137,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
                 intensity: 0,
             },
         );
@@ -3367,6 +3379,9 @@ mod tests {
             GameEvent::GameOver { winner: None },
             GameEvent::PlayerLost {
                 player_id: PlayerId(0),
+                reasons: std::collections::BTreeSet::from([
+                    crate::types::events::LossReason::LifeTotal,
+                ]),
             },
             GameEvent::PlayerEliminated {
                 player_id: PlayerId(0),
@@ -3378,6 +3393,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(17),
+                pre_entry_source: None,
             },
             GameEvent::StartingPlayerContest {
                 rounds: vec![crate::types::events::ContestRound {
@@ -3398,6 +3414,7 @@ mod tests {
             },
             GameEvent::DayNightChanged {
                 new_state: "Day".to_string(),
+                previous: None,
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),
@@ -4195,6 +4212,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let keyword = |source_id| GameEvent::KeywordAbilityActivated {
             ability_tag: AbilityTag::Equip,
@@ -4219,6 +4237,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         assert_eq!(lines(&[mana]), 0);
     }
@@ -4256,6 +4275,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count,
+            instruction_lead: None,
         };
         let segments = format_segments(&removed(1 << 31), &state);
         assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
@@ -4311,6 +4331,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 3,
+            instruction_lead: None,
         };
         let segments = format_segments(&three, &state);
         assert_eq!(segments[0], LogSegment::Number(3));
@@ -4319,6 +4340,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 1,
+            instruction_lead: None,
         };
         assert_eq!(
             format_segments(&one, &state)[3],

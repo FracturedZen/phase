@@ -186,6 +186,7 @@ fn enter_creature_and_count_draws(
 
 fn creature_token_spec(controller: PlayerId) -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: "Zombie".to_string(),
             power: Some(2),
@@ -219,6 +220,7 @@ fn create_token_and_count_draws(
 ) -> i64 {
     let mut events = Vec::new();
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: P0,
         spec: Box::new(creature_token_spec(P0)),
         copy: None,

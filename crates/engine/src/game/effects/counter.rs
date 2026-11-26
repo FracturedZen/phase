@@ -12,6 +12,22 @@ use crate::types::identifiers::ObjectId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 101.2: intrinsic, permanent-granted and resolution-created prohibitions
+/// all prevent countering through the same guard, without making targeting illegal.
+fn spell_cant_be_countered(state: &GameState, object_id: ObjectId) -> bool {
+    let ctx = StaticCheckContext {
+        source_id: Some(object_id),
+        target_id: Some(object_id),
+        ..Default::default()
+    };
+    check_static_ability(state, StaticMode::CantBeCountered, &ctx)
+        || state.objects.get(&object_id).is_some_and(|obj| {
+            super::super::functioning_abilities::active_static_definitions(state, obj)
+                .any(|sd| sd.mode == StaticMode::CantBeCountered)
+        })
+        || crate::game::static_abilities::transient_cant_be_countered_prohibits(state, object_id)
+}
+
 /// Counter target spells or abilities on the stack.
 /// Spells are removed from the stack and moved to graveyard.
 /// Abilities are simply removed from the stack (they aren't cards).
@@ -75,35 +91,7 @@ pub fn resolve(
 
     for target in targets {
         if let TargetRef::Object(obj_id) = target {
-            // CR 101.2: Check if the target can't be countered.
-            // Two paths: (1) battlefield permanents granting uncounterability
-            // (e.g. "Spells you control can't be countered"), and (2) the
-            // spell's own intrinsic static definition (e.g. Carnage Tyrant).
-            let ctx = StaticCheckContext {
-                source_id: Some(obj_id),
-                target_id: Some(obj_id),
-                ..Default::default()
-            };
-            if check_static_ability(state, StaticMode::CantBeCountered, &ctx) {
-                continue;
-            }
-
-            // CR 702.26b + CR 114.4 + CR 604.1: route through the single-authority
-            // helper so stack-resident spells (and any edge case that later
-            // lands these definitions in a gated zone) get the same gating as
-            // every other read site. Spells on the stack are not phased out
-            // and not in the command zone, so the gate is a no-op for the
-            // common path — this is about architectural consistency, not
-            // behavior change.
-            let has_cant_be_countered = state
-                .objects
-                .get(&obj_id)
-                .map(|obj| {
-                    super::super::functioning_abilities::active_static_definitions(state, obj)
-                        .any(|sd| sd.mode == StaticMode::CantBeCountered)
-                })
-                .unwrap_or(false);
-            if has_cant_be_countered {
+            if spell_cant_be_countered(state, obj_id) {
                 continue;
             }
 
@@ -208,7 +196,7 @@ pub fn resolve(
                         }
                     };
                     if casting_variant.restores_front_face_after_stack_exit() {
-                        super::super::stack::restore_alternative_spell_normal_face(
+                        super::super::stack::restore_alternative_spell_face_before_zone_delivery(
                             state,
                             obj_id,
                             casting_variant,
@@ -355,6 +343,11 @@ fn counter_trigger_event<'a>(
         return None;
     };
     let event = state.current_trigger_event.as_ref()?;
+    // CR 608.2k: an ability-triggering observer ("that ability" — Strict
+    // Proctor) counters the observed stack entry by its entry id.
+    if let GameEvent::AbilityTriggered { stack_entry, .. } = event {
+        return stack_entry.as_ref().map(|id| (event, *id));
+    }
     Some((event, targeting::extract_source_from_event(event)?))
 }
 
@@ -365,6 +358,23 @@ pub(super) fn countered_targets(state: &GameState, ability: &ResolvedAbility) ->
     let Effect::Counter { target, .. } = &ability.effect else {
         return ability.targets.clone();
     };
+    // The observed occurrence was removed before placement (CR 603.3d), so
+    // "that ability" names nothing on the stack: counter nothing. Explicit
+    // rather than falling through to the own-source fallback, which would
+    // find no entry either but only by accident. No CR number claimed for
+    // the absence-of-referent plumbing itself.
+    if matches!(
+        target,
+        TargetFilter::TriggeringSource | TargetFilter::ParentTarget
+    ) && matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityTriggered {
+            stack_entry: None,
+            ..
+        })
+    ) {
+        return Vec::new();
+    }
     // CR 608.2k: "that spell" / "that ability" is identified through the
     // trigger event.
     if let Some((event, object_id)) = counter_trigger_event(state, ability) {
@@ -452,25 +462,7 @@ pub fn resolve_all(
         .collect();
 
     for obj_id in matching {
-        // CR 101.2: Per-entry CantBeCountered guard — same logic the
-        // single-target resolver uses.
-        let s_ctx = StaticCheckContext {
-            source_id: Some(obj_id),
-            target_id: Some(obj_id),
-            ..Default::default()
-        };
-        if check_static_ability(state, StaticMode::CantBeCountered, &s_ctx) {
-            continue;
-        }
-        let has_cant_be_countered = state
-            .objects
-            .get(&obj_id)
-            .map(|obj| {
-                super::super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::CantBeCountered)
-            })
-            .unwrap_or(false);
-        if has_cant_be_countered {
+        if spell_cant_be_countered(state, obj_id) {
             continue;
         }
 
@@ -521,7 +513,7 @@ pub fn resolve_all(
                 Zone::Graveyard
             };
             if casting_variant.restores_front_face_after_stack_exit() {
-                super::super::stack::restore_alternative_spell_normal_face(
+                super::super::stack::restore_alternative_spell_face_before_zone_delivery(
                     state,
                     obj_id,
                     casting_variant,

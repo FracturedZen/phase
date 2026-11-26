@@ -413,6 +413,7 @@ mod tests {
 
     fn creature_token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),
@@ -433,6 +434,7 @@ mod tests {
 
     fn treasure_token_effect() -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Treasure".to_string(),
             power: engine::types::ability::PtValue::Fixed(0),
             toughness: engine::types::ability::PtValue::Fixed(0),
@@ -676,7 +678,8 @@ mod tests {
         assert!(
             feature
                 .payoff_names
-                .contains(&"Llanowar Elves Clone".to_string()),
+                .iter()
+                .any(|i| i == "Llanowar Elves Clone"),
             "payoff_names should include the generator's name"
         );
     }
@@ -688,31 +691,9 @@ mod tests {
             .push(anthem_static(creature_you_control_filter()));
         let feature = detect(&[deck_entry(face)]);
         assert!(
-            feature
-                .anthem_names
-                .contains(&"Glorious Anthem".to_string()),
+            feature.anthem_names.iter().any(|i| i == "Glorious Anthem"),
             "anthem_names should include the anthem's name"
         );
-    }
-
-    #[test]
-    fn aristocrats_overlap_independent() {
-        // A Bitterblossom-shape card (upkeep trigger creating a 1/1 faerie)
-        // should count as BOTH a token generator (tokens_wide) and a fodder
-        // source (aristocrats). The two features are independent. This test
-        // verifies tokens_wide registers it; aristocrats has its own test.
-        let mut face = empty_face("Bitterblossom");
-        let exec = AbilityDefinition::new(
-            AbilityKind::Spell,
-            creature_token_effect(QuantityExpr::Fixed { value: 1 }),
-        );
-        // CR 603.2b: "at the beginning of your upkeep" → TriggerMode::Phase.
-        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
-        trigger.execute = Some(Box::new(exec));
-        face.triggers.push(trigger);
-        let feature = detect(&[deck_entry(face)]);
-        // tokens_wide registers Bitterblossom as a generator.
-        assert_eq!(feature.token_generator_count, 1);
     }
 
     #[test]

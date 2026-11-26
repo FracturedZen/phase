@@ -336,17 +336,16 @@ fn settle_canonical_tail(
         return Ok(());
     };
     engine::resume_pending_continuation_if_priority(state, events)?;
-    let completed = Some(carrier).filter(|_| {
-        state.resolving_stack_entry.is_none()
-            && matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::Priority { .. }
-            )
-            && state.game_end.is_none()
-            && state.payment_transaction.is_none()
-            && !state.payment_transaction_replay
-            && !triggers::is_pending_trigger_construction_active(state)
-    });
+    let completed = (state.resolving_stack_entry.is_none()
+        && matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        )
+        && state.game_end.is_none()
+        && state.payment_transaction.is_none()
+        && !state.payment_transaction_replay
+        && !triggers::is_pending_trigger_construction_active(state))
+    .then_some(carrier);
     let default_wf = state.waiting_for.clone();
     let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
         state,
@@ -566,7 +565,9 @@ pub(crate) fn settle_after_outside_action(
         let mut events = checkpoint.events.clone();
         let mut log_entries = checkpoint.log_entries.clone();
         let mut mirrored = Vec::new();
-        crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
+        // The shadow replays only the departure; a parked zone-change tail it
+        // reports is resumed by the real action, not here.
+        let _ = crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
         // CR 104.3a: the checkpoint can only stay if it includes this departure.
         // A parked draw that no longer settles on the departed shadow is a
@@ -642,7 +643,9 @@ fn settle_accepted_prefix_after_departure(
         shadow.consumed_before_priority_trigger_events.clear();
     }
     let mut mirrored = Vec::new();
-    crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
+    // The shadow replays only the departure; a parked zone-change tail it
+    // reports is resumed by the real action, not here.
+    let _ = crate::game::elimination::concede(&mut shadow, departing, &mut mirrored);
     restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
     // A parked prompt that no longer settles on the departed prefix is a failed
     // recovery, as on the checkpoint branch: the caller's failed-recovery

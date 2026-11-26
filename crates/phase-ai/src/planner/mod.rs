@@ -7,7 +7,7 @@ use engine::ai_support::{
     activates_mana_ability, build_decision_context, classify_payment_continuation,
     witness_payment_continuations, AiDecisionContext, CandidateAction,
     PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
-    TacticalClass,
+    TacticalClass, WitnessedStepTrace,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -149,6 +149,9 @@ pub(crate) struct PreparedCandidate {
     pub payment_successor: Option<GameState>,
     /// Whether the witnessed edge finalizes the payment root in its own step.
     pub payment_step: Option<PaymentContinuationStep>,
+    /// The witnessed edge's own reducer step (its events and the deferred-trigger
+    /// queue length before it), so a consumer can read the step it already ran.
+    pub payment_trace: Option<WitnessedStepTrace>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -169,6 +172,7 @@ pub(crate) fn prepare_payment_candidates(
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -189,6 +193,7 @@ pub(crate) fn prepare_payment_candidates(
                             candidate,
                             payment_successor: Some(accepted.state),
                             payment_step: Some(accepted.step),
+                            payment_trace: Some(accepted.trace),
                         })
                     })
                     .collect(),
@@ -204,6 +209,7 @@ pub(crate) fn prepare_payment_candidates(
                                     candidate,
                                     payment_successor: Some(accepted.state),
                                     payment_step: Some(accepted.step),
+                                    payment_trace: Some(accepted.trace),
                                 })
                             })
                             .collect()
@@ -218,6 +224,7 @@ pub(crate) fn prepare_payment_candidates(
                                         candidate,
                                         payment_successor: None,
                                         payment_step: None,
+                                        payment_trace: None,
                                     },
                                 )
                             })
@@ -1310,24 +1317,31 @@ impl<'a> PlannerServices<'a> {
         candidate: &CandidateAction,
         prompt_answers: PromptAnswerValidation,
     ) -> bool {
-        // PassPriority is always legal during Priority (skip simulation for perf),
+        // During Priority the candidate builder offers PassPriority only where
+        // `pass_priority_legality` admits it (skip simulation for perf),
         // but during ManaPayment it means "finalize payment" which can fail if the
         // player can't actually pay the cost (e.g., Thalia tax makes it unaffordable).
         let pass_always_valid = matches!(
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
-        // cost cannot fail since it just proceeds with the base cost.
-        let is_optional_cost = matches!(
+        // DecideOptionalCost { index: 1 } declines an Optional or Kicker cost,
+        // which is always legal because it just proceeds with the base cost.
+        // A Choice's index 1 is a real alternative and may be unpayable, so it
+        // goes through simulation like every other answer.
+        let is_skip_decision = matches!(
             state.waiting_for,
-            engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
+            engine::types::game_state::WaitingFor::OptionalCostChoice {
+                cost: engine::types::ability::AdditionalCost::Optional { .. }
+                    | engine::types::ability::AdditionalCost::Kicker { .. },
+                ..
+            }
         );
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
-                if is_optional_cost =>
+            engine::types::actions::GameAction::DecideOptionalCost { index: 1 }
+                if is_skip_decision =>
             {
                 true
             }
@@ -1335,11 +1349,12 @@ impl<'a> PlannerServices<'a> {
             // Mulligan as the complete legal set; neither can fail apply_as_current.
             // Skipping the clone+simulate eliminates ~2 state clones per mulligan step.
             engine::types::actions::GameAction::MulliganDecision { .. } => true,
-            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2b: a named-choice answer from the
-            // prompt's enumerated domain, a library search selection, or a loop-shortcut
-            // responder's answer is admitted by its submission guard without mutating the game;
-            // the engine decides that through the same authority `SimulationFilter` consults
-            // before its probe. Under `PromptAnswerValidation::AtSubmission` no state copy is
+            // CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: a named-choice
+            // answer from the prompt's enumerated domain, a library search selection, or a
+            // loop-shortcut declaration or responder's answer is admitted by its submission guard
+            // without mutating the game; the engine decides that through the same authority
+            // `SimulationFilter` consults before its probe. Under
+            // `PromptAnswerValidation::AtSubmission` no state copy is
             // made here: the root search simulates the answers in its beam until one fails, and
             // the caller the one answer it submits. A shape
             // the authority declines (a scoped search, a card name, a free-entry
@@ -1353,6 +1368,7 @@ impl<'a> PlannerServices<'a> {
             // time — two takes where the unadmitted shape paid one.
             engine::types::actions::GameAction::ChooseOption { .. }
             | engine::types::actions::GameAction::SelectCards { .. }
+            | engine::types::actions::GameAction::DeclareShortcut { .. }
             | engine::types::actions::GameAction::RespondToShortcut { .. }
                 if prompt_answers.admits_without_simulation(state, &candidate.action) =>
             {
@@ -2107,7 +2123,7 @@ pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
     /// gate's verdict is final.
     EachCandidate,
-    /// Admit the answer without a state copy. The root search simulates such
+    /// Admit the answer without simulating it on a state copy. The root search simulates such
     /// answers in its beam on its first rung, in beam order, and returns the
     /// first that fails (`search::FailedAdmittedAnswer`) instead of scores,
     /// simulating no answer after it, and the root scorer scores the decision
@@ -2452,6 +2468,7 @@ where
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -3720,7 +3737,7 @@ pub(crate) mod tests {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the behold cost must be accepted");
         let state = runner.state().clone();
         match &state.waiting_for {
@@ -4058,7 +4075,6 @@ pub(crate) mod tests {
                 shortened_by: None,
                 published_declaration: None,
                 leading_aims: Vec::new(),
-                road: engine::analysis::loop_check::OfferRoad::Ring,
                 counted_take: Default::default(),
                 period: Default::default(),
             },
@@ -6558,11 +6574,13 @@ pub(crate) mod tests {
         trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
 
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
             trigger_event: Some(optional_event),
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
@@ -6608,52 +6626,44 @@ pub(crate) mod tests {
     fn planner_keys_ignore_printing_in_real_carriers() {
         use engine::types::card_printing::{CardPrinting, SharedPrinting};
 
-        let s1 = SharedPrinting::new(CardPrinting {
-            set_code: "SNTA".to_string(),
-            collector_number: "1".to_string(),
-        });
-        let s2 = SharedPrinting::new(CardPrinting {
-            set_code: "SNTB".to_string(),
-            collector_number: "2".to_string(),
-        });
+        let s1 = SharedPrinting::new(CardPrinting::owner("SNTA", "1"));
+        let s2 = SharedPrinting::new(CardPrinting::owner("SNTB", "2"));
         let powers = [2, 2, 2];
         let none = printing_carrier_fixture(None, powers);
         let first = printing_carrier_fixture(Some(s1.clone()), powers);
         let second = printing_carrier_fixture(Some(s2), powers);
 
-        // Reach: every root really carries the printing on the wire, and the projection the
-        // keys fold omits it.
-        for (label, wire, projected) in [
-            (
-                "resolution stack",
-                serde_json::to_string(&first.resolution_stack).unwrap(),
-                serde_json::to_string(&rules_projection(&first.resolution_stack).unwrap()).unwrap(),
-            ),
-            (
-                "stack entry",
-                serde_json::to_string(&first.stack[0]).unwrap(),
-                serde_json::to_string(&rules_projection(&first.stack[0]).unwrap()).unwrap(),
-            ),
-            (
-                "waiting state",
-                serde_json::to_string(&first.waiting_for).unwrap(),
-                serde_json::to_string(&rules_projection(&first.waiting_for).unwrap()).unwrap(),
-            ),
-        ] {
-            assert!(
-                wire.contains("SNTA"),
-                "{label}: the wire carries the printing"
-            );
-            assert!(
-                !projected.contains("SNTA"),
-                "{label}: the projection omits it"
-            );
+        let automatic = printing_carrier_fixture(
+            Some(SharedPrinting::new(CardPrinting {
+                automatic_art_catalog_version: std::num::NonZeroU8::new(1),
+                ..s1.as_ref().clone()
+            })),
+            powers,
+        );
+
+        fn assert_display_projection<T: Serialize>(owner: &T, automatic: &T) {
+            let owner_wire = serde_json::to_string(owner).unwrap();
+            let automatic_wire = serde_json::to_string(automatic).unwrap();
+            assert!(owner_wire.contains("SNTA"));
+            let marker = r#","automatic_art_catalog_version":1"#;
+            assert!(automatic_wire.contains(marker));
+            assert_eq!(automatic_wire.replace(marker, ""), owner_wire);
+            for root in [owner, automatic] {
+                let projected = serde_json::to_string(&rules_projection(root).unwrap()).unwrap();
+                assert!(!projected.contains("SNTA"));
+                assert!(!projected.contains("automatic_art_catalog_version"));
+            }
         }
+
+        assert_display_projection(&first.resolution_stack, &automatic.resolution_stack);
+        assert_display_projection(&first.stack[0], &automatic.stack[0]);
+        assert_display_projection(&first.waiting_for, &automatic.waiting_for);
 
         // Revert-failing: a root hashed from `serde_json::to_value` would tell these apart.
         let keys = planner_keys(&none);
         assert_eq!(keys, planner_keys(&first));
         assert_eq!(keys, planner_keys(&second));
+        assert_eq!(keys, planner_keys(&automatic));
 
         // Positive controls, one per position: the same `lki.power` changed under a printing
         // moves exactly the keys that read that root.

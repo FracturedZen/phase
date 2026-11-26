@@ -48,6 +48,7 @@ fn scenario_with_parsed_bilbo() -> GameRunner {
 
 fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
         characteristics: TokenCharacteristics {
             display_name: subtype.to_string(),
             power: None,
@@ -74,6 +75,7 @@ fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
 
 fn create_token_batch(runner: &mut GameRunner, owner: PlayerId, subtype: &str, count: u32) {
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner,
         spec: Box::new(artifact_token_spec(subtype, owner)),
         copy: None,

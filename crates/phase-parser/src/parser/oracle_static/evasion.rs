@@ -3,9 +3,11 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
+use crate::parser::oracle_ir::ast::AnaphorNumber;
 use crate::parser::oracle_nom::defender_exception;
 use crate::parser::oracle_nom::defender_exception::DefenderExceptionSegment;
 use crate::parser::oracle_nom::target::{controller_phrase_among_mixed_case, ControllerPhrase};
+use crate::parser::oracle_target::scope_target_spell_phrase;
 #[allow(unused_imports)]
 use crate::types::ability::AttachmentReferent;
 
@@ -197,6 +199,9 @@ fn doubler_source_is_restrictive(filter: &TargetFilter) -> bool {
                 || !tf.properties.is_empty()
         }
         TargetFilter::Or { filters } => filters.iter().all(doubler_source_is_restrictive),
+        // CR 112.1: a stack-scoped "spell" clause excludes every permanent.
+        TargetFilter::StackSpell => true,
+        TargetFilter::And { filters } => filters.iter().any(doubler_source_is_restrictive),
         // CR 603.2d: "a triggered ability of ~" names the doubler's own source
         // object — a self-reference that narrows to exactly one permanent, so it
         // is restrictive (Cloud, Midgar Mercenary).
@@ -236,7 +241,13 @@ fn parse_doubler_disjunct(phrase: &str) -> (TargetFilter, &str) {
     {
         return (filter, rest);
     }
-    parse_type_phrase_folding(phrase)
+    let (filter, rest) = parse_type_phrase_folding(phrase);
+    // CR 112.1 + CR 603.2d: "a colorless spell you control" (Echoes of
+    // Eternity) names an object on the stack. Scope it there, or the disjunct
+    // also matches a battlefield permanent with the same characteristics,
+    // including the doubler itself.
+    let consumed = &phrase[..phrase.len() - rest.len()];
+    (scope_target_spell_phrase(filter, consumed), rest)
 }
 
 pub(crate) fn parse_max_combat_creatures_static(lower: &str) -> Option<StaticMode> {
@@ -541,7 +552,13 @@ pub(crate) fn parse_compound_subject_keyword_static(
 
     // Object-half: delegate the predicate to the shared keyword-grant builder
     // (also peels trailing " as long as <cond>" onto `object_def.condition`).
-    let mut object_def = parse_continuous_gets_has(predicate.original, affected, text)?;
+    // The printed subject is "you and/, <object>", never the source alone.
+    let mut object_def = parse_continuous_gets_has(
+        predicate.original,
+        affected,
+        text,
+        super::anthem::PrintedSubject::Other,
+    )?;
 
     // Derive the player-half mode from the granted keyword. Only player-
     // applicable keyword modes claim this pattern.
@@ -3179,10 +3196,19 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
     // Optional ", where X is the number of <filter>" — only valid when the base
     // cost carried an {X} shard. Used by Sphere of Safety.
     let (input, dynamic_qty) = opt(parse_dynamic_x_clause).parse(input)?;
-    let (input, for_each_qty) = if per_affected.is_none() {
-        opt(parse_for_each_cost_quantity).parse(input)?
-    } else {
-        (input, None)
+    // CR 118.12a + CR 508.1h / CR 509.1d: the counter-kind census of a pronoun
+    // ("{1} for each kind of counter on it") names one object the attack/block
+    // cost is determined from. Only a tax on the source permanent itself names
+    // that object unambiguously; every other subject leaves the tail
+    // unconsumed, so the whole line declines (`parse_combat_tax_static`).
+    let (input, for_each_qty) = match (per_affected, &subject) {
+        (Some(_), _) => (input, None),
+        (None, CombatTaxSubject::SourcePermanent) => opt(alt((
+            parse_for_each_own_counter_kinds,
+            parse_for_each_cost_quantity,
+        )))
+        .parse(input)?,
+        (None, _) => opt(parse_for_each_cost_quantity).parse(input)?,
     };
     let dynamic_qty = dynamic_qty.or(for_each_qty);
 
@@ -3266,6 +3292,30 @@ pub(crate) fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxPa
             defended,
         },
     ))
+}
+
+/// CR 122.1 + CR 608.2k: " for each kind of counter on it" on a self tax —
+/// the pronoun names the source permanent, so the census reads
+/// `DistinctCounterKindsAmong { SelfRef }`. A plural pronoun names no single
+/// source and declines.
+fn parse_for_each_own_counter_kinds(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag_no_case::<_, _, OracleError<'_>>(" for each ").parse(input)?;
+    let lowered = rest.trim_end_matches('.').to_lowercase();
+    let number = all_consuming(nom_quantity::parse_counter_kinds_on_object_pronoun)
+        .parse(lowered.as_str())
+        .map(|(_, number)| number);
+    match number {
+        Ok(AnaphorNumber::Singular) => Ok((
+            "",
+            QuantityRef::DistinctCounterKindsAmong {
+                filter: TargetFilter::SelfRef,
+            },
+        )),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
+    }
 }
 
 /// CR 702.3b + CR 611.3a: parse "<subject> can attack as though <pronoun>

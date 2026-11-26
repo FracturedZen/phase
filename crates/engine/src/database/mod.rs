@@ -1,5 +1,6 @@
 pub mod augment;
 pub mod bracket_lists;
+pub mod card_data_provenance;
 pub mod card_db;
 pub mod combo_table;
 pub mod contraptions;
@@ -9,6 +10,8 @@ pub mod encore;
 pub mod forge;
 pub mod haunt;
 pub mod hideaway;
+#[cfg(feature = "test-support")]
+pub mod integration_fixture;
 pub mod legality;
 pub mod meld;
 pub mod mtgjson;

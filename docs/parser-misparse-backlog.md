@@ -3,8 +3,17 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4500
-- **Total card appearances across root causes:** 4533 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4453
+- **Total card appearances across root causes:** 4486 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+
+> **Staleness warning.** This list is pruned one card at a time and has not been
+> regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
+> found only 103 of 4627 listed entries (2.2%) carried a live `cargo semantic-audit`
+> finding. Root causes 15, 16, 20, 24, 26, 27, 28, 30 and 31 had zero. That is
+> either a stale entry or a misparse the audit's five finding types cannot see
+> (the backlog uses a different 29-category taxonomy). Use the lists as a
+> **clustering aid**, and pick targets from live `cargo semantic-audit data/`
+> output. Last editorial cleanup: 15 non-card entries removed (#8907).
 
 > Counting method: both figures count the per-root-cause card bullets only — the
 > three metadata bullets above are excluded — and are the source of truth.
@@ -34,45 +43,54 @@ The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 
 The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
 
+Mistcaller/Hallowed Moonlight entry-copy regressions additionally pin the selected copy across
+replacement-ordering pauses: Superior Spider-Man retains its selected graveyard card for the
+exile rider, and a Sculpting Steel token retains its chosen Triskelion values when the model's
+owner concedes. Redirected Saw in Half copies retain their halved power/toughness in both the
+creation snapshot and replay, without battlefield-entry counters (CR 608.2c, CR 707.9b, CR 614.6).
+Saw in Half's Metamorph copies each offer their own copy choice before Moonlight.
+Mycoloth copies can resolve Devour before redirection; Moonlight-first skips Devour.
+Devour counters belong only to that entrant's event, never the next copy's batch seed.
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
-| 1 | Relative-clause / filter restriction on target dropped | 724 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
-| 3 | Anaphor bound to wrong referent | 400 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 379 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
-| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
-| 6 | Disjunctive (or-list) collapsed to first branch | 225 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
+| 1 | Relative-clause / filter restriction on target dropped | 710 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 566 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 3 | Anaphor bound to wrong referent | 393 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
+| 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 317 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
+| 6 | Disjunctive (or-list) collapsed to first branch | 222 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
-| 8 | Additional / alternative casting cost dropped | 208 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
-| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 177 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
-| 10 | Trigger event/mode unrecognized → Unknown | 164 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
-| 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
+| 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
+| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
+| 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
+| 11 | Replacement / prevention / 'instead' effect mis-modeled | 150 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
-| 13 | State/game-state condition → StaticCondition::Unrecognized | 127 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
-| 14 | Granted/quoted ability or continuous modification dropped | 94 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
-| 15 | Multi-target / 'up to N' optionality or count dropped | 80 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
-| 16 | Keyword payload / multiplicity / mis-tokenization | 81 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
-| 17 | Copy 'except' / additional-modification clause dropped | 80 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
+| 13 | State/game-state condition → StaticCondition::Unrecognized | 124 | oracle_nom/condition.rs parse_inner_condition — add typed variant for the predicate class |
+| 14 | Granted/quoted ability or continuous modification dropped | 92 | oracle_static.rs continuous-modification extraction — emit all conjuncts incl. GrantAbility/GrantKeyword |
+| 15 | Multi-target / 'up to N' optionality or count dropped | 79 | parser/oracle_effect/lower.rs `apply_optional_target_fixup` + `imperative.rs` Attach host capture — preserve MultiTargetSpec / optional_targeting; lift the detector exclusions (DealDamage, Transform, Any-target, Token, Counter, MoveCounters, BecomeCopy, CopySpell) as each resolver grows a declined-target no-op |
+| 16 | Keyword payload / multiplicity / mis-tokenization | 80 | game/keywords.rs + oracle keyword parsing — use typed discriminants and guard ability-word labels |
+| 17 | Copy 'except' / additional-modification clause dropped | 79 | oracle parser copy handling — populate BecomeCopy/CopyTokenOf additional_modifications from the except-list (CR 707.2) |
 | 18 | Subtype / type-change modification malformed or dropped | 78 | oracle_util.rs SUBTYPES + parse_enchanted_is_type — register subtypes and emit full type-change set |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 55 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
-| 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
+| 21 | Token entry flags / keyword / attachment clause dropped | 51 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
 | 23 | Effect modeled with structurally wrong variant / ability class | 49 | add-engine-effect: select the correct Effect/ability variant for the clause class |
-| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 36 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
+| 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 34 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 19 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
-| 26 | Delayed / future-phase trigger flattened to immediate effect | 20 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
+| 26 | Delayed / future-phase trigger flattened to immediate effect | 19 | add-trigger: wrap future-phase effects in CreateDelayedTrigger |
 | 27 | Cross-target group / shared-quality constraint dropped | 12 | oracle_target.rs multi_target — add SameController/SameZone/DistinctNames/Parity constraints |
-| 28 | Trigger/activation timing or ordinal restriction dropped | 11 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
+| 28 | Trigger/activation timing or ordinal restriction dropped | 10 | oracle_casting.rs scan_timing_restrictions + trigger constraint parsing |
 | 30 | Token/named-card name corrupted by normalization or overrun | 7 | oracle_util.rs SELF_REF normalization + Named-filter parsing — guard literal 'named X' spans |
 | 31 | Other / uncategorized misparse | 4 | manual triage |
 
-> The top **5** root causes cover 2394/4533 ≈ 52.8% of all misparse appearances; the top 10 cover 3375/4533 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped below row 8 as cards were fixed.
+> The top **5** root causes cover 2367/4486 ≈ 52.8% of all misparse appearances; the top 10 cover 3341/4486 ≈ 74.5%. Fix these first. Row order is the original ranking; row 7 has since dropped to tie row 8 (207 cards each) as cards were fixed.
 
 ## Full card lists per root cause
 
-### 1. Relative-clause / filter restriction on target dropped  (724 cards)
+### 1. Relative-clause / filter restriction on target dropped  (710 cards)
 
 **Signature.** TargetFilter/affected emitted with empty or missing properties; a trailing restrictive clause (type, subtype, color, mana value, zone, combat/temporal/control predicate, exclusion) is silently dropped, over-broadening the filter.
 
@@ -114,7 +132,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Arcade Gannon
 - Archon of the Wild Rose
 - Argivian Blacksmith
-- Armored Transport
 - Arrogant Bloodlord
 - Ashiok's Erasure
 - Ashiok, Nightmare Weaver
@@ -140,7 +157,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Begin Anew
 - Behold the Sinister Six!
 - Benalish Missionary
-- Bitter Work duplicate?
 - Blade of the Swarm
 - Bladegriff Prototype
 - Bladehold War-Whip
@@ -169,7 +185,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Caesar, Legion's Emperor
 - Calix, Destiny's Hand
 - Callous Giant
-- Campfire
 - Cantor of the Refrain
 - Captain America's Shield
 - Captain N'ghathrod
@@ -197,7 +212,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Cloudstone Curio
 - Coiling Stalker
 - Coils of the Medusa
-- Colfenor, the Last Yew
 - Commencement of Festivities
 - Compound Fracture
 - Consulate Surveillance
@@ -279,7 +293,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Ethereal Forager
 - Ethersworn Shieldmage
 - Euroakus
-- Evendo, Waking Haven
 - Everett K. Ross, Hapless Attaché
 - Executioner's Swing
 - Expel the Interlopers
@@ -411,7 +424,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Junkyard Scrapper
 - Kaima, the Fractured Calm
 - Kamachal, Ship's Mascot
-- Kamahl's Summons
 - Karona, False God Avatar
 - Karplusan Strider
 - Kathril, Aspect Warper
@@ -456,7 +468,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Lesser Werewolf
 - Lethal Scheme
 - Liara of the Flaming Fist
-- Light of Sanction
 - Likeness Looter
 - Lila, Hospitality Hostess
 - Lithomancer's Focus
@@ -466,7 +477,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Loyal Unicorn
 - Lumbering Lightshield
 - Luminesce
-- Lure
 - Magewright's Stone
 - Magic Designer
 - Main Event Horizon
@@ -492,7 +502,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mistform Mutant
 - Mistmoon Griffin
 - Mizzium Mortars
-- Mizzix's Mastery
 - Monastery Siege
 - Mongrel Pack
 - Murasa Sproutling
@@ -544,9 +553,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Penumbra Umbra
 - Pestilent Cauldron
 - Phyrexian Furnace
-- Phyrexian Furnace-DUP
 - Piety Charm
-- Pin Trading-DUP
 - Plague Nurse
 - Plague Wight
 - Planar Engineering
@@ -754,11 +761,9 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Volrath's Laboratory
 - Vrestin, Menoptra Leader
 - Wall of Corpses
-- Wall of Fire (n/a)
 - Wall of Mulch
 - Wall of Nets
 - Wall of Putrid Flesh
-- Wall of Vapor
 - Wallop
 - Wandermare
 - Warpath
@@ -806,7 +811,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (566 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -877,7 +882,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Brain Pry
 - Breath of the Sleepless
 - Brimstone Vandal
-- Bronze Horse
 - Bull-Rush Bruiser
 - Bulwark Ox
 - Cache Grab
@@ -898,7 +902,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Codespell Cleric
 - Colfenor's Urn
 - Collectigull
-- Combat Celebrant
 - Command Mine
 - Command Power Plant
 - Concord with the Kami
@@ -1033,6 +1036,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hall of the Bandit Lord
 - Hawkeye, Avenging Archer
 - Head to Head
+- Hedron Alignment
 - Hedron-Field Purists
 - Heir of the Ancient Fang
 - Helicarrier Strike
@@ -1051,7 +1055,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hobgoblin Captain
 - Holistic Wisdom
 - Hotheaded Giant
-- Hour of Glory
 - Hour of Revelation
 - Howlpack Piper
 - Hulkling, Burgeoning Bruiser
@@ -1276,8 +1279,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Spirit of Resistance
 - Spiritual Sanctuary
 - Splitting the Powerstone
-- Sprout watch Dryad
-- Sproutwatch Dryad
 - Stalwart Successor
 - Steel Exemplar
 - Stomping Slabs
@@ -1385,7 +1386,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 3. Anaphor bound to wrong referent  (400 cards)
+### 3. Anaphor bound to wrong referent  (393 cards)
 
 **Signature.** A pronoun/demonstrative ('it', 'that creature/player', 'them', 'they') resolves to the wrong slot (Self/Source/Controller/Any/ParentTarget) instead of the bound parent target, forwarded result, or triggering player (CR 608.2k). Includes the runtime half of the same defect class, where the referent slot is bound correctly but resolves to a STALE prior answer.
 
@@ -1443,7 +1444,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Brudiclad, Telchor Engineer
 - Burn Away
 - Call of the Death-Dweller
-- Captain Ripley Vance
 - Celeborn the Wise
 - Cemetery Gatekeeper
 - Cemetery Protector
@@ -1546,7 +1546,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Guardian Beast
 - Haakon, Stromgald Scourge Avatar
 - Hall of Mirrors
-- Hallowed Moonlight
 - Harnessed Lightning
 - Heartless Hidetsugu
 - Heat Wave
@@ -1583,7 +1582,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Knight of Grace
 - Know Naught but Fire
 - Kor Scythemaster
-- Kresh the Bloodbraided
 - Krovikan Plague
 - Kroxa, Titan of Death's Hunger
 - Kusari-Gama
@@ -1613,7 +1611,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mind Spiral
 - Mindshrieker
 - Minn, Wily Illusionist
-- Mogg Bombers
 - Mogis, God of Slaughter
 - Moku, Meandering Drummer
 - Monkey Cage
@@ -1630,7 +1627,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Nissa's Judgment
 - Niv-Mizzet, Supreme
 - No One Will Hear Your Cries
-- Norin the Wary
 - Numbing Dose
 - Ob Nixilis, Unshackled
 - Oblation
@@ -1642,7 +1638,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Ordruun Commando
 - Origin of Black Widow
 - Origin of Thor
-- Orthion, Hero of Lavabrink
 - Othelm, Sigardian Outcast
 - Overburden
 - Ovika, Enigma Goliath
@@ -1655,7 +1650,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Petra Sphinx
 - Petty Larceny
 - Phila, Unsealed
-- Phyrexian Chimney Imp-DUP
 - Pinchy McStingbutt
 - Pollen Lullaby
 - Precipitous Drop
@@ -1796,7 +1790,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (379 cards)
+### 4. Conjoined / chained second effect clause dropped  (377 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -2032,7 +2026,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Predators' Hour
 - Quest Compleated Beast
 - Questing Cosplayer
-- Rag Man
 - Rakdos, Lord of Riots
 - Rampaging Geoderm
 - Rankle, Pitiless Trickster
@@ -2185,7 +2178,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (323 cards)
+### 5. Dropped 'for each' / dynamic count collapsed to Fixed  (317 cards)
 
 **Signature.** Effect quantity (count/amount/P-T) parses as Fixed(1)/constant instead of a dynamic QuantityExpr::Ref over a 'for each X' / 'that many' / 'equal to' clause; the multiplier is dropped.
 
@@ -2202,7 +2195,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Agrus Kos, Eternal Soldier
 - Aim for the Head
 - Ajani's Presence
-- Algorithmic Ferocity
 - Alien Invasion
 - Alisaie Leveilleur
 - Altered Ego
@@ -2326,7 +2318,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hex Parasite
 - Hinata, Dawn-Crowned
 - Hurkyl, Master Wizard
-- Huskburster Swarm
 - Hydradoodle
 - Ill-Gotten Gains
 - Illuminated Folio
@@ -2439,7 +2430,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Ryan Sinclair
 - Sage of Hours
 - Sage's Reverie
-- Sarevok's Tome
 - Sasaya's Essence
 - Say Its Name
 - Search for Glory
@@ -2486,9 +2476,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Undead Sprinter
 - Unlucky Cabbage Merchant
 - Ursine Monstrosity
-- Urza's Mine
-- Urza's Power Plant
-- Urza's Tower
 - Uyo, Silent Prophet
 - Valakut Awakening
 - Valiant Changeling
@@ -2519,7 +2506,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 6. Disjunctive (or-list) collapsed to first branch  (225 cards)
+### 6. Disjunctive (or-list) collapsed to first branch  (222 cards)
 
 **Signature.** An 'A or B (or C)' enumeration in a target/filter/cost/trigger/effect collapses to the first branch (or splits into a dangling Unknown); the OR/AnyOf union is never built.
 
@@ -2620,7 +2607,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Glittering Massif
 - Godhunter Octopus
 - Golem Artisan
-- Greater Gargadon
 - Guru Pathik
 - HYDRA Assault Robot
 - Hand of Vecna
@@ -2686,7 +2672,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Regent's Authority
 - Reign of Terror
 - Relic Amulet
-- Reptilian-...placeholder
 - Resilient Wanderer
 - Return the Favor
 - Rick Jones, Destined Sidekick
@@ -2696,7 +2681,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Sarah's Wings
 - Sarkhan the Masterless
 - Savai Triome
-- Sawback Manticore
 - Scarred Puma
 - Sea Troll
 - Search the Premises
@@ -2785,6 +2769,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Bringer of the Black Dawn
 - Burning-Rune Demon
 - Calibrated Blast
+- Campfire
 - Canyon Drake
 - Captain Kirk, Boldly Going
 - Cathartic Operation
@@ -2844,7 +2829,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Harper Recruiter
 - Haunted Angel
 - Hazardroot Herbalist
-- Hedron Alignment
 - Hellkite Courser
 - Hildibrand Manderville
 - Hinder
@@ -2975,7 +2959,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 8. Additional / alternative casting cost dropped  (208 cards)
+### 8. Additional / alternative casting cost dropped  (207 cards)
 
 **Signature.** Spell ability cost is null; an 'As an additional cost' / 'rather than pay its mana cost' / pitch / disjunctive cost clause is not parsed onto the ability.
 
@@ -3148,7 +3132,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Seize the Spoils
 - Sephara, Sky's Blade
 - Shared Discovery
-- Shining Shoal placeholder
 - Sivvi's Valor
 - Skaab Ruinator
 - Skeletal Scrying
@@ -3194,7 +3177,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (177 cards)
+### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (176 cards)
 
 **Signature.** Effect recipient / filter controller / chooser uses You/Controller where Opponent/TargetPlayer/ScopedPlayer/DefendingPlayer is required, or per-player fan-out is dropped.
 
@@ -3292,7 +3275,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Kogla, the Titan Ape
 - Kraven the Hunter
 - Leadership Vacuum
-- Legion's End
 - Lembas
 - Liliana's Indignation
 - Liliana's Triumph
@@ -3382,7 +3364,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 10. Trigger event/mode unrecognized → Unknown  (164 cards)
+### 10. Trigger event/mode unrecognized → Unknown  (162 cards)
 
 **Signature.** TriggerMode parses as Unknown(text); the event/subject combinator (state-trigger, taps-for-mana, becomes-blocked, keyword-action, loyalty-activated, die-roll) doesn't recognize the phrasing so the trigger never fires.
 
@@ -3404,13 +3386,11 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Baneclaw Marauder
 - Black Panther, Vanguard
 - Bomb Squad
-- Bronze Horse (n/a)
 - C.A.M.P.
 - Cadric, Soul Kindler
 - Caged Sun
 - Captain America, Living Legend
 - Chandra's Regulator
-- Chatzuk, Mighty Guitarist (dup)
 - Chicken à la King
 - Circle of Affliction
 - Criminal Enterprise
@@ -3557,7 +3537,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 11. Replacement / prevention / 'instead' effect mis-modeled  (151 cards)
+### 11. Replacement / prevention / 'instead' effect mis-modeled  (150 cards)
 
 **Signature.** A continuous replacement / damage-prevention / redirection clause (CR 614/615) is emitted as a one-shot Spell or unconditional sequential sibling, dropping the 'instead'/replacement semantics or the source/recipient filter.
 
@@ -3647,7 +3627,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Mirri
 - Mirror Strike
 - Mirrormind Crown
-- Mistcaller
 - Moonmist
 - Mount Keralia
 - Mourner's Shield
@@ -3883,7 +3862,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 13. State/game-state condition → StaticCondition::Unrecognized  (127 cards)
+### 13. State/game-state condition → StaticCondition::Unrecognized  (124 cards)
 
 **Signature.** A parseable game-state predicate falls to StaticCondition::Unrecognized (evaluates permissively true) instead of a typed presence/combat/counter/comparison condition.
 
@@ -3917,7 +3896,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Crown-Hunter Hireling
 - Curse of Misfortunes
 - Curse of Silence
-- Curse of the Restless Dead-dup
 - Damping Engine
 - Dangerous
 - Deadhead
@@ -3967,7 +3945,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Nature's Chosen
 - Nemesis Phoenix
 - Neriv, Heart of the Storm
-- New Master of Arms
 - Night Revelers
 - Nightsky Mimic
 - Nine-Fingers Keene
@@ -3987,7 +3964,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Red Scarab
 - Regenerations Restored
 - Rod of Spanking
-- Rushing-Tide Zubera placeholder
 - Sab-Sunen, Luxa Embodied
 - Sanwell, Avenger Ace
 - Secretkeeper
@@ -4021,7 +3997,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 14. Granted/quoted ability or continuous modification dropped  (94 cards)
+### 14. Granted/quoted ability or continuous modification dropped  (92 cards)
 
 **Signature.** A static-grant modification list omits a granted activated/triggered ability, keyword, color, subtype, or P/T conjunct that the Oracle conjoins ('is a … with "<ability>"', 'and has flying').
 
@@ -4084,7 +4060,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Proven Combatant
 - Rakdos Riteknife
 - Rakish Revelers
-- Repentant-...placeholder
 - Rescue Skiff
 - Retriever Phoenix
 - Return the Past
@@ -4096,7 +4071,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - The Sprinkler of Stardust
 - The Triumph of Anax
 - The Unknown Wizard
-- Thrull Wizard placeholder
 - Thundering Mightmare
 - Torrent of Lava
 - Trazyn the Infinite
@@ -4126,7 +4100,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 15. Multi-target / 'up to N' optionality or count dropped  (80 cards)
+### 15. Multi-target / 'up to N' optionality or count dropped  (79 cards)
 
 **Signature.** MultiTargetSpec / 'up to one/two target' optionality dropped to a mandatory single Typed target (or collapsed into DamageAll), losing the multi_target / up_to slot and per-target distinctness.
 
@@ -4146,7 +4120,6 @@ are outside the detector's class.
 
 - A-Incriminate
 - Blue Dragon
-- Bon... placeholder
 - Bonfire of the Damned
 - Boom Box
 - Boros Battleshaper
@@ -4227,7 +4200,7 @@ are outside the detector's class.
 
 </details>
 
-### 16. Keyword payload / multiplicity / mis-tokenization  (81 cards)
+### 16. Keyword payload / multiplicity / mis-tokenization  (80 cards)
 
 **Signature.** A keyword cost or discriminant is wrong (ward life cost as {0}, devour type hardcoded, multi-kicker merged, protection color stored on CardType axis), a keyword is deduped, or a flavor ability-word label is read as a keyword.
 
@@ -4254,7 +4227,6 @@ are outside the detector's class.
 - Benevolent Bodyguard
 - Bold Biochemist
 - Brineborn Cutthroat
-- Burden of Proof
 - Cactus Preserve
 - Caprichrome
 - Cartel Aristocrat
@@ -4319,7 +4291,7 @@ are outside the detector's class.
 
 </details>
 
-### 17. Copy 'except' / additional-modification clause dropped  (80 cards)
+### 17. Copy 'except' / additional-modification clause dropped  (79 cards)
 
 **Signature.** Copy-spell/animate/token-copy drops the 'except it's X' / 'with <ability>' override (P/T, keyword, type, supertype, non-legendary, retarget) from the copy.
 
@@ -4336,7 +4308,6 @@ are outside the detector's class.
 - Cephalid Facetaker
 - Donal, Herald of Wings
 - Double Header (copy)
-- Double Major
 - Duplication Device
 - Echoing Equation
 - Electroduplicate
@@ -4646,7 +4617,7 @@ are outside the detector's class.
 
 </details>
 
-### 21. Token entry flags / keyword / attachment clause dropped  (52 cards)
+### 21. Token entry flags / keyword / attachment clause dropped  (51 cards)
 
 **Signature.** Token creation drops tapped/enters_attacking flags, a 'with <keyword>' grant, color/name, or an attach-to-target clause (terminator misses a trailing relative phrase).
 
@@ -4673,7 +4644,6 @@ are outside the detector's class.
 - Godsire
 - Goldmeadow Lookout
 - Ignacio of Myra's Marvels
-- Immortal Obligation
 - Imperious Mindbreaker
 - Impetuous Lootmonger
 - In Too Deep
@@ -4769,7 +4739,7 @@ are outside the detector's class.
 
 </details>
 
-### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (36 cards)
+### 24. Variable X / where-X count unbound (sentinel or unresolved Variable)  (34 cards)
 
 **Signature.** X-derived cost/count emitted as a u32::MAX sentinel, Fixed, or raw-string Variable with no 'where X is' binding; the X linkage is severed.
 
@@ -4784,7 +4754,6 @@ are outside the detector's class.
 - Belisarius Cawl
 - Brain in a Jar
 - Cabal Shrine
-- Calciform Pools (cost X)
 - Firecat Blitz
 - Flash of Insight
 - Florian, Voldaren Scion
@@ -4801,7 +4770,6 @@ are outside the detector's class.
 - Mutated Cultist
 - Necron Overlord
 - Night Dealings
-- Pantlaza, Sun-Favored
 - Petalmane Baku
 - Quillmane Baku
 - Saltcrusted Steppe
@@ -4846,7 +4814,7 @@ are outside the detector's class.
 
 </details>
 
-### 26. Delayed / future-phase trigger flattened to immediate effect  (20 cards)
+### 26. Delayed / future-phase trigger flattened to immediate effect  (19 cards)
 
 **Signature.** An effect that should be a delayed triggered ability (next combat/end/draw step) is emitted as an immediate effect with no CreateDelayedTrigger wrapper (CR 603.7).
 
@@ -4873,7 +4841,6 @@ are outside the detector's class.
 - Nafs Asp
 - Okoye, Mighty and Adored
 - Perilous Iteration
-- Phytotitan
 
 </details>
 
@@ -4900,7 +4867,7 @@ are outside the detector's class.
 
 </details>
 
-### 28. Trigger/activation timing or ordinal restriction dropped  (11 cards)
+### 28. Trigger/activation timing or ordinal restriction dropped  (10 cards)
 
 **Signature.** A timing/scope restriction (OnlyDuringYourTurn / OncePerTurn / 'during an opponent's turn' / Nth-spell ordinal / cast-timing) is null; the constraint tail is not parsed.
 
@@ -4918,7 +4885,6 @@ are outside the detector's class.
 - Shadowheart, Sharran Cleric
 - Skarrgan Hellkite
 - Uthros Research Craft
-- Uthros, Titanic Godcore
 
 </details>
 

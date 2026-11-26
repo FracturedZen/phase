@@ -175,7 +175,9 @@ fn cast_loop(
             WaitingFor::OptionalCostChoice { .. } => {
                 trace.saw_optional_cost = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_alt })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_alt { 0 } else { 1 },
+                    })
                     .expect("optional cost decision should succeed");
             }
             WaitingFor::ChooseGiftRecipient {
@@ -219,9 +221,11 @@ fn cast_loop(
                 return trace;
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return trace,
+            // CR 805.5b: pass the whole holding team; a holder-only pass
+            // never advances a shared team.
             WaitingFor::Priority { .. } => {
                 runner
-                    .act(GameAction::PassPriority)
+                    .pass_holding_team()
                     .expect("priority pass should succeed");
             }
             other => panic!("unexpected prompt: {other:?}"),
@@ -409,7 +413,12 @@ fn v7cd_single_remaining_recipient_auto_binds_without_prompt() {
     scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_player(runner.state_mut(), P2, &mut events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P2,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     assert!(
         runner.state().players[2].is_eliminated,
         "setup: P2 eliminated"
@@ -649,7 +658,7 @@ fn v9c_recipient_prompt_stays_affiliated_with_payer_cast() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 f.runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept alt cost");
             }
             WaitingFor::ReplacementChoice { .. } => break,
@@ -735,7 +744,7 @@ fn to_recipient_prompt(runner: &mut GameRunner, inv: ObjectId, target: ObjectId)
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept the alternative cost");
             }
             prompt @ WaitingFor::ChooseGiftRecipient { .. } => return prompt,
@@ -750,10 +759,18 @@ fn finish_resolution(runner: &mut GameRunner) {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
-            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+            // CR 805.5b: pass the whole holding team through a live stack. A
+            // ManaPayment PassPriority finalizes payment instead and keeps
+            // its own arm.
+            WaitingFor::Priority { .. } => {
+                runner
+                    .pass_holding_team()
+                    .expect("priority pass should succeed");
+            }
+            WaitingFor::ManaPayment { .. } => {
                 runner
                     .act(GameAction::PassPriority)
-                    .expect("priority pass should succeed");
+                    .expect("mana payment should finalize");
             }
             other => panic!("unexpected prompt while resolving: {other:?}"),
         }
@@ -1081,7 +1098,12 @@ fn v11_non_candidate_answer_is_refused_without_mutation() {
     scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_player(runner.state_mut(), P3, &mut events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P3,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     let prompt = to_recipient_prompt(&mut runner, inv, bear);
     let WaitingFor::ChooseGiftRecipient { candidates, .. } = &prompt else {
         unreachable!()
@@ -1345,7 +1367,9 @@ fn manual_cast_to_next_prompt(
             WaitingFor::OptionalCostChoice { .. } => {
                 offered = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: accept_alt })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if accept_alt { 0 } else { 1 },
+                    })
                     .expect("answer the alternative cost");
             }
             _ => return offered,
@@ -1812,7 +1836,7 @@ fn v26_recipient_replacement_choices_follow_apnap_order() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept the alternative cost");
             }
             WaitingFor::ReplacementChoice {
@@ -1884,7 +1908,7 @@ fn v27_substituted_gain_does_not_change_the_life_later_recipients_read() {
             WaitingFor::OptionalCostChoice { .. } => {
                 saw_optional_cost = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept the alternative cost");
             }
             WaitingFor::ManaPayment { .. } => {
@@ -1954,7 +1978,7 @@ fn v28_answered_substitute_does_not_change_the_life_later_recipients_read() {
             WaitingFor::OptionalCostChoice { .. } => {
                 saw_optional_cost = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept the alternative cost");
             }
             WaitingFor::ReplacementChoice {

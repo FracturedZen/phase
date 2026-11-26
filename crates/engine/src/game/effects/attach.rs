@@ -4,6 +4,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
+use crate::game::targeting::EventReferentBinding;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
     EffectKind, FilterProp, MultiTargetSpec, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
@@ -208,11 +209,20 @@ fn resolve_attachment_ids<'a>(
         // a trigger event or a general ParentTarget projection.
         resolve_bound_attachment_targets(state, ability, attachment_filter)
     } else if matches!(attachment_filter, TargetFilter::ParentTarget) {
-        resolve_parent_target_attachment_from_trigger(state)
-            .or_else(|| resolve_bound_attachment_target(state, ability, attachment_filter))
-            .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
-            .into_iter()
-            .collect()
+        match resolve_parent_target_attachment_from_trigger(state, ability) {
+            EventReferentBinding::Found(id) => vec![id],
+            // CR 400.7: the entering attachment became a new object; no other
+            // object (such as the chosen host) stands in for it.
+            EventReferentBinding::Unfindable => Vec::new(),
+            EventReferentBinding::NotNamed => {
+                resolve_bound_attachment_target(state, ability, attachment_filter)
+                    .or_else(|| {
+                        resolve_object_filter(state, ability, attachment_filter, target_slots)
+                    })
+                    .into_iter()
+                    .collect()
+            }
+        }
     } else if crate::types::ability::attach_attachment_claims_announcement_slot(
         attachment_filter,
         &attach_selection(ability),
@@ -225,6 +235,11 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
+    } else if matches!(attachment_filter, TargetFilter::TriggeringSource)
+        && attachment_referent_departed(state, ability, attachment_filter)
+    {
+        // CR 400.7: the event's object is the attachment only as the incarnation the event named.
+        Vec::new()
     } else {
         resolve_object_filter(state, ability, attachment_filter, &mut std::iter::empty())
             .into_iter()
@@ -322,6 +337,16 @@ fn resolve_bound_attachment_operation(
     let attachment_ids =
         resolve_attachment_ids(state, ability, attachment_filter, &mut target_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7 + CR 608.2b: a referent that became a new object or an
+        // illegal target is not attached, and the instruction still resolved.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+            return Ok(AttachResolutionOutcome::Completed);
+        }
         return Err(EffectError::MissingParam(
             "No attachment for Attach".to_string(),
         ));
@@ -653,6 +678,7 @@ pub(crate) fn attach_result_from_events(
             .map(|pin| TargetRef::Object(pin.object_id))
             .collect(),
         object_incarnations: attached,
+        phase_population: false,
     }
 }
 
@@ -938,6 +964,10 @@ fn prompt_described_host_choice(
     let mut no_slots = std::iter::empty();
     let attachment_ids = resolve_attachment_ids(state, ability, attachment_filter, &mut no_slots);
     if attachment_ids.is_empty() {
+        // CR 400.7: the executor resolves a departed referent as a no-op.
+        if attachment_referent_departed(state, ability, attachment_filter) {
+            return Ok(AttachPromptOutcome::Execute);
+        }
         return Ok(AttachPromptOutcome::Completed);
     }
     // CR 115.1d + CR 608.2d: the host candidates are the BATTLEFIELD objects
@@ -1174,6 +1204,7 @@ fn park_resolution_attachment_choice(
         is_cost_payment: false,
         enters_modified_if: None,
         duration: None,
+        privacy_zones: None,
     };
 
     if let Some(active) = state.active_ability_continuation_frame() {
@@ -1778,27 +1809,102 @@ fn host_slot_announced(
 /// is the object that caused the ETB trigger, while the creature is the chosen
 /// target. Resolve only real attachment subtypes from the trigger event so
 /// general ParentTarget target inheritance remains unchanged.
-fn resolve_parent_target_attachment_from_trigger(state: &GameState) -> Option<ObjectId> {
-    let object_id = match state.current_trigger_event.as_ref()? {
-        GameEvent::ZoneChanged {
-            object_id,
-            to: Zone::Battlefield,
-            ..
-        } => *object_id,
-        _ => return None,
+/// CR 400.7 + CR 701.3a: "attach it" on an enters trigger names the entering
+/// Aura, Equipment or Fortification, and only while it is still that object.
+fn resolve_parent_target_attachment_from_trigger(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> EventReferentBinding {
+    let Some(object_id) = state
+        .current_trigger_event
+        .as_ref()
+        .and_then(entering_object)
+    else {
+        return EventReferentBinding::NotNamed;
     };
-    state.objects.get(&object_id).and_then(|obj| {
-        if obj
-            .card_types
+    let is_attachment = state.objects.get(&object_id).is_some_and(|obj| {
+        obj.card_types
             .subtypes
             .iter()
             .any(|subtype| matches!(subtype.as_str(), "Aura" | "Equipment" | "Fortification"))
-        {
-            Some(object_id)
-        } else {
-            None
+    });
+    if !is_attachment {
+        return EventReferentBinding::NotNamed;
+    }
+    match crate::game::targeting::resolve_event_referent(
+        state,
+        ability,
+        &TargetFilter::TriggeringSource,
+    ) {
+        EventReferentBinding::Found(id) if id == object_id => EventReferentBinding::Found(id),
+        EventReferentBinding::Unfindable => EventReferentBinding::Unfindable,
+        EventReferentBinding::Found(_) | EventReferentBinding::NotNamed => {
+            EventReferentBinding::NotNamed
         }
-    })
+    }
+}
+
+/// The object an enters trigger `event` put onto the battlefield.
+pub(in crate::game) fn entering_object(event: &GameEvent) -> Option<ObjectId> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    Some(*object_id)
+}
+
+/// CR 400.7 + CR 608.2b: whether an attachment operand that resolved to nothing names a
+/// specific object that has since become a new object or an illegal target. An operand
+/// naming no specific object (a scan, or a granter never stamped) has not departed.
+fn attachment_referent_departed(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> bool {
+    let trigger_source = ability
+        .trigger_source
+        .as_ref()
+        .map(|s| s.identity.reference);
+    let referent = match filter {
+        TargetFilter::SelfRef => trigger_source.or_else(|| ability.source_ref(state)),
+        TargetFilter::OriginalSource => trigger_source,
+        TargetFilter::GrantingObject { bound } => bound.or(ability.context.granting_object),
+        // CR 400.7 + CR 701.3a: the entering attachment the trigger named became a new object.
+        TargetFilter::ParentTarget
+            if resolve_parent_target_attachment_from_trigger(state, ability)
+                == EventReferentBinding::Unfindable =>
+        {
+            return true;
+        }
+        // CR 400.7: the incarnation the firing event recorded for its object.
+        TargetFilter::TriggeringSource => {
+            match crate::game::targeting::resolve_event_context_target(
+                state,
+                filter,
+                ability.source_id,
+            ) {
+                Some(TargetRef::Object(id)) => {
+                    state.current_trigger_event.as_ref().and_then(|event| {
+                        crate::game::targeting::event_context_incarnation(filter, event, id)
+                    })
+                }
+                _ => None,
+            }
+        }
+        // The live slot read already dropped it: a declared object departed or became illegal.
+        TargetFilter::ParentTargetSlot { index } => {
+            return matches!(
+                crate::game::targeting::resolve_parent_slot_from_root(state, ability, *index),
+                Some(TargetRef::Object(_))
+            );
+        }
+        _ => None,
+    };
+    referent.is_some_and(|referent| !referent.is_current(state))
 }
 
 fn resolve_object_filter<'a>(
@@ -1825,11 +1931,12 @@ fn resolve_object_filter<'a>(
             })
             .or_else(|| state.last_created_token_ids.first().copied()),
         TargetFilter::TriggeringSource | TargetFilter::AttachedTo => {
-            crate::game::targeting::resolve_event_context_target(state, filter, ability.source_id)
-                .and_then(|target| match target {
+            crate::game::targeting::affected_event_context_target(state, ability, filter).and_then(
+                |target| match target {
                     TargetRef::Object(id) => Some(id),
                     TargetRef::Player(_) => None,
-                })
+                },
+            )
         }
         // CR 400.7 + CR 603.7c: a pinned referent that became a new object is
         // dropped. The all-stale case is caught by the early return at the top
@@ -3335,6 +3442,7 @@ mod tests {
         };
         let ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: name.to_string(),
                 power: crate::types::ability::PtValue::Fixed(0),
                 toughness: crate::types::ability::PtValue::Fixed(0),

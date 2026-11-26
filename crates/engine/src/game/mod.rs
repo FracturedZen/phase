@@ -44,6 +44,7 @@ pub mod contraptions;
 mod contraptions_tests;
 pub mod cost_payability;
 pub(crate) mod costs;
+pub mod could_produce;
 pub mod coverage;
 pub mod crew_payment;
 pub mod dash;
@@ -94,6 +95,7 @@ pub mod keywords;
 pub mod layers;
 pub mod ledger;
 pub(crate) mod legend_scope;
+pub mod lethal_damage;
 pub mod library;
 pub mod life_costs;
 pub mod life_safety;
@@ -155,6 +157,7 @@ pub mod planechase;
 mod planechase_tests;
 pub mod planeswalker;
 pub mod players;
+pub(crate) mod pre_entry_view;
 pub(crate) mod precast_copy_shortcut;
 pub use precast_copy_shortcut::normalize_untrusted_restore;
 pub use precast_copy_shortcut::rekey_after_trusted_restore;
@@ -192,6 +195,7 @@ pub mod sba;
 pub mod scenario;
 #[cfg(any(test, feature = "test-support"))]
 pub mod scenario_db;
+pub(crate) mod scoped_unless_poll;
 pub mod specialize;
 pub mod speed;
 pub mod splice;
@@ -268,18 +272,24 @@ pub use bracket_explanation::{
 // this exposes exactly those functions from it. The governing rule annotations
 // live on the function definitions in `casting_costs.rs`, not on this
 // visibility re-export.
+#[cfg(feature = "test-support")]
+pub use casting_costs::{
+    alternative_mana_payable_with_nothing_held, oracle_alternative_reservation_verdict,
+    ReservationVerdict, RESERVATION_PROBE_BUDGET,
+};
 pub use casting_costs::{extract_mana_leg, extract_x_mana_cost, max_x_value};
 pub use deck_loading::{
     create_commander_from_card_face, load_and_hydrate_decks, load_deck_into_state,
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
+    can_pair_commanders, commander_candidates, companion_candidates, deck_copy_limit_for,
+    evaluate_deck_compatibility, infer_commander, is_brawl_commander_eligible,
+    is_card_commander_eligible_for_format, is_commander_eligible, is_freeform_commander_eligible,
     is_tiny_leader_eligible, max_deck_copies, signature_spell_selection_policy,
     validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
-    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
-    SignatureSpellSelectionPolicy, UnsupportedCard,
+    CommanderDeckComposition, CommanderInferenceRow, CompatibilityCheck, DeckCompatibilityRequest,
+    DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, apply_with_rejection, new_game, preflight_debug_action,

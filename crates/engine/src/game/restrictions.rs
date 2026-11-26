@@ -1,3 +1,4 @@
+use crate::game::conditions::eval_is_monarch;
 use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
@@ -9,6 +10,7 @@ use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
     AbilityUsageKey, BattlefieldEntryRecord, CastOccurrence, CastTimingRoute, CastingVariant,
+    EntryTokenStatus,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -471,6 +473,11 @@ pub fn record_attackers_declared(
 
     // CR 508.6 + CR 508.5: record the defending players attacked this declaration.
     // `players_attacked_this_step` already holds this declaration's defenders.
+    // COLLAPSED read by construction (planeswalker/battle → defending
+    // player): serves defending-player and explicit-disjunct consumers only
+    // (e.g. Wanderglyph's "or a planeswalker you control"). Retrospective
+    // "attacked you" predicates without such a disjunct read the uncollapsed
+    // `attacked_players_directly_this_turn` ledger instead.
     let active = state.active_player;
     state
         .attacked_defenders_this_turn
@@ -502,13 +509,26 @@ pub fn record_card_discarded(state: &mut crate::types::game_state::GameState, ob
 }
 
 pub fn record_token_created(state: &mut crate::types::game_state::GameState, object_id: ObjectId) {
+    record_token_created_into(state, object_id, Zone::Battlefield);
+}
+
+/// CR 111.1 + CR 614.6: the token-creation ledger rows for a token created in
+/// `to`. A creation whose entry a replacement sent elsewhere (Hallowed
+/// Moonlight) is still a creation: the first-creation set and the turn's
+/// created-token ledger record it, with the zone the token was actually
+/// created in.
+pub fn record_token_created_into(
+    state: &mut crate::types::game_state::GameState,
+    object_id: ObjectId,
+    to: Zone,
+) {
     if let Some(obj) = state.objects.get(&object_id) {
         state
             .players_who_created_token_this_turn
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, to));
     }
 }
 
@@ -543,6 +563,11 @@ pub(crate) fn battlefield_entry_record_for(
     obj: &GameObject,
 ) -> crate::types::game_state::BattlefieldEntryRecord {
     crate::types::game_state::BattlefieldEntryRecord {
+        token_status: Some(if obj.is_token {
+            EntryTokenStatus::Token
+        } else {
+            EntryTokenStatus::Nontoken
+        }),
         object_id: obj.id,
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
@@ -554,6 +579,15 @@ pub(crate) fn battlefield_entry_record_for(
         // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
         keywords: obj.keywords.clone(),
         controller: obj.controller,
+        // CR 708.2: snapshot the object's face state at entry time — morph,
+        // disguise, manifest, and cloak creatures enter face down. This enables
+        // data-driven ETB condition queries like "if a face-down creature entered
+        // the battlefield under your control this turn" (Tunnel Tipster).
+        face_state: if obj.face_down {
+            crate::types::game_state::FaceState::FaceDown
+        } else {
+            crate::types::game_state::FaceState::FaceUp
+        },
     }
 }
 
@@ -571,6 +605,46 @@ pub fn record_battlefield_entry(
 
     let record = battlefield_entry_record_for(obj);
     state.battlefield_entries_this_turn.push_back(record);
+}
+
+/// CR 608.2i: Refresh the entry-time snapshot of the object's CURRENT
+/// battlefield occurrence, after its entry characteristics are installed.
+///
+/// Needed because a face-down profile (morph/manifest/disguise/cloak) is
+/// applied AFTER `record_battlefield_entry` pushed the row: a manifested land
+/// would otherwise be recorded as a face-down LAND even though CR 701.40a
+/// makes it a 2/2 face-down creature as it enters.
+///
+/// CR 400.7: a zone change preserves `ObjectId` and bumps the incarnation, so one
+/// object can hold several rows in this turn's ledger. Only the NEWEST row is the
+/// occurrence being delivered here — earlier rows are history that look-back reads
+/// still see (CR 608.2i: an object need not "currently meet the criteria described
+/// in the action, as long as [it] did so at the specified time"). Refreshing the
+/// first matching row would rewrite that history: casting a morph face down and
+/// then blinking it would turn the original `FaceDown` row `FaceUp`, and Tunnel
+/// Tipster would never see the face-down entry. Selecting the latest occurrence is
+/// the same authority `apply_battlefield_entry_controller_override` uses
+/// (`zones.rs`, `rposition`).
+pub fn update_battlefield_entry_record_for_object(
+    state: &mut crate::types::game_state::GameState,
+    object_id: ObjectId,
+) {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    let new_record = battlefield_entry_record_for(obj);
+
+    // CR 400.7: bind the refresh to the newest row for this object, not the first.
+    let Some(index) = state
+        .battlefield_entries_this_turn
+        .iter()
+        .rposition(|record| record.object_id == object_id)
+    else {
+        return;
+    };
+    if let Some(record) = state.battlefield_entries_this_turn.get_mut(index) {
+        *record = new_record;
+    }
 }
 
 fn entry_controller_matches(
@@ -634,7 +708,10 @@ fn entry_type_filter_matches(
         // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
         // than silently join this arm while `ledger_filter_is_evaluable`
         // keeps reporting type filters evaluable.
-        TypeFilter::Instant | TypeFilter::Sorcery => false,
+        // CR 314.1: scheme cards are nontraditional cards that are never
+        // permanents and never enter the battlefield, so a battlefield-entry
+        // record is never a scheme either.
+        TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Scheme => false,
     }
 }
 
@@ -675,6 +752,16 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // (record.keywords) — "a creature with flying entered this turn".
                 // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
                 FilterProp::WithKeyword { value } => record.keywords.contains(value),
+                // CR 708.2: face-down status at entry time — "a face-down creature
+                // entered this turn" (Tunnel Tipster). The entry snapshot captures
+                // whether the object was face down when it entered (morph, disguise,
+                // manifest, cloak), before any turn-face-up replacement applies.
+                FilterProp::FaceDown => {
+                    matches!(
+                        record.face_state,
+                        crate::types::game_state::FaceState::FaceDown
+                    )
+                }
                 // CR 109.1: "another [type]" is a same-object identity check —
                 // excludes the ability's own source object (e.g. Flying Drone's
                 // "another creature with flying entered this turn"). Mirrors the
@@ -682,6 +769,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // source context the predicate cannot exclude self, so it stays
                 // false (the prior behavior for this prop on these paths).
                 FilterProp::Another => source_id.is_some_and(|s| record.object_id != s),
+                // CR 111.1 + CR 608.2i: use the token identity captured at entry.
+                FilterProp::Token => record.token_status == Some(EntryTokenStatus::Token),
+                FilterProp::NonToken => record.token_status == Some(EntryTokenStatus::Nontoken),
                 _ => false,
             })
         }
@@ -743,8 +833,13 @@ pub fn check_casting_restrictions(
     source_id: ObjectId,
     restrictions: &[CastingRestriction],
 ) -> Result<(), EngineError> {
+    let anchor = if restrictions.contains(&CastingRestriction::DuringCombat) {
+        CombatWindowAnchor::CombatInProgress
+    } else {
+        CombatWindowAnchor::FirstCombatOfTurn
+    };
     for restriction in restrictions {
-        if !casting_restriction_applies(state, player, source_id, restriction) {
+        if !casting_restriction_applies(state, player, source_id, restriction, anchor) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Casting restriction not satisfied: {restriction:?}"
             )));
@@ -781,6 +876,11 @@ pub fn check_activation_restrictions_with_static_gates(
     restrictions: &[ActivationRestriction],
     gates: &ActivationRestrictionStaticGates,
 ) -> Result<(), EngineError> {
+    let anchor = if restrictions.contains(&ActivationRestriction::DuringCombat) {
+        CombatWindowAnchor::CombatInProgress
+    } else {
+        CombatWindowAnchor::FirstCombatOfTurn
+    };
     for restriction in restrictions {
         if !activation_restriction_applies(
             state,
@@ -789,6 +889,7 @@ pub fn check_activation_restrictions_with_static_gates(
             ability_index,
             restriction,
             gates,
+            anchor,
         ) {
             return Err(EngineError::ActionNotAllowed(format!(
                 "Activation restriction not satisfied: {restriction:?}"
@@ -925,6 +1026,27 @@ pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: O
     // ctx{ target_id: Some(id) })` OR-branch here exactly as `CantAttack` does —
     // no call-site changes required.
     active_static_definitions(state, obj).any(|sd| matches!(sd.mode, StaticMode::CantTap))
+}
+
+/// CR 601.2b + CR 601.2h: whether `id` is held for the in-flight spell's
+/// deferred tap cost (conspire or teamwork selected before targets). Until the
+/// payment commit taps it, a held permanent can't pay another part of that cost
+/// (convoke, Harmonize, another tap cost), and automatic payment won't tap it
+/// for mana; the player may still tap it for mana (CR 601.2g,
+/// `ManaActivationPurpose::Explicit`) if it is untapped again by the commit.
+/// This is a payment reservation, not CR 701.26a "can't become
+/// tapped", so effect taps and `object_cant_tap` don't read it. The single
+/// authority read at every payment-eligibility chokepoint; the in-flight root is
+/// `state.pending_cast` (published through `with_payment_root` during payment
+/// preparation).
+pub(crate) fn payment_tap_reserved(
+    state: &crate::types::game_state::GameState,
+    id: ObjectId,
+) -> bool {
+    state
+        .pending_cast
+        .as_deref()
+        .is_some_and(|pending| pending.holds_tap_reservation(id))
 }
 
 /// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
@@ -1335,6 +1457,7 @@ fn activation_restriction_applies(
     ability_index: usize,
     restriction: &ActivationRestriction,
     gates: &ActivationRestrictionStaticGates,
+    anchor: CombatWindowAnchor,
 ) -> bool {
     // CR 602.5c: the usage budget is per acquisition, not per index. A slot
     // that no longer resolves reads a missing entry as count 0.
@@ -1381,10 +1504,14 @@ fn activation_restriction_applies(
         ActivationRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
-        // CR 508.1c / CR 509.1b: Combat-phase restrictions on activation timing.
+        // CR 500.1 + CR 506.1: combat-phase activation windows.
         ActivationRestriction::DuringCombat => state.phase.is_combat(),
-        ActivationRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
-        ActivationRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
+        ActivationRestriction::BeforeAttackersDeclared => {
+            before_combat_step(state, Phase::DeclareAttackers, anchor)
+        }
+        ActivationRestriction::BeforeCombatDamage => {
+            before_combat_step(state, Phase::CombatDamage, anchor)
+        }
         // CR 602.5b: Per-turn activation limit tracked via ability activation counter.
         // CR 702.142b: ModifyActivationLimit statics may raise the limit for tagged abilities.
         ActivationRestriction::OnlyOnceEachTurn => {
@@ -1490,6 +1617,7 @@ fn casting_restriction_applies(
     player: PlayerId,
     source_id: ObjectId,
     restriction: &CastingRestriction,
+    anchor: CombatWindowAnchor,
 ) -> bool {
     match restriction {
         // CR 307.1: A player may cast a sorcery during a main phase of their turn when the stack is empty.
@@ -1499,16 +1627,13 @@ fn casting_restriction_applies(
         // Under shared team turns a turn where a teammate holds `active_player`
         // still belongs to the caster's own team, so `active_player != player`
         // over-permits. Same authority as `ParsedCondition::IsOpponentsTurn`.
-        CastingRestriction::DuringOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        CastingRestriction::DuringOpponentsTurn => super::players::is_opponents_turn(state, player),
         CastingRestriction::DuringYourTurn => state.active_player == player,
         CastingRestriction::DuringYourUpkeep => {
             state.active_player == player && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringOpponentsUpkeep => {
-            super::players::is_opponent(state, player, state.active_player)
-                && state.phase == Phase::Upkeep
+            super::players::is_opponents_turn(state, player) && state.phase == Phase::Upkeep
         }
         CastingRestriction::DuringAnyUpkeep => state.phase == Phase::Upkeep,
         CastingRestriction::DuringYourEndStep => {
@@ -1522,9 +1647,11 @@ fn casting_restriction_applies(
         CastingRestriction::DeclareAttackersStep => state.phase == Phase::DeclareAttackers,
         // CR 509.1: Declare blockers step.
         CastingRestriction::DeclareBlockersStep => state.phase == Phase::DeclareBlockers,
-        CastingRestriction::BeforeAttackersDeclared => is_before_attackers_declared(state),
+        CastingRestriction::BeforeAttackersDeclared => {
+            before_combat_step(state, Phase::DeclareAttackers, anchor)
+        }
         CastingRestriction::BeforeBlockersDeclared => {
-            matches!(state.phase, Phase::BeginCombat | Phase::DeclareAttackers)
+            before_combat_step(state, Phase::DeclareBlockers, anchor)
         }
         // CR 509.1 + CR 510.1 + CR 511.1: "after blockers are declared" opens
         // once the declare-blockers turn-based action has placed blockers and
@@ -1536,7 +1663,9 @@ fn casting_restriction_applies(
             state.phase,
             Phase::DeclareBlockers | Phase::CombatDamage | Phase::EndCombat
         ),
-        CastingRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
+        CastingRestriction::BeforeCombatDamage => {
+            before_combat_step(state, Phase::CombatDamage, anchor)
+        }
         CastingRestriction::AfterCombat => matches!(
             state.phase,
             Phase::EndCombat | Phase::PostCombatMain | Phase::End | Phase::Cleanup
@@ -1667,6 +1796,13 @@ fn evaluate_condition_for_granter(
     condition: &ParsedCondition,
 ) -> bool {
     match condition {
+        ParsedCondition::SourceMatchesFilter { filter } => {
+            let context =
+                super::filter::FilterContext::from_source_with_controller(source_id, player)
+                    .with_granting_object(granting_object);
+            state.objects.contains_key(&source_id)
+                && super::filter::matches_target_filter(state, source_id, filter, &context)
+        }
         ParsedCondition::SourceInZone { zone } => state
             .objects
             .get(&source_id)
@@ -2091,6 +2227,11 @@ fn evaluate_condition_for_granter(
         // CR 702.131c: The city's blessing is a player designation that effects
         // and restrictions may identify.
         ParsedCondition::HasCityBlessing => state.city_blessing.contains(&player),
+        // CR 725.1: "if you're the monarch" reads the monarch designation off
+        // the activating player (CR 109.5), not off the source's controller —
+        // CR 602.2 can let someone else activate the ability. If no player
+        // is the monarch, the leaf is false.
+        ParsedCondition::IsMonarch => eval_is_monarch(state, player),
         // CR 702.195b: The enduring story is a player designation effects and
         // restrictions may identify.
         ParsedCondition::HasEnduringStory => state.enduring_story.contains(&player),
@@ -2157,9 +2298,7 @@ fn evaluate_condition_for_granter(
         // where a TEAMMATE holds `active_player` (CR 805.4 shared team turns —
         // the active team is still `player`'s own team) is NOT reported as an
         // opponent's turn, which `active_player != player` would do.
-        ParsedCondition::IsOpponentsTurn => {
-            super::players::is_opponent(state, player, state.active_player)
-        }
+        ParsedCondition::IsOpponentsTurn => super::players::is_opponents_turn(state, player),
         // CR 500.1 + CR 602.5: the game is in one of the named steps; player
         // scope, if any, is composed by the caller via `And`.
         ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
@@ -2530,35 +2669,72 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 /// active player (or, under the shared team turns option, any player on the
 /// active team — CR 805.5a: "A player may cast a spell, activate an ability,
 /// or take a special action when their team has priority") has priority.
+/// CR 805.4a + CR 805.5a: whether `player` may act on the active turn — the
+/// active player themselves, or any living teammate when the active player's
+/// side takes shared team turns (the turn-structure predicate in
+/// `topology::side_takes_shared_turn`, so a future individual-turn team
+/// format stays correctly excluded).
+/// The single membership authority behind `is_sorcery_speed_window` and the
+/// teammate-aware special-action gates (foretell, ninjutsu-family offers,
+/// room unlocks): one spelling, so offer and enforcement cannot drift.
+pub(crate) fn acts_on_active_turn(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+) -> bool {
+    state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player))
+}
+
 pub(crate) fn is_sorcery_speed_window(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
 ) -> bool {
     matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
         && state.stack.is_empty()
-        && (state.active_player == player
-            || super::players::teammates(state, state.active_player).contains(&player))
+        && acts_on_active_turn(state, player)
 }
 
-fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    // CR 508.1 + CR 508.2: attackers are declared as the first turn-based action
-    // of the declare-attackers step, BEFORE any player receives priority. So
-    // "before attackers are declared" is a pure PHASE property — we are strictly
-    // before that step — independent of which player currently holds priority.
-    // This is deliberately not priority-gated: a non-active player casting an
-    // instant during the active player's pre-combat (Siren's Call, Master
-    // Warcraft) is correctly inside the window, and turn-control (CR 723) can't
-    // affect a check that never reads priority. Turn-qualified cards (the
-    // `DuringYourTurn` activations) remain pinned to the active player by their
-    // own restriction, which is AND-composed with this one.
-    matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
+/// CR 506.1: the combat phase a "before <combat step>" window is measured in.
+#[derive(Clone, Copy)]
+enum CombatWindowAnchor {
+    /// Bare "before blockers are declared": a point in the turn, so the turn's first combat phase.
+    FirstCombatOfTurn,
+    /// "During combat before blockers are declared": each combat phase.
+    CombatInProgress,
 }
 
-fn is_before_combat_damage(phase: Phase) -> bool {
-    matches!(
-        phase,
-        Phase::BeginCombat | Phase::DeclareAttackers | Phase::DeclareBlockers
-    )
+/// CR 500.1 + CR 506.1: whether `step` of the combat phase `anchor` names has not begun yet.
+/// A turn property, not priority-gated (CR 508.1 + CR 508.2: attackers are declared before priority).
+fn before_combat_step(
+    state: &crate::types::game_state::GameState,
+    step: Phase,
+    anchor: CombatWindowAnchor,
+) -> bool {
+    use crate::types::phase::{PhaseGroup, TurnSegment};
+    // `Phase` orders steps in turn order.
+    match anchor {
+        // Chosen only alongside `DuringCombat`, which confines the phase to a combat step.
+        CombatWindowAnchor::CombatInProgress => state.phase < step,
+        CombatWindowAnchor::FirstCombatOfTurn => {
+            // CR 500.11 + CR 505.1a: outside combat, open while a combat phase is ahead — the turn's
+            // own combat (an added main phase is labelled postcombat) or a queued added one.
+            let ahead = if state.phase.is_combat() {
+                state.phase < step
+            } else {
+                state
+                    .extra_phase_resume
+                    .first()
+                    .map_or(state.phase, |unit| unit.anchor)
+                    < Phase::BeginCombat
+                    || state
+                        .extra_phases
+                        .iter()
+                        .any(|ep| ep.segment == TurnSegment::Phase(PhaseGroup::Combat))
+            };
+            ahead && !super::turns::first_phase_of_turn_has_ended(state, PhaseGroup::Combat)
+        }
+    }
 }
 
 fn you_control_creature_with_keyword(
@@ -2917,6 +3093,68 @@ mod tests {
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn suspended_source_restriction_reads_the_grant_on_the_exiled_card() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::ActivationRestriction;
+        use crate::types::counter::CounterType;
+        use crate::types::keywords::KeywordKind;
+        use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use crate::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(P0, ManaColor::Blue);
+        let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, "Suspend", true,
+            "Exile target creature and put two time counters on it. If it doesn't have suspend, it gains suspend. (At the beginning of its owner's upkeep, they remove a time counter. When the last is removed, they may play it without paying its mana cost. If it's a creature, it has haste.)")
+            .with_mana_cost(ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::Blue] }).id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(bear).resolve();
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Suspend 10—{R}\nSacrifice an artifact, creature, or land: Remove a time counter from this card. Activate only if this card is suspended.",
+            "Greater Gargadon", &["Suspend".into()], &["Creature".into()], &[]);
+        let condition = parsed
+            .abilities
+            .iter()
+            .flat_map(|a| &a.activation_restrictions)
+            .find_map(|r| match r {
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(condition),
+                } => Some(condition),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&bear].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&bear].counters[&CounterType::Time],
+            2
+        );
+        assert!(crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(evaluate_condition(runner.state(), P0, bear, condition));
+        // A second exile incarnation with time counters does not inherit that grant.
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            crate::game::zones::move_to_zone(runner.state_mut(), bear, zone, &mut vec![]);
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .counters
+            .insert(CounterType::Time, 2);
+        assert!(!crate::game::keywords::object_has_effective_keyword_kind(
+            runner.state(),
+            bear,
+            KeywordKind::Suspend
+        ));
+        assert!(!evaluate_condition(runner.state(), P0, bear, condition));
+    }
 
     /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
     /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
@@ -3507,6 +3745,7 @@ mod tests {
     #[test]
     fn entry_type_filter_answers_instant_false_per_cr_403_3() {
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Permanent".to_string(),
             core_types: vec![CoreType::Creature],
@@ -3515,6 +3754,7 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: PlayerId(0),
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
 
         assert!(
@@ -3779,6 +4019,7 @@ mod tests {
         state
             .battlefield_entries_this_turn
             .push_back(BattlefieldEntryRecord {
+                token_status: Some(EntryTokenStatus::Nontoken),
                 object_id: ObjectId(99),
                 name: "Green Creature".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -3787,6 +4028,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 keywords: vec![],
                 controller: PlayerId(1),
+                face_state: crate::types::game_state::FaceState::FaceUp,
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
         filter.controller = Some(ControllerRef::Opponent);
@@ -3848,6 +4090,7 @@ mod tests {
                     state
                         .battlefield_entries_this_turn
                         .push_back(BattlefieldEntryRecord {
+                            token_status: Some(EntryTokenStatus::Nontoken),
                             object_id: ObjectId(next_id),
                             name: "Bear".to_string(),
                             core_types: vec![CoreType::Creature],
@@ -3856,6 +4099,7 @@ mod tests {
                             colors: vec![],
                             keywords: vec![],
                             controller: *controller,
+                            face_state: crate::types::game_state::FaceState::FaceUp,
                         });
                     next_id += 1;
                 }
@@ -5708,22 +5952,13 @@ mod tests {
     }
 
     /// T23 — the ANTI-DRIFT BINDER for [`ledger_filter_is_evaluable`]'s allow-list.
-    /// It replaces a 98-arm exhaustive `match`: the two functions are driven AS A
-    /// PAIR against one record that positively satisfies every allowed prop, so a
-    /// prop in the allow-list that the matcher does not actually answer fails here.
-    ///
-    /// REVERT-PROBES, both measured:
-    /// - add `FilterProp::NonToken` to the allow-list → the paired matcher drive
-    ///   returns `false` while the guard says `true` → FAIL.
-    /// - delete an allowed prop from the list → its paired row FAILS on the guard side.
+    /// Each supported predicate must have a matching entry snapshot and pass the guard.
     #[test]
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies all four answerable props: green, on the
-        // battlefield, flying, and not the ability source. Also legendary and
-        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
         let record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
             object_id: ObjectId(10),
             name: "Bbfu10 Binder Entrant".to_string(),
             core_types: vec![CoreType::Creature],
@@ -5732,6 +5967,7 @@ mod tests {
             colors: vec![ManaColor::Green],
             keywords: vec![Keyword::Flying],
             controller: player,
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
         let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
             TargetFilter::Typed(crate::types::ability::TypedFilter {
@@ -5766,25 +6002,82 @@ mod tests {
             );
         }
 
-        // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
-        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
-        // for those is the fail-closed arm, not a genuine mismatch.)
-        for prop in [
-            FilterProp::NonToken,
-            FilterProp::Token,
-            FilterProp::Tapped,
-            FilterProp::FaceDown,
-            FilterProp::HasSupertype {
-                value: Supertype::Legendary,
-            },
+        // FaceDown — test with a face-down record.
+        let face_down_record = BattlefieldEntryRecord {
+            token_status: Some(EntryTokenStatus::Nontoken),
+            object_id: ObjectId(11),
+            name: "Face Down Creature".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            controller: player,
+            face_state: crate::types::game_state::FaceState::FaceDown,
+        };
+        let face_down_filter = typed(vec![FilterProp::FaceDown], None);
+        assert!(ledger_filter_is_evaluable(&face_down_filter));
+        assert!(
+            battlefield_entry_matches_filter(
+                &face_down_record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
+            "FaceDown must MATCH a face-down record"
+        );
+        // FaceDown should NOT match a face-up record.
+        assert!(
+            !battlefield_entry_matches_filter(
+                &record,
+                &face_down_filter,
+                player,
+                &[],
+                Some(source_id)
+            ),
+            "FaceDown must NOT match a face-up record"
+        );
+
+        for (prop, expected_status) in [
+            (FilterProp::Token, EntryTokenStatus::Token),
+            (FilterProp::NonToken, EntryTokenStatus::Nontoken),
         ] {
-            assert!(
-                !ledger_filter_is_evaluable(&typed(vec![prop.clone()], None)),
-                "{prop:?} is not answerable from a BattlefieldEntryRecord"
-            );
+            let filter = typed(vec![prop], None);
+            assert!(ledger_filter_is_evaluable(&filter));
+            for status in [
+                Some(EntryTokenStatus::Token),
+                Some(EntryTokenStatus::Nontoken),
+                None,
+            ] {
+                let snapshot = BattlefieldEntryRecord {
+                    token_status: status,
+                    ..record.clone()
+                };
+                assert_eq!(
+                    battlefield_entry_matches_filter(
+                        &snapshot,
+                        &filter,
+                        player,
+                        &[],
+                        Some(source_id)
+                    ),
+                    status == Some(expected_status),
+                    "{filter:?} against {status:?}"
+                );
+                assert_eq!(snapshot.clone(), snapshot);
+                let mut serialized = serde_json::to_value(&snapshot).unwrap();
+                if status.is_none() {
+                    assert_eq!(
+                        serialized.as_object_mut().unwrap().remove("token_status"),
+                        Some(serde_json::Value::Null)
+                    );
+                }
+                let decoded: BattlefieldEntryRecord = serde_json::from_value(serialized).unwrap();
+                assert_eq!(decoded, snapshot);
+            }
         }
 
-        // Structure: monotone connectives recurse; every leaf must be answerable.
         let bare = typed(vec![], None);
         let green = typed(
             vec![FilterProp::HasColor {
@@ -5792,14 +6085,29 @@ mod tests {
             }],
             None,
         );
-        let nontoken = typed(vec![FilterProp::NonToken], None);
         let tapped = typed(vec![FilterProp::Tapped], None);
+        let legendary = typed(
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            }],
+            None,
+        );
+        for unsupported in [&tapped, &legendary] {
+            assert!(!ledger_filter_is_evaluable(unsupported));
+            assert!(!battlefield_entry_matches_filter(
+                &record,
+                unsupported,
+                player,
+                &[],
+                Some(source_id)
+            ));
+        }
         assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
         assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
             filters: vec![bare.clone(), green]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
-            filters: vec![bare.clone(), nontoken]
+            filters: vec![bare.clone(), tapped.clone()]
         }));
         assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
             filters: vec![bare.clone(), tapped]

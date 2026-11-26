@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::database::legality::{LegalityFormat, LegalityStatus};
+use crate::database::synthesis::{commander_qualification, CommanderQualification};
 use crate::database::CardDatabase;
 use crate::game::ante::face_uses_ante;
 use crate::game::companion::{
@@ -16,8 +17,9 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeSubject, DeckSupply,
-    FormatConfig, GameFormat, SelectedFormat, SideboardPolicy, SurvivorDeckFormat,
+    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeOverride, DeckSizeRule,
+    DeckSizeSubject, DeckSupply, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
+    SurvivorDeckFormat,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -155,6 +157,154 @@ pub fn signature_spell_selection_policy(
     });
 
     SignatureSpellSelectionPolicy::Required { candidates }
+}
+
+/// Describes where a candidate request lists its designated commander copies.
+/// CR 903.5a counts commanders as part of the deck. CR 903.13f(2)
+/// allows multiple same-name copies from a Commander Draft pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommanderDeckComposition {
+    /// Main-deck occurrences include the designated copies.
+    CommandersInside,
+    /// Designated copies are listed separately from the main-deck occurrences.
+    CommandersOutside,
+}
+
+/// Returns the first available main-deck occurrence of each card eligible for
+/// the selected format, in main-deck order. Counts by resolved card, so two
+/// printing rows or two spellings of one card are two copies. Pairing and
+/// whole-deck legality are left to `can_pair_commanders` and
+/// `evaluate_deck_compatibility`.
+pub fn commander_candidates(
+    db: &CardDatabase,
+    request: &DeckCompatibilityRequest,
+    composition: CommanderDeckComposition,
+) -> Vec<String> {
+    let format = match request.selected_format.as_ref().map(SelectedFormat::tag) {
+        None | Some(GameFormat::Horde) => {
+            if horde_survivor_format(request) != Some(SurvivorDeckFormat::Commander) {
+                return Vec::new();
+            }
+            GameFormat::Horde
+        }
+        Some(format) => format,
+    };
+    let main_counts = resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let designation_counts = resolved_name_counts(db, request.commander.iter().map(String::as_str));
+    let mut seen = HashSet::new();
+    request
+        .main_deck
+        .iter()
+        .filter_map(|name| {
+            let face = db.get_face_by_name(name)?;
+            if !is_card_commander_eligible_for_format(face, format) {
+                return None;
+            }
+            let key = canonical_deck_count_key(db, name);
+            let designated = designation_counts.get(&key).copied().unwrap_or_default();
+            let available = match composition {
+                CommanderDeckComposition::CommandersInside => main_counts[&key] > designated,
+                CommanderDeckComposition::CommandersOutside => designated == 0,
+            };
+            (available && seen.insert(key)).then(|| name.clone())
+        })
+        .collect()
+}
+
+/// A counted main-deck row for unmarked Commander inference.
+#[derive(Deserialize)]
+pub struct CommanderInferenceRow {
+    pub name: String,
+    #[serde(deserialize_with = "deserialize_commander_inference_count")]
+    pub count: u64,
+}
+
+fn deserialize_commander_inference_count<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let count = f64::deserialize(deserializer)?;
+    if count.is_nan() || count < 0.0 || (count.is_finite() && count.fract() != 0.0) {
+        return Err(serde::de::Error::custom(
+            "expected a non-negative integer count",
+        ));
+    }
+    // Rust's saturating float cast also handles oversized parsed quantities.
+    Ok(count as u64)
+}
+
+/// Infers a commander from the counted main deck of an unmarked import.
+pub fn infer_commander(
+    db: &CardDatabase,
+    main: &[CommanderInferenceRow],
+    selected_format: Option<GameFormat>,
+) -> Option<String> {
+    let format = FormatConfig::commander();
+    // CR 903.5a: the potential commander is still included in the main deck.
+    let total = main
+        .iter()
+        .map(|row| row.count)
+        .fold(0, u64::saturating_add);
+    let total = usize::try_from(total).ok()?;
+    if !format.deck_size.accepts(total) {
+        return None;
+    }
+    let selected = match selected_format {
+        Some(tag)
+            if tag.commander_pairing().admits_count(1)
+                && tag.deck_size_subject() == DeckSizeSubject::MainDeckAndCommanders =>
+        {
+            Some(FormatConfig::for_format(tag).ok()?)
+        }
+        Some(_) => return None,
+        None => None,
+    };
+
+    let mut positive_rows = main.iter().filter(|row| row.count > 0);
+    // The size check bounds every positive row and bucket to 100 cards.
+    let counts = weighted_resolved_name_counts(
+        db,
+        positive_rows
+            .clone()
+            .map(|row| (row.name.as_str(), row.count as u32)),
+    );
+    // CR 100.2a / CR 903.5b / CR 101.1: basic lands and printed copy
+    // limits are exceptions to the ordinary Commander singleton cap.
+    if counts.iter().any(|(key, &count)| {
+        let exceeds_limit = |rules| {
+            matches!(max_deck_copies(db, key, rules), DeckCopyLimit::UpTo(limit) if count > limit)
+        };
+        exceeds_limit(&format) || selected.as_ref().is_some_and(exceeds_limit)
+    }) {
+        return None;
+    }
+
+    positive_rows.find_map(|row| {
+        let key = canonical_deck_count_key(db, &row.name);
+        let face = db.get_face_by_name(&row.name)?;
+        // CR 702.124k: a pairing-only Background cannot fill a lone slot.
+        if counts[&key] != 1
+            || commander_qualification(face)
+                == CommanderQualification::OnlyAlongsideChooseABackground
+        {
+            return None;
+        }
+        let eligible = match selected_format {
+            Some(GameFormat::PauperCommander) => {
+                (CommanderVariantRules::pauper_commander().eligible)(face)
+            }
+            Some(tag) => {
+                is_commander_eligible(face) && is_card_commander_eligible_for_format(face, tag)
+            }
+            None => is_commander_eligible(face),
+        };
+        let fits_selected_size = selected.as_ref().is_none_or(|rules| {
+            effective_deck_size_rule(db, rules.deck_size, std::slice::from_ref(&row.name))
+                .accepts(total)
+        });
+        (eligible && fits_selected_size).then(|| row.name.clone())
+    })
 }
 
 /// Returns eligible companion cards that can be used with the deck under the
@@ -361,7 +511,7 @@ pub fn evaluate_deck_compatibility(
     ) && selected_format_reasons == [CUSTOM_FORMAT_UNRESOLVED.to_string()]
     {
         selected_format_compatible = None;
-        selected_format_reasons = Vec::new();
+        selected_format_reasons.clear();
     }
 
     let coverage = evaluate_deck_coverage(db, request);
@@ -1765,7 +1915,11 @@ fn evaluate_commander_with_format(
     // authority for min-vs-exact. Compared only through `accepts`, never by
     // hand — CR 903.13f(1) sets a minimum with NO maximum, which a literal
     // equality cannot express.
-    let deck_size = format_rules.deck_size;
+    // CR 903.5a: a commander face carrying the `deck_size_override`
+    // deck-construction marker set to `NoMaximum` (Whtz / Covert Blue Mage
+    // class) widens an exact rule to its minimum — the count side already
+    // includes the command-zone cards via `deck_size_subject_count`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     // CR 903.5e: the sideboard is dropped at game load for Commander-style
     // formats. Re-scope the request so singleton, color-identity, and legality
     // checks operate on the actual game deck.
@@ -2005,8 +2159,9 @@ fn evaluate_brawl(
 
     // CR 903.5a (via Brawl variant): the format's rule is authoritative for the
     // total card count (main + commander, accounting for commander listed in
-    // main) — never re-derive min-vs-exact here.
-    let deck_size = format_rules.deck_size;
+    // main) — never re-derive min-vs-exact here. A marker commander widens
+    // the exact rule to its minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
@@ -2251,10 +2406,15 @@ fn evaluate_tiny_leaders(
         ));
     }
 
+    // CR 903.5a: the format's rule is authoritative — never re-derive it
+    // with `!=` here. A marker commander (Whtz / Covert Blue Mage class)
+    // widens the exact 50 to its minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
-    if total_cards != 50 {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "Tiny Leaders: Reborn deck must have exactly 50 main+commander cards (found {total_cards})"
+            "Tiny Leaders: Reborn deck must have {} main+commander cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
@@ -2619,10 +2779,15 @@ fn evaluate_oathbreaker(
     // so a composite-named ("Front // Back") Oathbreaker or signature spell
     // listed in the main deck by its front face is recognized as the same
     // physical card instead of being counted twice.
+    // CR 903.5a: the format's rule is authoritative — never re-derive it
+    // with `!=` here. A marker Oathbreaker widens the exact 60 to its
+    // minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
-    if total_cards != 60 {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "Oathbreaker deck must have exactly 60 cards (found {total_cards})"
+            "Oathbreaker deck must have {} cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
@@ -3253,7 +3418,10 @@ fn quick_commander_check(
 ) -> QuickCheckResult {
     let legality_format = format_rules.format.legality_format();
     let format_label = format_rules.format.label();
-    let expected = format_rules.deck_size;
+    // CR 903.5a: the full-path twin in `evaluate_commander_with_format` —
+    // a marker commander (Whtz / Covert Blue Mage class) widens the exact
+    // rule to its minimum on both paths.
+    let expected = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let pairing = format_rules.format.commander_pairing();
     // CR 702.124g: at most two commanders. Pre-existing and unchanged by this
     // phase; named here so a later reader does not mistake draft-core's two
@@ -4138,6 +4306,36 @@ fn deck_size_subject_count(
     }
 }
 
+/// CR 903.5a: the effective deck-size rule for a commander deck — `Exactly(n)`
+/// becomes `Minimum(n)` when any commander face carries the
+/// `deck_size_override` deck-construction marker set to `NoMaximum` (Whtz,
+/// the Bibliophile's "A deck with this commander has no maximum deck size";
+/// The Covert Blue Mage's "your starting deck can contain any number of
+/// cards beyond the maximum deck size"). Non-exact rules pass through
+/// unchanged: the marker lifts only the maximum, never the minimum. Unknown
+/// commander names resolve to no face and are ignored here — the legality
+/// gates report them separately. The subject stays `MainDeckAndCommanders`,
+/// so the count side is untouched; only the rule's acceptance widens.
+fn effective_deck_size_rule(
+    db: &CardDatabase,
+    base: DeckSizeRule,
+    commanders: &[String],
+) -> DeckSizeRule {
+    let DeckSizeRule::Exactly(n) = base else {
+        return base;
+    };
+    let any_no_maximum = commanders.iter().any(|name| {
+        db.get_face_by_name(&db.lookup_key(name))
+            .and_then(|face| face.deck_size_override)
+            .is_some_and(|override_value| matches!(override_value, DeckSizeOverride::NoMaximum))
+    });
+    if any_no_maximum {
+        DeckSizeRule::Minimum(n)
+    } else {
+        base
+    }
+}
+
 /// True when `name` denotes one of the deck's commanders under any spelling.
 /// Shared by the CR 903.5b singleton exemption, the CR 903.5c color-identity
 /// skip, and the commander legality skip.
@@ -4206,16 +4404,32 @@ enum CommandZoneNetting {
     CountVerbatim,
 }
 
+fn resolved_name_counts<'a>(
+    db: &CardDatabase,
+    names: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, u32> {
+    weighted_resolved_name_counts(db, names.into_iter().map(|name| (name, 1)))
+}
+
+fn weighted_resolved_name_counts<'a>(
+    db: &CardDatabase,
+    rows: impl IntoIterator<Item = (&'a str, u32)>,
+) -> HashMap<String, u32> {
+    let mut counts = HashMap::new();
+    for (name, count) in rows {
+        *counts
+            .entry(canonical_deck_count_key(db, name))
+            .or_insert(0) += count;
+    }
+    counts
+}
+
 fn combined_copy_counts(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     netting: CommandZoneNetting,
 ) -> HashMap<String, u32> {
-    let mut counts: HashMap<String, u32> = HashMap::new();
-    for name in construction_deck_cards(request) {
-        let canonical = canonical_deck_count_key(db, name);
-        *counts.entry(canonical).or_insert(0) += 1;
-    }
+    let mut counts = resolved_name_counts(db, construction_deck_cards(request));
     if netting == CommandZoneNetting::CountVerbatim {
         return counts;
     }
@@ -4246,22 +4460,16 @@ fn combined_copy_counts(
     // spell name one card — netting two copies away against a single main-deck
     // listing and hiding a genuine CR 903.5b violation. Netting must be the
     // exact CR 903.5a double-listing correction, never a blanket amnesty.
-    let mut main_deck_occurrences: HashMap<String, u32> = HashMap::new();
-    for name in &request.main_deck {
-        *main_deck_occurrences
-            .entry(canonical_deck_count_key(db, name))
-            .or_insert(0) += 1;
-    }
-    let mut command_zone_entries: HashMap<String, u32> = HashMap::new();
-    for entry in request
-        .commander
-        .iter()
-        .chain(request.signature_spell.iter())
-    {
-        *command_zone_entries
-            .entry(canonical_deck_count_key(db, entry))
-            .or_insert(0) += 1;
-    }
+    let main_deck_occurrences =
+        resolved_name_counts(db, request.main_deck.iter().map(String::as_str));
+    let command_zone_entries = resolved_name_counts(
+        db,
+        request
+            .commander
+            .iter()
+            .chain(&request.signature_spell)
+            .map(String::as_str),
+    );
     for (canonical, command_copies) in command_zone_entries {
         let netted = command_copies.min(
             main_deck_occurrences
@@ -4745,6 +4953,74 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
         listed.push(format!("+{} more", cards.len() - max_names));
     }
     format!("{prefix}: {}", listed.join(", "))
+}
+
+/// Returns the modeled per-card picker eligibility for `format`. Ordinary
+/// Commander uses CR 903.3. The per-card export and `commander_candidates`
+/// share this dispatch.
+pub fn is_card_commander_eligible_for_format(face: &CardFace, format: GameFormat) -> bool {
+    // EXHAUSTIVE, deliberately: the `_ => false` this replaced is what made
+    // `GameFormat::CommanderDraft` silently answer "no card can be your
+    // commander" the moment the format became selectable. A wildcard here
+    // re-arms that for the next format, so every arm is named.
+    match format {
+        GameFormat::Commander | GameFormat::DuelCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 810 seating: 2HG Commander decks
+        // designate commanders under Commander's own predicate.
+        GameFormat::TwoHeadedGiantCommander => is_commander_eligible(face),
+        // CR 904.13a + CR 903.3: Archenemy Commander decks designate
+        // commanders under Commander's own predicate.
+        GameFormat::ArchenemyCommander => is_commander_eligible(face),
+        GameFormat::PauperCommander => is_commander_eligible(face),
+        // CR 903.3, unchanged by CR 903.13f: the CR 903.13f(3) grant
+        // affects PAIRING, not eligibility, so Commander Draft uses
+        // Commander's own predicate.
+        GameFormat::CommanderDraft => is_commander_eligible(face),
+        GameFormat::FreeformCommander => is_freeform_commander_eligible(face),
+        GameFormat::TinyLeaders => is_tiny_leader_eligible(face),
+        GameFormat::Oathbreaker => face.is_oathbreaker,
+        GameFormat::Brawl | GameFormat::HistoricBrawl => is_brawl_commander_eligible(face),
+        // Horde is per-config (Commander-format survivors designate a
+        // standard-EDH-eligible commander; Constructed survivors have no
+        // commander slot and never consult this). Answer the EDH
+        // predicate: the only caller that can exist is the Commander
+        // horde's deck builder, and `false` here would silently tell it
+        // no card can be its commander.
+        GameFormat::Horde => is_commander_eligible(face),
+        // CR 903.3's commander eligibility test applies unchanged —
+        // planar doesn't change eligibility.
+        GameFormat::PlanechaseCommander => is_commander_eligible(face),
+        // Formats without a commander designation: nothing can be designated.
+        GameFormat::Standard
+        | GameFormat::Pioneer
+        | GameFormat::Modern
+        | GameFormat::Premodern
+        | GameFormat::Legacy
+        | GameFormat::Vintage
+        | GameFormat::Historic
+        | GameFormat::Timeless
+        | GameFormat::Pauper
+        | GameFormat::Momir
+        | GameFormat::Planechase
+        | GameFormat::Archenemy
+        | GameFormat::FreeForAll
+        | GameFormat::TwoHeadedGiant
+        | GameFormat::Limited
+        | GameFormat::Freeform
+        | GameFormat::Dandan => false,
+        // Phase 1d wired a real custom-format deck-legality evaluator
+        // (`evaluate_custom_format`), but it is scoped to non-command-zone
+        // (constructed-shaped) custom formats — a command-zone custom
+        // (`CommandZoneMode::Enabled`, the shape a saved Commander/Brawl/
+        // Tiny-Leaders/Oathbreaker lobby produces) fails closed there too.
+        // This function also only ever receives a bare `GameFormat`, never
+        // the resolved `CommanderEligibilityRule` a command-zone custom
+        // format declares, so eligibility genuinely cannot be answered
+        // here regardless. `false` is the fail-closed reading — a
+        // permissive `true` would offer an unvalidated card as a
+        // commander.
+        GameFormat::Custom(_) => false,
+    }
 }
 
 /// CR 903.3: A card is eligible to be a commander if it is a legendary creature
@@ -5298,6 +5574,64 @@ mod tests {
                 "color_override": null,
                 "color_identity": ["Black", "Red"],
                 "scryfall_oracle_id": null,
+                "legalities": {
+                    "standard": "legal",
+                    "commander": "legal"
+                }
+            },
+            "whtz, the bibliophile": {
+                "name": "Whtz, the Bibliophile",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Homunculus"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": ["Rulebreaker"],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "color_identity": ["White", "Blue"],
+                "scryfall_oracle_id": null,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
+                "legalities": {
+                    "standard": "legal",
+                    "commander": "legal"
+                }
+            },
+            "the covert blue mage": {
+                "name": "The Covert Blue Mage",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Homunculus"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "color_identity": ["White", "Blue"],
+                "scryfall_oracle_id": null,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
                 "legalities": {
                     "standard": "legal",
                     "commander": "legal"
@@ -6309,6 +6643,308 @@ mod tests {
         );
     }
 
+    fn whtz_commander_request(main_plains: usize) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_plains),
+            sideboard: Vec::new(),
+            commander: vec!["Whtz, the Bibliophile".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_challenge_deck: None,
+            min_deck_size: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    /// V5: the helper maps `Exactly(n)` to `Minimum(n)` iff any commander
+    /// face carries the marker — and the Whtz face is NOT an Oathbreaker
+    /// (`is_oathbreaker: false` by default), so a Whtz-led Oathbreaker deck
+    /// still fails the planeswalker gate even though the size rule widens.
+    #[test]
+    fn effective_deck_size_rule_widens_exact_for_marker_commanders() {
+        use crate::types::format::DeckSizeRule;
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(60),
+                &["Whtz, the Bibliophile".to_string()],
+            ),
+            DeckSizeRule::Minimum(60)
+        );
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(100),
+                &["The Covert Blue Mage".to_string()],
+            ),
+            DeckSizeRule::Minimum(100)
+        );
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(100),
+                &["Grub Commander".to_string()],
+            ),
+            DeckSizeRule::Exactly(100),
+            "an unmarked commander keeps the exact rule"
+        );
+        assert_eq!(
+            effective_deck_size_rule(&db, DeckSizeRule::Minimum(60), &[]),
+            DeckSizeRule::Minimum(60),
+            "minimum rules and empty commander slots pass through untouched"
+        );
+
+        // Negative Oathbreaker row: the marker widens the 60-rule, but Whtz
+        // is not a legendary Planeswalker, so the deck still fails.
+        let whtz = db
+            .get_face_by_name("Whtz, the Bibliophile")
+            .expect("whtz face resolves");
+        assert!(
+            !whtz.is_oathbreaker,
+            "the fixture Whtz face must not be an Oathbreaker (is_oathbreaker: false)"
+        );
+        let mut request = whtz_commander_request(59);
+        request.signature_spell = vec!["Red Card".to_string()];
+        let unknown = collect_unknown_cards(&db, &request);
+        let check = evaluate_oathbreaker(
+            &db,
+            &request,
+            &unknown,
+            &crate::types::format::FormatConfig::oathbreaker(),
+        );
+        assert!(
+            !check.compatible,
+            "a non-planeswalker Oathbreaker must fail despite the widened size rule"
+        );
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("must be a legendary Planeswalker")),
+            "expected the planeswalker gate, got: {:?}",
+            check.reasons
+        );
+    }
+
+    /// V1: a 120-card Whtz Commander deck is fully legal — the marker lifts
+    /// the CR 903.5a maximum while the 100-card minimum still holds.
+    #[test]
+    fn whtz_commander_accepts_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(119);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 120-card Whtz deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    /// A 101-card Whtz Commander deck is legal too: the marker removes only
+    /// the maximum, so every size at or above the 100-card floor validates.
+    /// Pins the `Exactly(100)` → `Minimum(100)` widening at the first size
+    /// the legacy rule would reject.
+    #[test]
+    fn whtz_commander_accepts_101_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(100);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 101-card Whtz deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    /// V4: the summary path agrees with the full path on the V1 list.
+    #[test]
+    fn whtz_quick_check_agrees_with_full_check_on_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(119);
+        let unknown = collect_unknown_cards(&db, &request);
+
+        let full = evaluate_commander_with_format(
+            &db,
+            &request,
+            &unknown,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(full.compatible, "full path must accept: {:?}", full.reasons);
+        assert!(
+            quick.reason.is_none(),
+            "quick path must agree, got: {:?}",
+            quick.reason
+        );
+    }
+
+    /// V2: the marker lifts only the maximum — a 99-card Whtz deck still
+    /// fails the at-least-100 floor (the V1 guard).
+    #[test]
+    fn whtz_commander_still_rejects_99_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(98);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "a 99-card deck must fail the minimum even with the marker"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("at least 100")),
+            "expected the minimum-size reason, got: {:?}",
+            result.commander.reasons
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(
+            quick.reason.is_some(),
+            "the summary path must reject the 99-card deck too"
+        );
+    }
+
+    /// V3: an unmarked commander keeps the exact rule — 101 cards fail.
+    /// Hostile: a partner pair where NEITHER face carries the marker fails
+    /// the same way (the marker is per-face, never per-deck).
+    #[test]
+    fn unmarked_commander_rejects_101_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut request = whtz_commander_request(100);
+        request.commander = vec!["Grub Commander".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "an unmarked 101-card deck must fail the exact rule"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason, got: {:?}",
+            result.commander.reasons
+        );
+
+        // Hostile: two unmarked partners at 101 — the size reason fires
+        // alongside the partner-pairing reason.
+        let mut hostile = whtz_commander_request(99);
+        hostile.commander = vec!["Grub Commander".to_string(), "Legal Commander".to_string()];
+        let hostile_result = evaluate_deck_compatibility(&db, &hostile);
+        assert!(
+            !hostile_result.commander.compatible,
+            "an unmarked partner pair at 101 must fail"
+        );
+        assert!(
+            hostile_result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason even for partners, got: {:?}",
+            hostile_result.commander.reasons
+        );
+    }
+
+    /// V6: the Class B face (Covert Blue Mage) lifts the maximum the same
+    /// way — commander + 120 full-leg compatible on both paths.
+    #[test]
+    fn covert_blue_mage_commander_accepts_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut request = whtz_commander_request(119);
+        request.commander = vec!["The Covert Blue Mage".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 120-card Covert deck, got: {:?}",
+            result.commander.reasons
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(
+            quick.reason.is_none(),
+            "quick path must agree, got: {:?}",
+            quick.reason
+        );
+    }
+
+    /// V7: Whtz in the MAIN deck (or as companion) does not lift the
+    /// maximum — only the commander slot's faces count. 101 cards fail.
+    #[test]
+    fn whtz_outside_commander_slot_does_not_lift_the_maximum() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // Whtz in the main: 99 Plains + Whtz + another commander = 101.
+        let mut main = expand("Plains", 99);
+        main.push("Whtz, the Bibliophile".to_string());
+        let mut request = whtz_commander_request(0);
+        request.main_deck = main;
+        request.commander = vec!["Grub Commander".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "Whtz in the main deck must not lift the maximum"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason, got: {:?}",
+            result.commander.reasons
+        );
+
+        // Hostile: Whtz as companion + 101 elsewhere still fails.
+        let mut hostile = whtz_commander_request(100);
+        hostile.commander = vec!["Grub Commander".to_string()];
+        hostile.companion = vec!["Whtz, the Bibliophile".to_string()];
+        let hostile_result = evaluate_deck_compatibility(&db, &hostile);
+        assert!(
+            !hostile_result.commander.compatible,
+            "Whtz as companion must not lift the maximum"
+        );
+        assert!(
+            hostile_result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason for the companion case, got: {:?}",
+            hostile_result.commander.reasons
+        );
+    }
+
     #[test]
     fn summary_commander_accepts_nine_nazgul_copies() {
         let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
@@ -6541,7 +7177,7 @@ mod tests {
         // The verdict and the candidate list are two surfaces over one rule.
         assert_eq!(
             verdict.selected_format_compatible == Some(true),
-            candidates.contains(&"Yorion, Sky Nomad".to_string()),
+            candidates.iter().any(|i| i == "Yorion, Sky Nomad"),
             "compatibility verdict and candidate list must agree: {:?}",
             verdict.selected_format_reasons
         );
@@ -6667,7 +7303,7 @@ mod tests {
 
         let candidates = companion_candidates(&db, &request);
         assert!(
-            !candidates.contains(&"Lurrus".to_string()),
+            !candidates.iter().any(|i| i == "Lurrus"),
             "Lurrus must not be eligible when a second Lurrus copy remains in the starting main deck"
         );
 

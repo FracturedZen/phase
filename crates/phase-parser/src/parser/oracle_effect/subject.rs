@@ -2,9 +2,9 @@ use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::PlayerAnaphor;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1, take_until};
-use nom::character::complete::multispace0;
+use nom::character::complete::{anychar, multispace0};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, recognize, rest, value, verify};
-use nom::multi::separated_list1;
+use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -16,6 +16,7 @@ use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::DeclaredSlotRegistry;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, ChosenSubtypeKind, ColorChangeMode,
     ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRecipient, Duration,
@@ -43,11 +44,11 @@ use super::super::oracle_nom::target::{
 };
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
-    classify_block_exception, parse_additive_type_clause_modifications,
-    parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
-    parse_chosen_qualifier_subject, parse_continuous_modifications,
-    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
+    cant_block_object_mode, classify_block_exception, parse_additive_type_clause_modifications,
+    parse_block_object_filter, parse_cant_attack_defended_scope_nom,
+    parse_cant_be_activated_exemption_in_text, parse_chosen_qualifier_subject,
+    parse_continuous_modifications, parse_continuous_subject_filter, parse_static_line,
+    parse_static_line_multi, parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
     bare_pronoun_names_ability_source, parse_block_filter_phrase, parse_target,
@@ -879,6 +880,7 @@ fn build_conditional_protection_grant_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -946,6 +948,7 @@ fn build_additive_type_continuous_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -1033,6 +1036,7 @@ fn try_parse_compound_all_subjects_become_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: merged_duration.clone(),
@@ -1781,10 +1785,11 @@ fn try_parse_combat_tax_effect_clause(text: &str) -> Option<ParsedEffectClause> 
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous().modifications(vec![
                 ContinuousModification::GrantStaticAbility {
-                    definition: Box::new(static_def),
+                    definition: Box::new(static_def.resolution_installed()),
                 },
             ])],
             duration: None,
@@ -2062,6 +2067,7 @@ fn try_parse_target_and_same_name_pump_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::PumpAll {
             power,
             toughness,
@@ -2216,6 +2222,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked {
                     by: None,
@@ -2274,6 +2281,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities,
                     duration: duration.clone(),
@@ -2311,6 +2319,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_away_static_definition().affected(affected)
@@ -2378,6 +2387,7 @@ fn try_parse_subject_restriction_clause(
                     head_text: None,
                     optional_targeting: false,
                     unlowered_guard: None,
+                    linked_exile_return: None,
                     effect: Effect::ForceAttack {
                         target: static_affected_for_application(&application),
                         required_defender,
@@ -2424,6 +2434,7 @@ fn try_parse_subject_restriction_clause(
                         head_text: None,
                         optional_targeting: false,
                         unlowered_guard: None,
+                        linked_exile_return: None,
                         entry_onset: ContinuousEffectOnset::WhenFollowed,
                         effect: Effect::ForceAttack {
                             target: TargetFilter::ParentTarget,
@@ -2460,6 +2471,7 @@ fn try_parse_subject_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![
                         imperative::must_attack_static_definition().affected(affected)
@@ -2530,6 +2542,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2580,6 +2593,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(mode.clone())
                     .affected(affected)
@@ -2618,6 +2632,7 @@ fn try_parse_subject_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::AssignNoCombatDamage)
                     .affected(affected)
@@ -2653,7 +2668,22 @@ fn try_parse_subject_restriction_clause(
         (before.original.trim(), after.original[1..].trim())
     };
     let application = parse_subject_application_for(subject, ctx, AnaphorConsumer::AffectedObject)?;
-    build_restriction_clause(application, predicate)
+    let mut clause = build_restriction_clause(application, predicate)?;
+    // CR 611.2a: "this turn" on the cast-relative subject also bounds the
+    // resolved rule effect; it is not an indefinite grant over future turns.
+    if clause.duration.is_none() {
+        if let Ok((_, (_, Some(duration)))) = parse_spell_subject(&subject.to_lowercase()) {
+            clause.duration = Some(duration.clone());
+            if let Effect::GenericEffect {
+                duration: effect_duration,
+                ..
+            } = &mut clause.effect
+            {
+                *effect_duration = Some(duration);
+            }
+        }
+    }
+    Some(clause)
 }
 
 /// CR 702.3b: "[subject] can attack [<segment>] as though it/they didn't have defender"
@@ -2726,6 +2756,7 @@ fn try_parse_can_attack_with_defender(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![def],
             duration: duration.clone(),
@@ -2777,6 +2808,7 @@ fn try_parse_targeting_bypass_clause(text: &str) -> Option<ParsedEffectClause> {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::unimplemented("targeting_bypass_unmodeled", text),
         duration,
         sub_ability: None,
@@ -2838,6 +2870,7 @@ fn try_parse_can_block_additional(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::new(mode.clone())
                 .affected(affected)
@@ -3262,11 +3295,41 @@ pub(super) fn owner_subject_seed(
         {
             return None;
         }
-        let target = ctx.chain_declared_object_target.as_ref()?;
-        if !matches!(target, TargetFilter::Typed(_))
-            || super::target_filter_can_target_player(target)
-        {
-            return None;
+        if let Some(target) = &ctx.chain_declared_object_target {
+            if !matches!(target, TargetFilter::Typed(_))
+                || super::target_filter_can_target_player(target)
+            {
+                return None;
+            }
+        } else {
+            // CR 115.1 + CR 608.2c: a disjunction in one declared slot gives
+            // both pronouns the same object. The pending resolution-time bare
+            // choice admits only a single Typed filter, never this Or.
+            let target @ TargetFilter::Or { filters } = ctx.chain_prior_chosen_target.as_ref()?
+            else {
+                return None;
+            };
+            if filters.is_empty()
+                || !filters.iter().all(|filter| {
+                    matches!(filter, TargetFilter::Typed(_))
+                        && !super::target_filter_can_target_player(filter)
+                })
+                || ctx
+                    .object_pronoun_ref
+                    .as_ref()
+                    .is_some_and(|target| *target != TargetFilter::ParentTarget)
+            {
+                return None;
+            }
+            let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+                return None;
+            };
+            let [slot] = entries.as_slice() else {
+                return None;
+            };
+            if slot.index != Some(0) || &slot.filter != target {
+                return None;
+            }
         }
         Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
     })
@@ -3363,6 +3426,69 @@ pub(super) fn parse_subject_application(
     parse_subject_application_for(subject, ctx, AnaphorConsumer::Other)
 }
 
+/// CR 601.2i + CR 109.5: spell subjects distinguish the caster's journal
+/// from the current controller. Each optional qualifier uses the shared grammar.
+fn parse_spell_subject(input: &str) -> OracleResult<'_, (TargetFilter, Option<Duration>)> {
+    enum SpellQualifier {
+        Type(TypeFilter),
+        Property(FilterProp),
+    }
+    let (input, other) = opt(tag("other ")).parse(input)?;
+    // CR 105.1 + CR 205.2a: color and card-type adjectives qualify the spells.
+    let (input, qualifiers) = nom::multi::many0(terminated(
+        alt((
+            map(nom_primitives::parse_core_type, |core| {
+                SpellQualifier::Type(super::conditions::core_type_to_type_filter(core))
+            }),
+            map(
+                crate::types::text_grammar::parse_color_property,
+                SpellQualifier::Property,
+            ),
+        )),
+        tag(" "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("spells you ").parse(input)?;
+    let (input, cast_this_turn) = alt((
+        value(false, tag("control")),
+        value(true, tag("cast this turn")),
+    ))
+    .parse(input)?;
+    let (input, _) = eof(input)?;
+    let mut type_filters = Vec::new();
+    let mut properties = Vec::new();
+    for qualifier in qualifiers {
+        match qualifier {
+            SpellQualifier::Type(type_filter) => type_filters.push(type_filter),
+            SpellQualifier::Property(property) => properties.push(property),
+        }
+    }
+    if other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    if cast_this_turn {
+        properties.push(FilterProp::CastThisTurn {
+            caster: ControllerRef::You,
+        });
+    }
+    Ok((
+        input,
+        (
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::StackSpell,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: (!cast_this_turn).then_some(ControllerRef::You),
+                        properties,
+                    }),
+                ],
+            },
+            cast_this_turn.then_some(Duration::UntilEndOfTurn),
+        ),
+    ))
+}
+
 fn parse_subject_application_for(
     subject: &str,
     ctx: &mut ParseContext,
@@ -3391,6 +3517,17 @@ fn parse_subject_application_for(
     }
 
     let lower = subject.to_lowercase();
+
+    if let Ok((_, (filter, _))) = parse_spell_subject(&lower) {
+        return Some(SubjectApplication {
+            affected: filter,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        });
+    }
 
     // CR 108.3 + CR 115.1: the owner is the actor, while the printed object
     // (including its optional cardinality) is the only announced target.
@@ -4906,12 +5043,50 @@ fn filter_is_unionable(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 608.2c: The distributive adverb closes the subject of a coordinated
+/// player predicate. The subject application supplies the announced count.
+pub(super) fn has_distributive_player_subject(text: &str) -> bool {
+    extract_subject_text(text).is_some_and(|subject| {
+        let subject = subject.to_ascii_lowercase();
+        nom_primitives::scan_at_word_boundaries(&subject, |input| {
+            all_consuming(tag::<_, _, OracleError<'_>>("each")).parse(input)
+        })
+        .is_some()
+    })
+}
+
 pub(super) fn parse_leading_subject_application(
     text: &str,
     ctx: &mut ParseContext,
 ) -> Option<SubjectApplication> {
     let subject_text = extract_subject_text(text)?;
     parse_subject_application(&subject_text, ctx)
+}
+
+/// CR 608.2c: the singular anaphor "a creature / a permanent dealt damage this
+/// way" — a back-reference to the objects the preceding damage instruction struck
+/// ("this way"), not a fresh target. The single authority for these tags, shared
+/// by the die-exile rider (`oracle_effect/mod.rs::try_parse_die_exile_rider` and
+/// `bind_die_exile_rider_antecedent`) and the regen rider
+/// ([`subject_application_for_cant_be_regenerated`]). Prefix match on already
+/// lowercased text; callers decide what must follow.
+///
+/// Returns the card-type noun the anaphor names. CR 109.2: a card type or subtype
+/// word on its own describes a permanent of that type, so "a creature dealt damage
+/// this way" is only a creature; CR 110.1: "a permanent" is anything on the
+/// battlefield and adds no type restriction (`TypeFilter::Permanent`).
+pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, TypeFilter> {
+    alt((
+        value(
+            TypeFilter::Creature,
+            tag("a creature dealt damage this way"),
+        ),
+        value(
+            TypeFilter::Permanent,
+            tag("a permanent dealt damage this way"),
+        ),
+    ))
+    .parse(i)
 }
 
 /// CR 608.2c + CR 701.19c: Resolve the subject of a DAMAGE-form
@@ -4935,9 +5110,11 @@ pub(super) fn parse_leading_subject_application(
 fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectApplication> {
     let lower = subject.to_lowercase();
     let matched = all_consuming(alt((
-        tag::<_, _, OracleError<'_>>("a creature dealt damage this way"),
-        tag("creatures dealt damage this way"),
-        tag("a permanent dealt damage this way"),
+        value((), parse_dealt_damage_this_way_subject),
+        value(
+            (),
+            tag::<_, _, OracleError<'_>>("creatures dealt damage this way"),
+        ),
     )))
     .parse(lower.as_str())
     .is_ok();
@@ -5220,6 +5397,33 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
         // CR 608.2c: the nearest earlier clause announced a player; "they" is that
         // player, spelled as "that player" is.
         _ if ctx.prior_player_declaration => TargetFilter::ParentTargetController,
+        // CR 608.2c: no trigger context, but an earlier same-chain mass
+        // ("each …") clause established an object population (Call for Aid's
+        // "Gain control of all creatures … . … . They gain haste"). "They"
+        // names that frozen population — the same `TrackedSet{0}` sentinel
+        // the object-position grammar emits for "those creatures"
+        // (`parse_target`'s tracked-set dispatch), resolved at runtime
+        // against the chain's published set (`resolve_tracked_set_sentinel`).
+        // A live filter is wrong here: the population may have crossed the
+        // filter boundary at resolution (stolen creatures are no longer
+        // "creatures target opponent controls"). `ParentTarget` cannot carry
+        // this either: a triggerless grant declares no target, so it would
+        // resolve to the controller and the grant would silently misfire.
+        //
+        // When that population is itself a tracked-set read ("put a +1/+1
+        // counter on each of those creatures"), this chain did not establish
+        // it, so the bare anaphor below stays for whatever binds that set; for
+        // a cross-paragraph rider that is the document relation pass
+        // (`CrossItemMassPopulationAnaphor`, Unbreakable Formation's addendum).
+        _ if ctx
+            .chain_prior_mass_population
+            .as_ref()
+            .is_some_and(|population| !population.is_tracked_set_population()) =>
+        {
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+        }
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }
@@ -5632,6 +5836,7 @@ fn try_split_pump_compound(
         head_text: Some(pump_part.to_string()),
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration,
         sub_ability,
@@ -5837,6 +6042,7 @@ fn build_keyword_choice_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability,
@@ -6043,6 +6249,7 @@ fn build_pt_choice_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration: None,
         sub_ability,
@@ -6092,6 +6299,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6151,6 +6359,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities,
                 duration: duration.clone(),
@@ -6172,6 +6381,8 @@ fn build_continuous_clause(
     if modifications.is_empty() {
         return None;
     }
+
+    let affected = static_affected_for_application(&application);
 
     // CR 702.62b + CR 611.2a + CR 611.2c: A "gains suspend" grant onto an exiled
     // card has no turn-scoped expiry — a card stays suspended (exiled, has suspend,
@@ -6269,6 +6480,7 @@ fn build_continuous_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6281,7 +6493,6 @@ fn build_continuous_clause(
         });
     }
 
-    let affected = static_affected_for_application(&application);
     let static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
@@ -6310,6 +6521,7 @@ fn build_continuous_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -6660,6 +6872,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6694,6 +6907,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6754,6 +6968,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -6893,6 +7108,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -6936,6 +7152,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::BecomeCopy {
                 target,
                 recipient,
@@ -6982,6 +7199,7 @@ fn build_become_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect,
             duration,
             sub_ability: None,
@@ -7045,6 +7263,7 @@ fn build_become_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -7186,6 +7405,7 @@ fn try_parse_become_and_attack_if_able(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
@@ -7297,6 +7517,7 @@ fn try_parse_set_life_total(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::SetLifeTotal { target, amount },
         duration: None,
         sub_ability: None,
@@ -7378,6 +7599,21 @@ fn try_parse_become_color_modification(become_text: &str) -> Option<ContinuousMo
 /// input parsed, trailing fixed phrase consumed last): `take_until` skips to the
 /// final occurrence and `all_consuming` requires the suffix to terminate the
 /// input. Replaces a bare `ends_with` so the dispatch stays combinator-driven.
+/// CR 701.32a + CR 904.9: strip a trailing "that turn" anaphoric extra-turn
+/// window, returning the head. Pattern 2: `take_until` skips to the marker
+/// and `all_consuming` requires the suffix to terminate the input, so an
+/// interior "that turn" never matches. Replaces a bare `ends_with` + slicing
+/// so the dispatch stays combinator-driven.
+fn ends_with_that_turn_window(lower: &str) -> Option<&str> {
+    let (_, head) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" that turn"),
+        tag(" that turn"),
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(head)
+}
+
 fn ends_with_of_your_choice(lower: &str) -> bool {
     all_consuming(terminated(
         take_until::<_, _, OracleError<'_>>("of your choice"),
@@ -7561,6 +7797,7 @@ fn try_parse_become_choice(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::Choose {
             chooser: crate::types::ability::ControllerRef::You,
             choice_type,
@@ -7660,6 +7897,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities: vec![
                 make_static(StaticMode::CantGainLife),
@@ -7706,6 +7944,28 @@ fn build_restriction_clause(
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
+    // CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: a trailing "that
+    // turn" on a restriction predicate is the anaphoric extra-turn window
+    // (All in Good Time: "Schemes can't be set in motion that turn"). The
+    // generic duration table has no bare-"that turn" production — it would
+    // amputate "Skip the untap step of that turn" — so the restriction path
+    // resolves it here, where the corpus holds exactly one shape. The window
+    // binds the granted turn at resolve (the anaphor's antecedent is this
+    // chain's grant) instead of arming on the controller's next untap.
+    let deperioded = predicate.trim_end_matches('.');
+    let (predicate, duration) = match duration {
+        Some(_) => (predicate, duration),
+        None => {
+            let lower_candidate = deperioded.to_lowercase();
+            match ends_with_that_turn_window(&lower_candidate) {
+                Some(_) => (
+                    deperioded[..deperioded.len() - " that turn".len()].trim_end(),
+                    Some(Duration::UntilEndOfGrantedTurn { turn: None }),
+                ),
+                None => (predicate, None),
+            }
+        }
+    };
     let lower = predicate.to_lowercase();
 
     // CR 702.18a + CR 109.5: a duration-scoped "can't be the target [of ...]"
@@ -7723,6 +7983,7 @@ fn build_restriction_clause(
             head_text: None,
             optional_targeting: false,
             unlowered_guard: None,
+            linked_exile_return: None,
             effect: Effect::GenericEffect {
                 static_abilities: vec![static_def],
                 duration: duration.clone(),
@@ -7923,7 +8184,8 @@ fn build_restriction_clause(
             // phrase keeps being re-evaluated per counter edit.
             let granted = StaticDefinition::new(StaticMode::CantAttack)
                 .affected(TargetFilter::SelfRef)
-                .attack_defended(Some(defended));
+                .attack_defended(Some(defended))
+                .resolution_installed();
             let installer = StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(vec![ContinuousModification::GrantStaticAbility {
@@ -7935,6 +8197,7 @@ fn build_restriction_clause(
                 head_text: None,
                 optional_targeting: false,
                 unlowered_guard: None,
+                linked_exile_return: None,
                 effect: Effect::GenericEffect {
                     static_abilities: vec![installer],
                     duration: duration.clone(),
@@ -8055,6 +8318,7 @@ fn build_restriction_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect: Effect::GenericEffect {
             static_abilities,
             duration: duration.clone(),
@@ -8248,11 +8512,26 @@ pub(crate) fn static_mode_needs_grant_propagation(mode: &StaticMode) -> bool {
             // bypass in replacement.rs::destroy_applier observes it via
             // active_static_definitions.
             | StaticMode::CantBeRegenerated
+            // CR 701.32a + CR 904.9: CantSetSchemeInMotion is granted to the
+            // scheme subject and must propagate onto its `static_definitions`
+            // as an `AddStaticMode` transient grant — without it the TCE
+            // carries empty modifications and the archenemy gate never sees it.
+            | StaticMode::CantSetSchemeInMotion
             // CR 702.18a / CR 702.11b / CR 109.5: CantBeTargeted is granted to
             // a subject/target creature and must propagate onto its
             // `static_definitions` so the targeting check in `targeting.rs::can_target`
             // observes it via active_static_definitions.
             | StaticMode::CantBeTargeted { .. }
+            // CR 509.1b: a granted "can't block <object>" whitelist must
+            // propagate onto the recipient's static_definitions, or the
+            // declaration check never sees it (a resolving effect's grant, e.g.
+            // Immortal Obligation; printed attached restrictions are hosted on
+            // their source instead).
+            | StaticMode::BlockRestriction { .. }
+            // CR 611.2c + CR 101.2: a resolved "can't be countered" grant is
+            // read live off the transient effect by the counter resolvers, so
+            // the TCE must carry the mode as a modification.
+            | StaticMode::CantBeCountered
     )
 }
 
@@ -8332,6 +8611,21 @@ fn parse_restriction_list_atom(input: &str) -> OracleResult<'_, Vec<StaticMode>>
         // matches only the bare verb phrase.
         value(vec![StaticMode::CantPhaseIn], tag("phase in")),
     ))
+    .parse(input)
+}
+
+/// CR 509.1b: the "can't block <object>" predicate — negation, then the object
+/// read by the single block-object authority. Self-object forms ("block
+/// ~/this creature/it") are owned by [`parse_restriction_list_atom`], which
+/// runs first; the object authority leaves self-object rejection to its
+/// callers and currently returns `Err` for each of these forms, which
+/// `parse_restriction_modes_cant_block_object_declines` pins. A trailing
+/// rider is left for the caller's all_consuming.
+fn parse_cant_block_object_predicate(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        alt((tag("can't block "), tag("cannot block "))),
+        parse_block_object_filter,
+    )
     .parse(input)
 }
 
@@ -8437,6 +8731,18 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             BlockFilterPhrase::Unconstrained => {}
         }
     }
+    // CR 509.1b: "<subject> can't block <object>" is the whitelist "can block
+    // only attackers that are not <object>", for every caller of this shared
+    // function — a source-hosted attached restriction (Burden of Proof's
+    // "can't block Detectives", peeled by `split_trailing_restriction_conjunct`)
+    // and a resolving effect's grant alike. Whole phrase or decline: a
+    // trailing rider ("unless …") or the symmetric "or be blocked by"
+    // conjunction leaves the arm.
+    if let Ok((_, object)) =
+        all_consuming(terminated(parse_cant_block_object_predicate, opt(tag(".")))).parse(lower)
+    {
+        return Some(vec![cant_block_object_mode(object)]);
+    }
     // CR 702.18a / CR 702.11b / CR 109.5: "can't be the target of spells or abilities [your opponents control]"
     // is modeled as `CantBeTargeted { who }` (propagated onto the subject via `AddStaticMode`
     // and enforced in `can_target`).
@@ -8460,6 +8766,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     .is_ok()
     {
         return Some(vec![StaticMode::CantGainLife]);
+    }
+    // CR 701.32a + CR 904.9: "can't be set in motion" — schemes can't be set
+    // in motion (All in Good Time). Runs on the duration-stripped predicate;
+    // the "that turn" tail is resolved to the extra-turn window by the
+    // anaphoric-window branch in `build_restriction_clause` before this.
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't be set in motion"),
+        tag("cannot be set in motion"),
+    )))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(vec![StaticMode::CantSetSchemeInMotion]);
     }
     // CR 305.1 + CR 611.1: "can't play lands" — a player can't take the land-play
     // special action (CR 305.1). This is the player-scoped prohibition shared by
@@ -8609,6 +8928,48 @@ fn extract_pump_modifiers(
     Some((power?, toughness?))
 }
 
+/// CR 701.15b + CR 611.2a: the goad designation a resolving effect installs
+/// on its affected objects. The goader is the installing effect's controller,
+/// and the designation lasts for the duration the effect carries.
+fn goaded_designation_installer(affected: TargetFilter) -> StaticDefinition {
+    StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(vec![ContinuousModification::AddStaticMode {
+            mode: StaticMode::Goaded,
+        }])
+        .description("goaded".to_string())
+}
+
+/// The negation that opens a restriction predicate ("can't" / "cannot").
+fn restriction_negation(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("can't "), tag("cannot "))).parse(input)
+}
+
+/// A list separator between two restriction predicates: a join only counts
+/// when another negation follows it.
+fn restriction_list_join(input: &str) -> OracleResult<'_, &str> {
+    terminated(
+        alt((tag(", and "), tag(", "), tag(" and "))),
+        peek(restriction_negation),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c: a list of whole "can't …" predicates sharing one subject ("it is
+/// goaded, can't attack …, and can't block …"); a join requires a following
+/// negation, so a conjunction inside a predicate stays in it, and each item
+/// keeps its own object grammar for `build_restriction_clause`.
+fn parse_restriction_predicate_list(input: &str) -> OracleResult<'_, Vec<&str>> {
+    separated_list1(
+        restriction_list_join,
+        recognize(preceded(
+            restriction_negation,
+            many_till(anychar, peek(alt((recognize(restriction_list_join), eof)))),
+        )),
+    )
+    .parse(input)
+}
+
 /// CR 701.15a: Parse "it's goaded [duration]" / "it is goaded [duration]" copula
 /// state-setting clauses. The contraction "it's" fuses the subject pronoun with
 /// the copula "is", so `find_predicate_start` cannot split subject from predicate.
@@ -8625,8 +8986,11 @@ fn extract_pump_modifiers(
 ///
 /// Covers: Jon Irenicus, Shattered One ("it's goaded for the rest of the game"),
 /// Vislor Turlough ("it's goaded for as long as they control it"), the
-/// non-contracted form ("it is goaded"), and Dack Fayden, Helping Hand
-/// (plural: "They're goaded for the rest of the game").
+/// non-contracted form ("it is goaded"), Dack Fayden, Helping Hand
+/// (plural: "They're goaded for the rest of the game"), and Immortal
+/// Obligation (singular, with restrictions: "it is goaded, can't attack you or
+/// a permanent you control, and can't block creatures you control" under the
+/// chain's stated "for as long as" duration).
 fn try_parse_copula_goaded_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -8651,6 +9015,16 @@ fn try_parse_copula_goaded_clause(
     .parse(lower.as_str())
     .ok()?;
     let remainder = after_subject.trim_start().trim_end_matches('.').trim();
+    if matches!(number, AnaphorNumber::Singular) {
+        if let Ok((_, predicates)) = all_consuming(preceded(
+            tag::<_, _, OracleError<'_>>(", "),
+            parse_restriction_predicate_list,
+        ))
+        .parse(remainder)
+        {
+            return build_goaded_restriction_clause(ctx, predicates);
+        }
+    }
     // Parse optional trailing duration ("for the rest of the game", "for as long as ...").
     let inline_duration = if remainder.is_empty() {
         // CR 701.15a: Default goad duration is until the goading player's next turn.
@@ -8695,12 +9069,7 @@ fn try_parse_copula_goaded_clause(
             // default).
             (
                 Effect::GenericEffect {
-                    static_abilities: vec![StaticDefinition::continuous()
-                        .affected(affected)
-                        .modifications(vec![ContinuousModification::AddStaticMode {
-                            mode: StaticMode::Goaded,
-                        }])
-                        .description("goaded".to_string())],
+                    static_abilities: vec![goaded_designation_installer(affected)],
                     duration: Some(duration.clone()),
                     target: None,
                     end_cost: None,
@@ -8714,8 +9083,66 @@ fn try_parse_copula_goaded_clause(
         head_text: None,
         optional_targeting: false,
         unlowered_guard: None,
+        linked_exile_return: None,
         effect,
         duration,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
+    })
+}
+
+/// CR 701.15b + CR 508.1c + CR 509.1b + CR 611.2b: "it is goaded, can't attack
+/// …, and can't block …" is one continuous effect whose parts share the stated
+/// duration (Immortal Obligation); the goader and each restriction's "you" are
+/// the spell's controller. Declines (honest red) without a stated duration,
+/// when "it" is not the chain's object anaphor, or when any conjunct is not a
+/// whole restriction `build_restriction_clause` lowers.
+fn build_goaded_restriction_clause(
+    ctx: &mut ParseContext,
+    predicates: Vec<&str>,
+) -> Option<ParsedEffectClause> {
+    // CR 611.2a + CR 611.2b: decline rather than guess a duration.
+    let duration = ctx.stated_clause_duration.clone()?;
+    let application = parse_subject_application_for("it", ctx, AnaphorConsumer::AffectedObject)?;
+    let affected = static_affected_for_application(&application);
+    // CR 608.2c: bind only the chain's object anaphor (ParentTarget).
+    if !matches!(affected, TargetFilter::ParentTarget) {
+        return None;
+    }
+    let mut static_abilities = vec![goaded_designation_installer(affected)];
+    for predicate in predicates {
+        let clause = build_restriction_clause(application.clone(), predicate)?;
+        // A conjunct carrying its own duration is not this shape.
+        if clause.duration.is_some() {
+            return None;
+        }
+        let Effect::GenericEffect {
+            static_abilities: parts,
+            ..
+        } = clause.effect
+        else {
+            return None;
+        };
+        static_abilities.extend(parts);
+    }
+    Some(ParsedEffectClause {
+        history: Vec::new(),
+        head_text: None,
+        optional_targeting: false,
+        unlowered_guard: None,
+        linked_exile_return: None,
+        effect: Effect::GenericEffect {
+            static_abilities,
+            duration: Some(duration.clone()),
+            target: application.target,
+            end_cost: None,
+        },
+        duration: Some(duration),
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -9684,6 +10111,189 @@ mod tests {
         assert_eq!(owner_subject_seed(&subject, &ctx), None);
     }
 
+    #[test]
+    fn owner_anaphor_requires_one_numbered_object_disjunction() {
+        use crate::parser::oracle_ir::context::DeclaredSlotEntry;
+        use crate::types::ability::TargetChoiceTiming;
+
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let (target, rest) = parse_target_with_ctx(
+            "creature or planeswalker an opponent controls",
+            &mut ParseContext::default(),
+        );
+        assert!(rest.is_empty());
+        assert!(matches!(&target, TargetFilter::Or { filters } if filters.len() == 2));
+        let slot = DeclaredSlotEntry {
+            index: Some(0),
+            filter: target.clone(),
+        };
+        let ctx = ParseContext {
+            chain_prior_chosen_target: Some(target),
+            chain_declared_slots: DeclaredSlotRegistry::Known(vec![slot.clone()]),
+            ..ParseContext::default()
+        };
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+
+        let mixed = TargetFilter::Or {
+            filters: vec![
+                parse_target_with_ctx("creature", &mut ParseContext::default()).0,
+                TargetFilter::Player,
+            ],
+        };
+        let bare = "choose a creature you control";
+        let mut bare_ctx = ParseContext::default();
+        let Some(ChooseImperativeAst::TargetOnly {
+            target: bare_target,
+        }) = imperative::parse_choose_ast(bare, bare, &mut bare_ctx)
+        else {
+            panic!("bare choice must reach the TargetOnly producer");
+        };
+        assert_eq!(
+            bare_ctx.declared_target_choice_timing,
+            Some(TargetChoiceTiming::Resolution)
+        );
+        for (label, target) in [
+            ("player alternative", mixed),
+            ("pending bare choice", bare_target),
+        ] {
+            let adverse = ParseContext {
+                chain_prior_chosen_target: Some(target.clone()),
+                chain_declared_slots: DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                    filter: target,
+                    ..slot.clone()
+                }]),
+                ..ctx.clone()
+            };
+            assert_eq!(owner_subject_seed(&subject, &adverse), None, "{label}");
+        }
+
+        for registry in [
+            DeclaredSlotRegistry::Known(vec![]),
+            DeclaredSlotRegistry::Known(vec![DeclaredSlotEntry {
+                index: None,
+                ..slot.clone()
+            }]),
+            DeclaredSlotRegistry::Known(vec![
+                slot.clone(),
+                DeclaredSlotEntry {
+                    index: Some(1),
+                    ..slot
+                },
+            ]),
+            DeclaredSlotRegistry::Indeterminate,
+        ] {
+            let adverse = ParseContext {
+                chain_declared_slots: registry,
+                ..ctx.clone()
+            };
+            assert_eq!(
+                owner_subject_seed(&subject, &adverse),
+                None,
+                "{:?}",
+                adverse.chain_declared_slots
+            );
+        }
+        for adverse in [
+            ParseContext {
+                chain_prior_chosen_target: None,
+                ..ctx.clone()
+            },
+            ParseContext {
+                token_created_in_chain: true,
+                ..ctx.clone()
+            },
+            ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..ctx
+            },
+        ] {
+            assert_eq!(owner_subject_seed(&subject, &adverse), None);
+        }
+    }
+
+    /// SHAPE: a printed disjunction declares one stack target and its owner
+    /// uses that exact object in the move and terminal shuffle.
+    #[test]
+    fn disjunctive_owner_shuffle_keeps_one_stack_target() {
+        use crate::types::ability::{
+            LibraryInstructionActor, LibraryShuffleMode, TargetChoiceTiming,
+        };
+        use crate::types::zones::Zone;
+
+        const SPELL: &str =
+            "Choose target artifact or enchantment. Its owner shuffles it into their library.";
+        let living_library_types = ["Artifact".to_string(), "Creature".to_string()];
+        let living_library_subtypes = ["Book".to_string(), "Illusion".to_string()];
+        let instant_types = ["Instant".to_string()];
+        for (name, oracle, card_types, subtypes, expected_kind, types, controller) in [
+            (
+                "Living Library",
+                "{6}, Sacrifice this creature: Choose target creature or planeswalker an opponent controls. Its owner shuffles it into their library.",
+                living_library_types.as_slice(),
+                living_library_subtypes.as_slice(),
+                AbilityKind::Activated,
+                [TypeFilter::Creature, TypeFilter::Planeswalker],
+                Some(ControllerRef::Opponent),
+            ),
+            (
+                "Deglamer",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+            (
+                "Unravel the Aether",
+                SPELL,
+                instant_types.as_slice(),
+                &[],
+                AbilityKind::Spell,
+                [TypeFilter::Artifact, TypeFilter::Enchantment],
+                None,
+            ),
+        ] {
+            let face = crate::parser::oracle::parse_oracle_text(oracle, name, &[], card_types, subtypes);
+            let [def] = face.abilities.as_slice() else {
+                panic!("expected one ability: {:?}", face.abilities);
+            };
+            assert_eq!(def.kind, expected_kind);
+            assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+            assert!(!def.optional_targeting);
+            assert!(def.multi_target.is_none());
+            assert_eq!(
+                *def.effect,
+                Effect::TargetOnly {
+                    target: TargetFilter::Or {
+                        filters: types.into_iter().map(|ty| TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![ty],
+                            controller: controller.clone(),
+                            ..TypedFilter::default()
+                        })).collect(),
+                    },
+                }
+            );
+            let movement = def.sub_ability.as_deref().expect("selected object move");
+            assert!(matches!(*movement.effect, Effect::ChangeZoneAll {
+                actor: LibraryInstructionActor::Player { player: TargetFilter::ParentTargetOwner },
+                destination: Zone::Library,
+                target: TargetFilter::ParentTarget,
+                library_shuffle: LibraryShuffleMode::TerminalShuffle,
+                ..
+            }), "{movement:?}");
+            let shuffle = movement.sub_ability.as_deref().expect("owner's terminal shuffle");
+            assert_eq!(*shuffle.effect, Effect::Shuffle { target: TargetFilter::ScopedPlayer });
+            assert_eq!(shuffle.player_scope, Some(imperative::owner_library_shuffle_scope()));
+            assert!(shuffle.sub_ability.is_none());
+        }
+    }
+
     /// SHAPE: owner actor, object exclusion, and optional count are independent
     /// axes of the declared-target subject grammar.
     #[test]
@@ -10111,6 +10721,84 @@ mod tests {
         assert_eq!(
             they(None, Some(TargetFilter::Player), true),
             TargetFilter::TriggeringPlayer
+        );
+    }
+
+    /// CR 608.2c: triggerless "they" after a same-chain mass ("each …")
+    /// clause names the frozen published set — the `TrackedSet{0}` sentinel
+    /// the object-position grammar emits for "those creatures" — never the
+    /// controller a bare `ParentTarget` would resolve to. Every earlier
+    /// reading keeps precedence: trigger subject, player declaration, and
+    /// combat/event scopes all win over the population. `AffectedObject` is
+    /// the faithful consumer for the grant witness ("They gain haste");
+    /// frameless, the consumer is unobservable.
+    #[test]
+    fn they_after_mass_population_binds_frozen_set_last() {
+        let population = TargetFilter::Typed(TypedFilter::creature());
+        let they = |scope: Option<ControllerRef>,
+                    subject: Option<TargetFilter>,
+                    declared: bool,
+                    mass: Option<TargetFilter>| {
+            resolve_they_pronoun(
+                &mut ParseContext {
+                    prior_player_declaration: declared,
+                    relative_player_scope: scope,
+                    subject,
+                    chain_prior_mass_population: mass,
+                    ..Default::default()
+                },
+                AnaphorConsumer::AffectedObject,
+            )
+        };
+        assert_eq!(
+            they(None, None, false, Some(population.clone())),
+            TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            },
+            "triggerless 'they' with a prior mass population binds the frozen set"
+        );
+        assert_eq!(
+            they(None, None, false, None),
+            TargetFilter::ParentTarget,
+            "without a population the bare fallback stands"
+        );
+        assert_eq!(
+            they(
+                None,
+                None,
+                false,
+                Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                })
+            ),
+            TargetFilter::ParentTarget,
+            "a population read from the tracked set was not established by this \
+             chain, so the bare anaphor stays for the cross-item relation pass"
+        );
+        assert_eq!(
+            they(None, None, true, Some(population.clone())),
+            TargetFilter::ParentTargetController,
+            "a player declaration still wins over the population"
+        );
+        assert_eq!(
+            they(
+                Some(ControllerRef::DefendingPlayer),
+                None,
+                false,
+                Some(population.clone())
+            ),
+            TargetFilter::DefendingPlayer,
+            "combat scope still wins over the population"
+        );
+        assert_eq!(
+            they(
+                None,
+                Some(TargetFilter::TriggeringSource),
+                false,
+                Some(population.clone())
+            ),
+            population,
+            "an object trigger subject reads the live population filter (Ardbert), not the sentinel"
         );
     }
 
@@ -12124,6 +12812,63 @@ mod tests {
         )));
     }
 
+    /// CR 701.32a + CR 904.9 + CR 608.2c + CR 611.2a: All in Good Time's
+    /// tail. "Schemes can't be set in motion that turn" builds a
+    /// `GenericEffect` carrying `CantSetSchemeInMotion` over the scheme-typed
+    /// subject, with the trailing "that turn" resolved to the granted-turn
+    /// window (the grant in the preceding sentence) — not `UntilEndOfTurn`,
+    /// which would expire before the extra turn begins. The `AddStaticMode`
+    /// grant propagation is what the archenemy set-in-motion gate queries at
+    /// runtime.
+    #[test]
+    fn schemes_cant_be_set_in_motion_that_turn_builds_granted_turn_restriction() {
+        for text in [
+            "Schemes can't be set in motion that turn",
+            "Schemes cannot be set in motion that turn",
+        ] {
+            let mut ctx = ParseContext::default();
+            let clause = try_parse_subject_restriction_clause(text, &mut ctx)
+                .expect("scheme prohibition should parse");
+
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                target,
+                end_cost: _,
+            } = clause.effect
+            else {
+                panic!(
+                    "expected GenericEffect restriction, got {:?}",
+                    clause.effect
+                );
+            };
+
+            assert_eq!(target, None, "{text}");
+            assert_eq!(
+                duration,
+                Some(Duration::UntilEndOfGrantedTurn { turn: None }),
+                "{text}"
+            );
+            assert_eq!(static_abilities.len(), 1, "{text}");
+            let def = &static_abilities[0];
+            assert_eq!(def.mode, StaticMode::CantSetSchemeInMotion, "{text}");
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Scheme))),
+                "{text}"
+            );
+            assert!(
+                def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantSetSchemeInMotion
+                    }
+                )),
+                "{text}"
+            );
+        }
+    }
+
     /// CR 119.7 + CR 608.2c + CR 104.1: Screaming Nemesis's rider. The
     /// anaphoric head ("If a player is dealt damage this way, they") binds the
     /// `can't gain life for the rest of the game` restriction to the redirect's
@@ -13139,6 +13884,153 @@ mod tests {
         );
     }
 
+    fn detective_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().subtype("Detective".to_string()))
+    }
+
+    fn cant_block(object: TargetFilter) -> Option<Vec<StaticMode>> {
+        Some(vec![StaticMode::BlockRestriction {
+            filter: TargetFilter::Not {
+                filter: Box::new(object),
+            },
+        }])
+    }
+
+    /// CR 509.1b: "<subject> can't block <object>" is the whitelist "can block
+    /// only attackers that are not <object>" in the shared restriction grammar,
+    /// and a granted `BlockRestriction` propagates onto the recipient.
+    #[test]
+    fn parse_restriction_modes_cant_block_object_is_a_whitelist() {
+        // Burden of Proof's fragment exactly as `split_trailing_restriction_conjunct`
+        // passes it, and its sentence with the terminal period.
+        assert_eq!(
+            parse_restriction_modes("can't block detectives"),
+            cant_block(detective_filter())
+        );
+        assert_eq!(
+            parse_restriction_modes("can't block detectives."),
+            cant_block(detective_filter())
+        );
+        // No printed Oracle text uses "cannot block"; nearest printed card Burden
+        // of Proof, whose verbatim fragment this alters in the negation only. Kept
+        // because the arm shares the negation axis of the list grammar, which
+        // accepts "cannot" for every atom.
+        assert_eq!(
+            parse_restriction_modes("cannot block detectives"),
+            cant_block(detective_filter())
+        );
+        // Immortal Obligation's and Spectral Grasp's wording: the structural
+        // assertion for the controller-relative case (its runtime reading
+        // relative to the installing player is DEFERRED(phase 2)).
+        assert_eq!(
+            parse_restriction_modes("can't block creatures you control"),
+            cant_block(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+        // Positive breadth over real cards' object grammar: Hinterland Drake
+        // ("This creature can't block artifact creatures.") and Craterous Stomp's
+        // quoted "This creature can't block Giants or Warriors."
+        assert_eq!(
+            parse_restriction_modes("can't block artifact creatures"),
+            cant_block(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Artifact).with_type(TypeFilter::Creature)
+            ))
+        );
+        assert_eq!(
+            parse_restriction_modes("can't block giants or warriors"),
+            cant_block(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::default().subtype("Giant".to_string())),
+                    TargetFilter::Typed(TypedFilter::default().subtype("Warrior".to_string())),
+                ],
+            })
+        );
+        // CR 509.1b: the granted whitelist must reach the recipient's
+        // static_definitions through `AddStaticMode`.
+        assert!(static_mode_needs_grant_propagation(
+            &StaticMode::BlockRestriction {
+                filter: TargetFilter::Not {
+                    filter: Box::new(detective_filter()),
+                },
+            }
+        ));
+    }
+
+    /// The "can't block <object>" arm reads the whole phrase or declines. Every
+    /// negative is paired with a reach-guard in the same test proving the
+    /// decline comes from the asserted cause, not a dead arm.
+    #[test]
+    fn parse_restriction_modes_cant_block_object_declines() {
+        let has_block_restriction = |modes: &Option<Vec<StaticMode>>| {
+            modes.as_ref().is_some_and(|modes| {
+                modes
+                    .iter()
+                    .any(|mode| matches!(mode, StaticMode::BlockRestriction { .. }))
+            })
+        };
+
+        // (a) Self-object. "can't block this creature" is printed (Screeching
+        // Griffin, Kozilek's Pathfinder: "Target creature can't block this
+        // creature this turn."). "can't block it" is printed too (Battering
+        // Wurm: "Creatures with power less than this creature's power can't
+        // block it."). "can't block ~" is not printed anywhere (nearest printed
+        // card: Screeching Griffin); kept because `parse_restriction_list_atom`
+        // already owns these forms, and this pins that the new arm does not
+        // take them. Their existing `CantBlock`
+        // lowering is NOT asserted correct here.
+        assert!(
+            parse_cant_block_object_predicate("can't block detectives").is_ok(),
+            "reach guard: the combinator is live"
+        );
+        for self_object in [
+            "can't block ~",
+            "can't block this creature",
+            "can't block it",
+        ] {
+            assert!(
+                parse_cant_block_object_predicate(self_object).is_err(),
+                "{self_object:?}: a self-object is not a block object"
+            );
+            assert!(
+                !has_block_restriction(&parse_restriction_modes(self_object)),
+                "{self_object:?}: the new arm must not reach a self-object"
+            );
+        }
+
+        // (b) Rider, Heat Wave's verbatim rider lowercased ("Nonblue creatures
+        // can't block creatures you control unless their controller pays 1 life
+        // for each blocking creature they control.").
+        let rider = "can't block creatures you control unless their controller pays 1 life for each blocking creature they control";
+        let (rest, object) =
+            parse_cant_block_object_predicate(rider).expect("reach guard: the object parses");
+        assert_eq!(
+            rest, " unless their controller pays 1 life for each blocking creature they control",
+            "reach guard: the combinator leaves the rider, so the decline is all_consuming's"
+        );
+        assert_eq!(
+            object,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
+        assert_eq!(parse_restriction_modes(rider), None);
+
+        // (c) Symmetric conjunction, Lost in the Spirit World's quoted token
+        // text ("This token can't block or be blocked by non-Spirit creatures.").
+        let symmetric = "can't block or be blocked by non-spirit creatures";
+        assert!(parse_cant_block_object_predicate(symmetric).is_err());
+        assert_eq!(parse_restriction_modes(symmetric), None);
+        // Reach guard: no printed card has this text (nearest printed card Lost in
+        // the Spirit World, whose quoted token text it alters by removing "or be
+        // blocked by" only), so the decline comes from "or be blocked by", not
+        // the object.
+        assert_eq!(
+            parse_restriction_modes("can't block non-spirit creatures"),
+            cant_block(TargetFilter::Typed(TypedFilter::creature().with_type(
+                TypeFilter::Non(Box::new(TypeFilter::Subtype("Spirit".to_string())))
+            )))
+        );
+    }
+
     #[test]
     fn parse_restriction_modes_cant_crew_variants() {
         assert_eq!(
@@ -14028,6 +14920,174 @@ mod tests {
             &mut ctx
         )
         .is_some());
+    }
+
+    /// Immortal Obligation's second sentence after the chain peeled its leading
+    /// "For as long as …" duration (verbatim, capitalised as the clause shell
+    /// hands it over).
+    const GOADED_RESTRICTION_TAIL: &str =
+        "It is goaded, can't attack you or a permanent you control, and can't block creatures you control.";
+
+    /// The duration the chain states for Immortal Obligation's tail.
+    fn duty_counter_duration() -> Duration {
+        parse_duration("for as long as that creature has a duty counter on it")
+            .expect("duty-counter duration parses")
+            .1
+    }
+
+    /// A context in which the chain declared an object target, so "it" is the
+    /// chain's `ParentTarget` anaphor (CR 608.2c).
+    fn declared_object_target_ctx(stated: Option<Duration>) -> ParseContext {
+        ParseContext {
+            chain_declared_object_target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            stated_clause_duration: stated,
+            ..Default::default()
+        }
+    }
+
+    /// CR 701.15b + CR 508.1c + CR 509.1b + CR 611.2b: the goad graft first,
+    /// then the caster-latched attack prohibition, then the block whitelist,
+    /// all under the one stated duration.
+    fn assert_goaded_restriction_effect(effect: &Effect, duration: &Duration) {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: effect_duration,
+            ..
+        } = effect
+        else {
+            panic!("expected one GenericEffect, got {effect:?}");
+        };
+        assert_eq!(effect_duration.as_ref(), Some(duration));
+        assert_eq!(static_abilities.len(), 3, "{static_abilities:?}");
+        assert!(static_abilities
+            .iter()
+            .all(|def| def.affected == Some(TargetFilter::ParentTarget)));
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::Goaded,
+            }]
+        );
+        let modifications = static_abilities[1].modifications.as_slice();
+        let [ContinuousModification::GrantStaticAbility { definition }] = modifications else {
+            panic!("expected the CantAttack grant, got {modifications:?}");
+        };
+        assert_eq!(definition.mode, StaticMode::CantAttack);
+        assert_eq!(
+            definition.attack_defended,
+            Some(crate::types::triggers::AttackTargetFilter::PlayerOrPermanents)
+        );
+        assert_eq!(
+            static_abilities[2].modifications,
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::BlockRestriction {
+                    filter: TargetFilter::Not {
+                        filter: Box::new(TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You)
+                        )),
+                    },
+                },
+            }]
+        );
+    }
+
+    /// CR 611.2a + CR 611.2b + CR 608.2c: the singular goaded-with-restrictions
+    /// tail lowers only under a stated duration and only when "it" is the
+    /// chain's object anaphor. Reach-guard: the same tail and context with the
+    /// stated duration lowers to the one durationed effect, at the helper and at
+    /// the clause entry.
+    #[test]
+    fn goaded_restriction_tail_declines_without_a_stated_duration() {
+        let mut ctx = declared_object_target_ctx(None);
+        assert!(try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx).is_none());
+        let mut ctx = declared_object_target_ctx(None);
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(GOADED_RESTRICTION_TAIL, &mut ctx);
+        assert!(
+            matches!(&clause.effect, Effect::Unimplemented { name, .. } if name == "unbound_subject"),
+            "{:?}",
+            clause.effect
+        );
+        // The refusal node carries no graft, so nothing is goaded.
+        assert_eq!(clause.duration, None);
+        assert!(clause.sub_ability.is_none());
+
+        let duration = duty_counter_duration();
+        let mut ctx = declared_object_target_ctx(Some(duration.clone()));
+        let clause = try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx)
+            .expect("the stated duration admits the tail");
+        assert_goaded_restriction_effect(&clause.effect, &duration);
+        assert_eq!(clause.duration, Some(duration.clone()));
+        let mut ctx = declared_object_target_ctx(Some(duration.clone()));
+        let clause =
+            crate::parser::oracle_effect::parse_effect_clause(GOADED_RESTRICTION_TAIL, &mut ctx);
+        assert_goaded_restriction_effect(&clause.effect, &duration);
+
+        // Hostile sibling: no declared object target, so "it" is not the
+        // chain's ParentTarget anaphor (CR 608.2c) and the tail declines.
+        let mut ctx = ParseContext {
+            stated_clause_duration: Some(duration),
+            ..Default::default()
+        };
+        assert!(try_parse_copula_goaded_clause(GOADED_RESTRICTION_TAIL, &mut ctx).is_none());
+    }
+
+    /// CR 608.2c: the predicate list splits only before a negation, so an "and"
+    /// or a comma inside a predicate stays in it.
+    #[test]
+    fn restriction_predicate_list_splits_only_before_a_negation() {
+        // Immortal Obligation's verbatim tail (lowercased, after "goaded, ").
+        // The other three inputs are synthetic: no printed card has them;
+        // nearest printed card Immortal Obligation, whose tail they alter in the
+        // last conjunct or the separator only. Kept to pin that a join needs a
+        // following negation and that each separator alternative works.
+        for (input, expected) in [
+            (
+                "can't attack you or a permanent you control, and can't block creatures you control",
+                vec![
+                    "can't attack you or a permanent you control",
+                    "can't block creatures you control",
+                ],
+            ),
+            (
+                "can't attack you or a permanent you control, and gains flying",
+                vec!["can't attack you or a permanent you control, and gains flying"],
+            ),
+            (
+                "can't attack you, can't block creatures you control",
+                vec!["can't attack you", "can't block creatures you control"],
+            ),
+            (
+                "can't attack you and can't block",
+                vec!["can't attack you", "can't block"],
+            ),
+        ] {
+            let (_, items) = all_consuming(parse_restriction_predicate_list)
+                .parse(input)
+                .unwrap_or_else(|e| panic!("{input:?}: {e:?}"));
+            assert_eq!(items, expected, "{input:?}");
+        }
+    }
+
+    /// The singular copula without a restriction tail keeps its lowering
+    /// (asserted unchanged, not asserted correct at runtime: the resolver
+    /// ignores the stated duration, a pre-existing defect).
+    #[test]
+    fn copula_goaded_singular_without_a_restriction_tail_keeps_its_lowering() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_copula_goaded_clause("it's goaded", &mut ctx).expect("parses");
+        assert_eq!(
+            clause.effect,
+            Effect::Goad {
+                target: TargetFilter::SelfRef
+            }
+        );
+        let mut ctx = ParseContext::default();
+        let clause =
+            try_parse_copula_goaded_clause("it's goaded for the rest of the game", &mut ctx)
+                .expect("parses");
+        assert!(matches!(clause.effect, Effect::Goad { .. }));
+        assert_eq!(clause.duration, Some(Duration::Permanent));
     }
 
     // CR 509.1h: "Target unblocked attacking creature becomes blocked." parses to
@@ -15159,6 +16219,144 @@ mod entry_onset_tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn permanent_token_riders_stay_separate_instructions() {
+        let overseer = card(
+            "Flying, Vigilance\nWhen Vv'viza enters, conjure a card of your choice from the Planets Spellbook onto the battlefield.\nWhenever you attack, create a Lander token. It becomes a 2/1 artifact creature and gains flying.",
+            "Vv'viza, Orbital Overseer",
+            &["Conjure", "Flying", "Vigilance"],
+            &["Legendary", "Creature"],
+            &["Jellyfish", "Advisor"],
+        );
+        let chandra = card(
+            "[0]: Put a loyalty counter on each red planeswalker you control.\n[0]: Create two 1/1 red Elemental creature tokens. They gain haste. Sacrifice them at the beginning of the next end step.\n[−2]: You may cast target instant or sorcery card with mana value 3 or less from your graveyard. If that spell would be put into your graveyard, exile it instead.",
+            "Chandra, Acolyte of Flame",
+            &[],
+            &["Legendary", "Planeswalker"],
+            &["Chandra"],
+        );
+        for (name, token, expected_mods) in [
+            (
+                "Lander",
+                overseer
+                    .triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref())
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Lander"))
+                    .expect("Lander token"),
+                vec![
+                    ContinuousModification::SetPower { value: 2 },
+                    ContinuousModification::SetToughness { value: 1 },
+                    ContinuousModification::AddType {
+                        core_type: phase_ast::types::CoreType::Creature,
+                    },
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Flying,
+                    },
+                ],
+            ),
+            (
+                "Elemental",
+                chandra
+                    .abilities
+                    .iter()
+                    .flat_map(nodes)
+                    .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Elemental"))
+                    .expect("Elemental token"),
+                vec![ContinuousModification::AddKeyword {
+                    keyword: Keyword::Haste,
+                }],
+            ),
+        ] {
+            let Effect::Token {
+                static_abilities, ..
+            } = &*token.effect
+            else {
+                unreachable!("token node was selected");
+            };
+            assert!(
+                static_abilities.is_empty(),
+                "{name}: rider must not be folded into token statics"
+            );
+            let rider = token.sub_ability.as_deref().expect("separate rider");
+            assert_eq!(rider.sub_link, SubAbilityLink::SequentialSibling);
+            assert_eq!(rider.entry_onset, WhenFollowed);
+            let Effect::GenericEffect {
+                static_abilities,
+                target: Some(TargetFilter::LastCreated),
+                duration: Some(Duration::Permanent),
+                ..
+            } = &*rider.effect
+            else {
+                panic!(
+                    "{name}: expected permanent LastCreated rider, got {:?}",
+                    rider.effect
+                );
+            };
+            let mods: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|definition| &definition.modifications)
+                .collect();
+            for modification in &expected_mods {
+                assert!(
+                    mods.contains(&modification),
+                    "{name}: missing {modification:?} in {mods:?}"
+                );
+            }
+            if name == "Elemental" {
+                let delayed = rider.sub_ability.as_deref().expect("delayed sacrifice");
+                let Effect::CreateDelayedTrigger { effect, .. } = &*delayed.effect else {
+                    panic!("expected delayed trigger, got {:?}", delayed.effect);
+                };
+                assert!(
+                    matches!(
+                        &*effect.effect,
+                        Effect::Sacrifice {
+                            target: TargetFilter::LastCreated,
+                            ..
+                        }
+                    ),
+                    "{effect:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn estrids_token_defining_grant_still_folds() {
+        let estrid = card(
+            "[+2]: Untap each enchanted permanent you control.\n[−1]: Create a white Aura enchantment token named Mask attached to another target permanent. The token has enchant permanent and umbra armor.\n[−7]: Mill seven cards. Return all non-Aura enchantment cards from your graveyard to the battlefield, then do the same for Aura cards.\nEstrid, the Masked can be your commander.",
+            "Estrid, the Masked",
+            &["Mill"],
+            &["Legendary", "Planeswalker"],
+            &["Estrid"],
+        );
+        let mask = estrid
+            .abilities
+            .iter()
+            .flat_map(nodes)
+            .find(|node| matches!(&*node.effect, Effect::Token { name, .. } if name == "Mask"))
+            .expect("Mask token");
+        let Effect::Token {
+            static_abilities, ..
+        } = &*mask.effect
+        else {
+            unreachable!("Mask token node was selected");
+        };
+        assert!(
+            static_abilities
+                .iter()
+                .any(|definition| definition.description.as_deref()
+                    == Some("The token has enchant permanent and umbra armor")),
+            "Mask's defining grant must fold: {static_abilities:?}"
+        );
+        assert!(!mask
+            .sub_ability
+            .as_deref()
+            .is_some_and(|node| generic_effect(&node.effect)));
     }
 
     /// CR 611.2e: every `WithEntry` stamp this module's fixtures produce lands on a kind that

@@ -2024,6 +2024,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
     // constructs a ProposedEvent::ZoneChange with enter_tapped/controller_override
     // set before entering the replacement pipeline.
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id: land_id,
         from: Zone::Graveyard,
         to: Zone::Battlefield,
@@ -2038,6 +2039,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         face_down_profile: None,
         with_entry_effect: None,
         co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
@@ -2111,6 +2113,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
     let land_id = install_shock_land(&mut state, CardId(101), Zone::Hand, "Watery Grave");
 
     let proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id: land_id,
         from: Zone::Hand,
         to: Zone::Battlefield,
@@ -2125,6 +2128,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         face_down_profile: None,
         with_entry_effect: None,
         co_entrants: None,
+        merged_departure: None,
         face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,

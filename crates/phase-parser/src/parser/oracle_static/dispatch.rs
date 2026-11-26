@@ -9,6 +9,7 @@ use super::{
     mana_transform::*, restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
+use crate::types::ability::Designation;
 use crate::types::statics::ProhibitionScope;
 
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
@@ -283,13 +284,20 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         let mut def = parse_max_untap_per_type_static(&before_cond, text)?;
         // CR 611.3a: MaxUntapPerType has no attached-subject ("enchanted
-        // creature") variant — its condition is always a state check on the
-        // cap's own source, so the self-pronoun rewrite always applies
-        // (unlike parse_continuous_gets_has's SelfRef-only guard).
-        let condition = parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            .unwrap_or_else(|| {
-                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
-            });
+        // creature") variant — a singular "it" in its condition is a state
+        // check on the cap's own source, so the self-pronoun rewrite always
+        // applies (unlike parse_continuous_gets_has's SelfRef-only guard).
+        // The printed subject is the players, not the source, so the subject
+        // is `PrintedSubject::Other`: the singular "it" arms still run, but a
+        // plural "they" names the players and must not become the source's
+        // damage-history gate.
+        let condition = parse_static_condition(&rewrite_self_pronoun_subject(
+            condition_text,
+            PrintedSubject::Other,
+        ))
+        .unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         def.condition = Some(condition);
         return Some(def);
     }
@@ -688,6 +696,38 @@ pub(crate) fn parse_damage_not_removed_during_cleanup(
     )
 }
 
+/// CR 120.6 + CR 704.5g: "Lethal damage dealt to <subject> is determined by their power rather
+/// than their toughness." (Zilortha, Strength Incarnate). Exact grammar on purpose: only the
+/// power-for-toughness substitution is modelled, so any other shape keeps its honest
+/// `Unimplemented`.
+fn parse_lethal_damage_determined_by_power(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (input, _) = tag("lethal damage dealt to ").parse(input)?;
+    let (input, affected) = nom_target::parse_type_phrase(input)?;
+    let (input, _) = tag(" is determined by ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("power rather than ").parse(input)?;
+    let (input, _) = nom_filter::parse_pt_possessive(input)?;
+    let (input, _) = tag("toughness").parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    eof(input)?;
+    Ok((input, affected))
+}
+
+pub(crate) fn is_lethal_damage_determined_by_power_static(lower: &str) -> bool {
+    parse_lethal_damage_determined_by_power(lower).is_ok()
+}
+
+pub(crate) fn try_parse_lethal_damage_determined_by_power_static(
+    text: &str,
+    lower: &str,
+) -> Option<StaticDefinition> {
+    nom_on_lower(text, lower, parse_lethal_damage_determined_by_power).map(|(affected, _)| {
+        StaticDefinition::new(StaticMode::LethalDamageDeterminedByPower)
+            .affected(affected)
+            .description(text.to_string())
+    })
+}
+
 /// CR 509.1b: "Creatures with power <comparison> <quantity> can't
 /// block this creature." — a can't-be-blocked-by restriction whose blocker
 /// filter gates on a power threshold that may be DYNAMIC (Kraken of the Straits:
@@ -804,23 +844,26 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
 }
 
 /// CR 604.1 + CR 611.3a + CR 613.1: a recursed static may carry a composed
-/// leading timing window only when the layer system will actually honor it.
+/// leading timing window only when its runtime consult will actually honor it.
 ///
 /// `StaticMode::Continuous` is the mode whose `condition` is evaluated by
 /// `game::layers::gather_active_continuous_effects` → `evaluate_condition`, so
 /// it is the mode where a composed window is guaranteed to be enforced.
 ///
-/// This is CONSERVATIVE, not necessary, and the cost is measured rather than
-/// assumed: several non-`Continuous` enforcement points DO evaluate `condition`
-/// (`game::combat` for `CantBlock`/`CantAttack` via
-/// `layers::evaluate_condition_with_recipient`; `game::casting` for
-/// `CastWithKeyword` via `layers::evaluate_condition`). Measured today, the
-/// restriction costs ZERO corpus coverage — of the corpus lines this arm would
-/// otherwise reach, none parses to a non-`Continuous` mode — while off-corpus
-/// it declines the `MustAttack` / `CastWithKeyword` / `CantBlock` shapes, which
-/// therefore stay honestly `Effect::Unimplemented`. Widening is per-mode work:
-/// each admitted mode needs its own runtime discriminating test proving its
-/// enforcement point honors the window.
+/// This is CONSERVATIVE, not necessary: several non-`Continuous` enforcement
+/// points DO evaluate `condition` (`game::combat` for `CantBlock`/`CantAttack`
+/// via `layers::evaluate_condition_with_recipient`; `game::casting` for
+/// `CastWithKeyword` via `layers::evaluate_condition`). Widening is per-mode
+/// work: each admitted mode needs its own runtime discriminating test proving
+/// its enforcement point honors the window.
+///
+/// Admitted so far beyond `Continuous`: a tagged
+/// `StaticMode::ActivateAsInstant` permission (CR 602.5e + CR 702.6a, Forge
+/// Anew's "During your turn, you may activate equip abilities any time you
+/// could cast an instant"). Its consult, `game::restrictions`'
+/// `has_activate_as_instant_permission`, scans condition-filtered active
+/// statics, and `forge_anew_equip_timing` proves the window holds. The
+/// untagged loyalty form stays out: no printed card puts it behind a window.
 ///
 /// The non-empty check is the fail-closed half, and it is load-bearing:
 /// measured, Elvish Refueler's remainder parses to a `Continuous` static with an
@@ -828,20 +871,28 @@ fn parse_attacking_defender_scope<'a>(tp: &TextPair<'a>) -> Option<(&'a str, Con
 /// an honest `Effect::Unimplemented` with a silent no-op that reports as
 /// supported — a lying green. Mirrors the fail-closed acceptance bar on
 /// `parse_extra_blockers_static` below.
-/// The third conjunct closes the remaining half of the same hazard. A remainder
-/// can parse to a `Continuous` static that has modifications but whose condition
-/// tree carries `StaticCondition::Unrecognized` (an unparsed `as long as …`
-/// clause). `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
-/// composing the window onto it would apply the modification for the whole of
-/// the controller's turn while silently discarding the printed condition —
-/// wrong game behavior, not merely missing behavior. `contains_unrecognized`
+/// The last conjunct closes the remaining half of the same hazard. A remainder
+/// can parse to a static whose condition tree carries
+/// `StaticCondition::Unrecognized` (an unparsed `as long as …` clause).
+/// `game::layers::evaluate_condition` maps `Unrecognized` to `true`, so
+/// composing the window onto it would apply the static for the whole of the
+/// controller's turn while silently discarding the printed condition — wrong
+/// game behavior, not merely missing behavior. `contains_unrecognized`
 /// (`types/ability.rs`) is the single authority for that test and already
 /// recurses through `And`/`Or`/`Not`; `game::coverage` uses the same helper to
 /// keep such a static out of the supported set, so refusing here keeps the
 /// parser and the coverage report telling the same story.
-fn is_enforceable_continuous_static(def: &StaticDefinition) -> bool {
-    matches!(def.mode, StaticMode::Continuous)
-        && !def.modifications.is_empty()
+fn can_compose_leading_turn_scope(def: &StaticDefinition) -> bool {
+    // Reject empty continuous definitions and unread conditions so the turn
+    // window cannot turn an unsupported remainder into a supported static.
+    (matches!(def.mode, StaticMode::Continuous) && !def.modifications.is_empty()
+        || matches!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                keyword: Some(_),
+                ..
+            }
+        ))
         && !def
             .condition
             .as_ref()
@@ -935,6 +986,11 @@ pub(crate) fn parse_static_line_inner(
     }
     // CR 514.2: "Damage isn't removed from [subject] during cleanup steps."
     if let Some(def) = parse_damage_not_removed_during_cleanup(&tp, &text) {
+        return Some(def);
+    }
+    // CR 120.6 + CR 704.5g: "Lethal damage dealt to [subject] is determined by their power
+    // rather than their toughness." (Zilortha, Strength Incarnate).
+    if let Some(def) = try_parse_lethal_damage_determined_by_power_static(&text, &lower) {
         return Some(def);
     }
     // CR 101.2 + CR 109.5: "Each opponent who [did X] this turn can't [Y]" —
@@ -1328,6 +1384,17 @@ pub(crate) fn parse_static_line_inner(
         return Some(result);
     }
 
+    // CR 406.2 + CR 122.1 + CR 611.3a: Counter-linked exile-play permission —
+    // "[During your turn, ]you may play|cast <filter> with <counter> counters
+    // on them from exile" (Tinybones, Bauble Burglar). Lowers to
+    // `ExileCastPermission { pool: CounterLinked }`. Runs after the
+    // once-per-turn provenance-gated collection arm above (Evelyn keeps its
+    // marker: this constructor declines that line's prefix regardless), and
+    // after the source-anchored persistent arm (disjoint anchors).
+    if let Some(result) = try_parse_counter_linked_exile_play_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 118.9 + CR 601.2b: "[Once during each of your turns, ]you may cast
     // [filter] by paying life equal to its mana value rather than paying its
     // mana cost." Demon of Fate's Design class. Must precede the free-cast
@@ -1489,6 +1556,38 @@ pub(crate) fn parse_static_line_inner(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::Typed(tf))
                         .modifications(vec![ContinuousModification::ChangeController])
+                        .description(text.to_string()),
+                );
+            }
+        }
+    }
+
+    // --- "The monarch controls enchanted creature" (Fealty to the Realm pattern) ---
+    // CR 303.4e + CR 613.1b + CR 725.5: Aura-based DESIGNATION-anchored
+    // control. Structural twin of the Control Magic arm above — same affected
+    // filter (`parse_type_phrase_folding` + `EnchantedBy`, so any future
+    // "monarch controls enchanted X" printing parses with no new code), but
+    // the controller source is the live monarch
+    // (`ChangeControllerToDesignation`), not the Aura's controller.
+    // Fail-closed: a non-empty remainder (extra clause after the type phrase)
+    // falls through to honest-Unimplemented, never a partial control grant.
+    if let Some(type_word) = nom_tag_lower(
+        tp.lower.trim_end_matches('.'),
+        tp.lower.trim_end_matches('.'),
+        "the monarch controls enchanted ",
+    ) {
+        let (type_filter, remainder) = parse_type_phrase_folding(type_word);
+        if remainder.is_empty() {
+            if let TargetFilter::Typed(mut tf) = type_filter {
+                tf.properties.push(FilterProp::EnchantedBy);
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(tf))
+                        .modifications(vec![
+                            ContinuousModification::ChangeControllerToDesignation {
+                                designation: Designation::Monarch,
+                            },
+                        ])
                         .description(text.to_string()),
                 );
             }
@@ -1659,7 +1758,7 @@ pub(crate) fn parse_static_line_inner(
                     defender: Some(defender),
                 }]),
             );
-        if let Some(def) = parse_continuous_gets_has(rest, filter, &text) {
+        if let Some(def) = parse_continuous_gets_has(rest, filter, &text, PrintedSubject::Other) {
             return Some(def);
         }
     }
@@ -1672,7 +1771,9 @@ pub(crate) fn parse_static_line_inner(
     // construction and `TargetFilter::Or` for the union case.
     if let Some(rest) = nom_tag_tp(&tp, "each creature you control that's a ") {
         if let Some((filter, predicate)) = try_parse_thats_a_subtype_list(rest.original) {
-            if let Some(def) = parse_continuous_gets_has(predicate, filter, &text) {
+            if let Some(def) =
+                parse_continuous_gets_has(predicate, filter, &text, PrintedSubject::Other)
+            {
                 return Some(def);
             }
         }
@@ -1704,9 +1805,12 @@ pub(crate) fn parse_static_line_inner(
                 let subject_len = tp.lower.len() - rest.lower.len() + qualifier.len();
                 let (subject, predicate) = tp.split_at(subject_len);
                 if let Some(affected) = parse_continuous_subject_filter(subject.original) {
-                    if let Some(def) =
-                        parse_continuous_gets_has(predicate.original, affected, &text)
-                    {
+                    if let Some(def) = parse_continuous_gets_has(
+                        predicate.original,
+                        affected,
+                        &text,
+                        PrintedSubject::Other,
+                    ) {
                         return Some(def);
                     }
                 }
@@ -1716,6 +1820,7 @@ pub(crate) fn parse_static_line_inner(
                     rest.original,
                     TargetFilter::Typed(TypedFilter::creature()),
                     &text,
+                    PrintedSubject::Other,
                 ) {
                     return Some(def);
                 }
@@ -1923,7 +2028,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -2002,7 +2109,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -2326,9 +2435,16 @@ pub(crate) fn parse_static_line_inner(
             // condition + "has first strike".
             let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&predicate);
 
-            if let Some(mut def) =
-                parse_continuous_gets_has(&effective_predicate, TargetFilter::SelfRef, tp.original)
-            {
+            // CR 611.3a: `affected` is hardcoded `SelfRef` while the subject
+            // check above is only a negative list ("Enchanted artifact", "Each
+            // artifact", "It" all pass it), so the gate's pronoun scope comes
+            // from the printed subject of the host line, not from `affected`.
+            if let Some(mut def) = parse_continuous_gets_has(
+                &effective_predicate,
+                TargetFilter::SelfRef,
+                tp.original,
+                printed_subject(&tp),
+            ) {
                 if let Some(cond) = suffix_condition {
                     def.condition = Some(cond);
                 }
@@ -3170,11 +3286,13 @@ pub(crate) fn parse_static_line_inner(
     // --- "You may look at the top card of your library any time." ---
     if nom_tag_tp(&tp, "you may look at the top card of your library").is_some() {
         return Some(
-            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary)
-                .affected(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::You),
-                ))
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::MayLookAtTopOfLibrary {
+                library: crate::types::ability::ControllerRef::You,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+            .description(text.to_string()),
         );
     }
 
@@ -3962,90 +4080,15 @@ pub(crate) fn parse_static_line_inner(
     }
 
     // CR 603.2d: Trigger doubling — "triggers/trigger an additional time".
-    //
-    // Cause classification by phrasing:
-    // - "being dealt damage causes" / "dealt damage causes" — Wayta, Trainer
-    //   Prodigy (ControlledCreatureDealtDamage).
-    // - "attacking causes" — Isshin, Two Heavens as One (CreatureAttacking).
-    // - "entering" / "enters the battlefield" / "enters" — Panharmonicon-class
-    //   (EntersBattlefield). Panharmonicon itself names "artifact or creature
-    //   entering", so both CoreTypes qualify; narrower wordings ("creature
-    //   entering") collapse to [Creature] only.
-    // - Otherwise (e.g. "If a triggered ability ... triggers, it triggers an
-    //   additional time" — Roaming Throne, Strionic Resonator copies) use the
-    //   unrestricted `Any` cause; the doubler's `affected` filter narrows
-    //   which source's triggers qualify.
+    // Cause classification is the shared
+    // `oracle_trigger_cause::classify_trigger_cause` (see its doc for the
+    // phrasing table); a `None` there declines the line to a flagged gap.
+    // The doubler's `affected` filter below narrows which source's triggers
+    // qualify.
     if nom_primitives::scan_contains(tp.lower, "triggers an additional time")
         || nom_primitives::scan_contains(tp.lower, "trigger an additional time")
     {
-        let cause = if let Some((_, spell_qualifier, _)) =
-            nom_primitives::scan_preceded(tp.lower, |i| {
-                // CR 601.2 + CR 707.10: "you casting or copying <types> spell
-                // causes" — Veyran, Voice of Duality class. The qualifier
-                // between the verb pair and " spell causes" names the spell
-                // types ("an instant or sorcery").
-                preceded(
-                    tag::<_, _, OracleError<'_>>("you casting or copying "),
-                    take_until(" spell causes"),
-                )
-                .parse(i)
-            }) {
-            let mut core_types: Vec<CoreType> = Vec::new();
-            if nom_primitives::scan_contains(spell_qualifier, "instant") {
-                core_types.push(CoreType::Instant);
-            }
-            if nom_primitives::scan_contains(spell_qualifier, "sorcery") {
-                core_types.push(CoreType::Sorcery);
-            }
-            if nom_primitives::scan_contains(spell_qualifier, "artifact") {
-                core_types.push(CoreType::Artifact);
-            }
-            if nom_primitives::scan_contains(spell_qualifier, "creature") {
-                core_types.push(CoreType::Creature);
-            }
-            if nom_primitives::scan_contains(spell_qualifier, "enchantment") {
-                core_types.push(CoreType::Enchantment);
-            }
-            // An unqualified "a spell" leaves core_types empty = any spell.
-            TriggerCause::ControllerCastOrCopiedSpell { core_types }
-        } else if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
-            || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
-        {
-            TriggerCause::ControlledCreatureDealtDamage
-        } else if nom_primitives::scan_contains(tp.lower, "attacking causes") {
-            TriggerCause::CreatureAttacking
-        } else if nom_primitives::scan_contains(tp.lower, "dying causes") {
-            TriggerCause::CreatureDying
-        } else if let Some(cause) = parse_battlefield_transition_cause(tp.lower) {
-            cause
-        } else if nom_primitives::scan_contains(tp.lower, "entering")
-            || nom_primitives::scan_contains(tp.lower, "enters the battlefield")
-        {
-            // CR 603.6a: The entering-permanent's type is named in the
-            // qualifier. "artifact or creature entering" = both; a bare
-            // "creature entering" or "permanent entering" narrows
-            // accordingly.
-            let mut core_types: Vec<CoreType> = Vec::new();
-            if nom_primitives::scan_contains(tp.lower, "artifact") {
-                core_types.push(CoreType::Artifact);
-            }
-            if nom_primitives::scan_contains(tp.lower, "creature") {
-                core_types.push(CoreType::Creature);
-            }
-            if nom_primitives::scan_contains(tp.lower, "enchantment") {
-                core_types.push(CoreType::Enchantment);
-            }
-            if nom_primitives::scan_contains(tp.lower, "land") {
-                core_types.push(CoreType::Land);
-            }
-            if nom_primitives::scan_contains(tp.lower, "planeswalker") {
-                core_types.push(CoreType::Planeswalker);
-            }
-            // Empty core_types (e.g. "a permanent entering") means any type.
-            TriggerCause::EntersBattlefield { core_types }
-        } else {
-            TriggerCause::Any
-        };
+        let cause = crate::parser::oracle_trigger_cause::classify_trigger_cause(tp.lower)?;
         // CR 603.2d: Narrow the doubler to triggers from a specific source when
         // the text names one ("a triggered ability of a Ninja creature you
         // control"). Without this the `affected` filter is `None` and
@@ -4119,7 +4162,7 @@ pub(crate) fn parse_static_line_inner(
         nom_on_lower(tp.original, tp.lower, super::parse_leading_turn_scope)
     {
         if let Some(mut def) = parse_static_line_inner(remainder.trim(), inverted) {
-            if is_enforceable_continuous_static(&def) {
+            if can_compose_leading_turn_scope(&def) {
                 // CR 611.3a: both gates survive.
                 def.condition = Some(match def.condition.take() {
                     Some(existing) => StaticCondition::And {
@@ -4140,55 +4183,6 @@ pub(crate) fn parse_static_line_inner(
     }
 
     None
-}
-
-/// CR 603.6a + CR 603.6c: Extract disjunctive qualifiers on the permanent whose
-/// zone change caused a trigger doubler (Gandalf the White-class).
-fn parse_zone_change_qualifiers(lower: &str) -> Vec<ZoneChangeQualifier> {
-    let mut qualifiers = Vec::new();
-    if nom_primitives::scan_contains(lower, "legendary") {
-        qualifiers.push(ZoneChangeQualifier::Supertype(Supertype::Legendary));
-    }
-    if nom_primitives::scan_contains(lower, "artifact") {
-        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Artifact));
-    }
-    if nom_primitives::scan_contains(lower, "creature") {
-        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Creature));
-    }
-    if nom_primitives::scan_contains(lower, "enchantment") {
-        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Enchantment));
-    }
-    if nom_primitives::scan_contains(lower, "land") {
-        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Land));
-    }
-    if nom_primitives::scan_contains(lower, "planeswalker") {
-        qualifiers.push(ZoneChangeQualifier::CoreType(CoreType::Planeswalker));
-    }
-    qualifiers
-}
-
-/// CR 603.6a + CR 603.6c: Parse Gandalf-class battlefield transition causes.
-/// Returns `None` for Panharmonicon-style enter-only lines without a legendary
-/// supertype so the legacy `EntersBattlefield` path stays stable.
-fn parse_battlefield_transition_cause(lower: &str) -> Option<TriggerCause> {
-    let enter = nom_primitives::scan_contains(lower, "entering")
-        || nom_primitives::scan_contains(lower, "enters the battlefield");
-    let leave = nom_primitives::scan_contains(lower, "leaving")
-        || nom_primitives::scan_contains(lower, "leaves the battlefield");
-    if !enter && !leave {
-        return None;
-    }
-
-    let has_legendary = nom_primitives::scan_contains(lower, "legendary");
-    if enter && !leave && !has_legendary {
-        return None;
-    }
-
-    Some(TriggerCause::BattlefieldTransition {
-        enter,
-        leave,
-        qualifiers: parse_zone_change_qualifiers(lower),
-    })
 }
 
 /// CR 309.4c: "Room abilities of dungeons you own trigger(s) an additional time."

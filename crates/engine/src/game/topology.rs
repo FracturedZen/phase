@@ -200,6 +200,39 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
     team_members_admitting(state, player, SeatAdmission::Living)
 }
 
+/// CR 805.5b: true when every living member of `player`'s team has passed
+/// since the last game action. A team passes only when no player on it wishes
+/// to do anything — one teammate's pass never passes for the team.
+pub(crate) fn team_has_passed(state: &GameState, player: PlayerId) -> bool {
+    team_members(state, player)
+        .into_iter()
+        .all(|member| state.priority_passes.contains(&member))
+}
+
+/// CR 805.5b: the seat whose pass moves `holder`'s team toward passing — the
+/// holder unless it already passed, otherwise its first living teammate that has
+/// not. An individual seat is its own whole team, so this is always `holder`
+/// there. A driver that passes for "no one on the team acts" submits this seat;
+/// re-submitting the holder's recorded pass leaves the team holding priority.
+pub(crate) fn next_team_passer(state: &GameState, holder: PlayerId) -> PlayerId {
+    if !state.priority_passes.contains(&holder) {
+        return holder;
+    }
+    team_members(state, holder)
+        .into_iter()
+        .find(|member| !state.priority_passes.contains(member))
+        .unwrap_or(holder)
+}
+
+/// CR 805.5b: every living player across all teams, in team order. All teams
+/// pass in succession exactly when every member of this set has passed.
+pub(crate) fn all_living_players_in_team_order(state: &GameState) -> Vec<PlayerId> {
+    priority_pass_participants(state)
+        .into_iter()
+        .flat_map(|rep| team_members(state, rep))
+        .collect()
+}
+
 /// Whether `player`'s side takes a single shared team turn (CR 805) rather than
 /// each member taking an individual turn. Per-side: the question is asked about
 /// a specific seat's side (the ACTIVE player's side at the peripheral consumers —
@@ -496,7 +529,7 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
     }
 
     // LOTR "Two Towers" (Reading B): the Horde side's representative is its ACTIVE
-    // commander — the current `active_player` during a Horde turn, else the
+    // commander — the current living `active_player` during a Horde turn, else the
     // scheduled next commander (which rotates each Horde turn). Every Horde-side
     // member normalizes to it, so the turn recipient, priority, and APNAP all agree
     // on which commander is driving the Horde. The survivor side (and any other
@@ -515,11 +548,12 @@ pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerI
 
 /// The Horde side's active commander for turn/priority purposes in a two-Horde
 /// (LOTR "Two Towers") game: the current `active_player` when it is a Horde seat
-/// (the Horde's own turn), otherwise the commander scheduled to drive the next
+/// still in the game, otherwise the commander scheduled to drive the next
 /// Horde turn. `None` outside a two-Horde game.
 fn active_horde_seat_now_or_next(state: &GameState) -> Option<PlayerId> {
     let hordes = two_horde_seats(state)?;
-    if hordes.contains(&state.active_player) {
+    if hordes.contains(&state.active_player) && super::players::is_alive(state, state.active_player)
+    {
         return Some(state.active_player);
     }
     scheduled_active_horde(state)
@@ -528,8 +562,7 @@ fn active_horde_seat_now_or_next(state: &GameState) -> Option<PlayerId> {
 /// The Horde commander scheduled to drive the NEXT Horde turn — Reading B has the
 /// two commanders alternate, so this is `horde_seats[active_horde_index % living]`
 /// in seat order (advanced once per Horde turn in `horde::begin_wave`). `None`
-/// outside a two-Horde game. Horde seats have no life total so all stay alive; the
-/// alive filter keeps it robust regardless.
+/// outside a two-Horde game.
 fn scheduled_active_horde(state: &GameState) -> Option<PlayerId> {
     let living: Vec<PlayerId> = two_horde_seats(state)?
         .iter()

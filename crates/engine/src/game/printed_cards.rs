@@ -411,7 +411,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
 /// CR 400.7 + CR 712.8a (#7565): swap the object's live face with its stored
 /// back face, preserving the stored slot's `layout_kind`. The layout is a
 /// printed property of the CARD PAIR, not of whichever half happens to be
-/// stashed — `snapshot_object_face` hardcodes `None`, so every bare
+/// stashed — the base snapshot hard-codes `None`, so every bare
 /// snapshot/apply/store dance silently erased the marker after one back-face
 /// round trip, muting the split/MDFC cast-face prompt and every other
 /// `layout_kind` consumer. Single authority for all symmetric face swaps.
@@ -420,7 +420,14 @@ pub fn swap_object_faces(obj: &mut GameObject) {
         return;
     };
     let layout_kind = stored.layout_kind;
-    let mut snapshot = snapshot_object_face(obj);
+    // CR 707.2 + CR 613.1: the face turned away is stored as its copiable
+    // values (the base fields), never its layer-modified live values, so
+    // continuous effects apply over it again from its printed values when it
+    // returns. In every zone: CR 611.3a effects modify cards off the
+    // battlefield too (Painter's Servant). `sync_missing_base_characteristics`
+    // first materializes a base no layer pass has seeded, as every layer reset does.
+    obj.sync_missing_base_characteristics();
+    let mut snapshot = snapshot_object_base_face(obj);
     snapshot.layout_kind = layout_kind;
     apply_back_face_to_object(obj, stored);
     obj.back_face = Some(snapshot);
@@ -627,6 +634,31 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
     if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
         return values;
     }
+    // CR 709.4 + CR 709.5 + CR 709.5b: a Room off the battlefield has both halves'
+    // characteristics (combined outside the stack, CR 709.4; on the stack each half
+    // still exists as a copiable value, CR 709.5b), and which half each characteristic
+    // is in is a copiable value. On the battlefield entry has already assigned the doors
+    // (`reset_for_battlefield_entry`); elsewhere the snapshot assigns them the same way.
+    let room_text = (crate::game::room::has_shared_type_line(&obj.base_card_types)
+        && obj.zone != Zone::Battlefield)
+        .then(|| crate::game::room::door_assigned_text(obj));
+    let (trigger_definitions, trigger_printed_origins, static_definitions) = match room_text {
+        Some(text) => (
+            text.triggers,
+            // Empty: each origin derives from the printed reference, as on the object.
+            if text.trigger_printed_origins.is_empty() {
+                base_trigger_printed_origins(obj)
+            } else {
+                Arc::new(text.trigger_printed_origins)
+            },
+            text.statics,
+        ),
+        None => (
+            Arc::clone(&obj.base_trigger_definitions),
+            base_trigger_printed_origins(obj),
+            Arc::clone(&obj.base_static_definitions),
+        ),
+    };
     CopiableValues {
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -641,10 +673,10 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         // a copy-effect never mutates the ability set, so refcount sharing
         // is both correct and zero-allocation.
         abilities: Arc::clone(&obj.base_abilities),
-        trigger_definitions: Arc::clone(&obj.base_trigger_definitions),
-        trigger_printed_origins: base_trigger_printed_origins(obj),
+        trigger_definitions,
+        trigger_printed_origins,
         replacement_definitions: copiable_replacement_definitions(obj),
-        static_definitions: Arc::clone(&obj.base_static_definitions),
+        static_definitions,
         // CR 709.5 + CR 709.5b: a Room's per-half identities are copiable —
         // the door-stamped defs above carry both halves' TEXT, this carries
         // both halves' names and costs. `None` for every non-Room source
@@ -677,8 +709,7 @@ pub(crate) fn copiable_prepare_face(obj: &GameObject) -> Option<Arc<BackFaceData
     // The object's OWN stored face: an intrinsic snapshot stays independent of
     // Layer 1 (a copy effect folds over it in `compute_current_copiable_values`,
     // which replaces the whole value set including `prepare_face`).
-    obj.back_face
-        .as_ref()
+    stored_alternative_face(obj)
         .filter(|face| is_prepare_spell_face(face))
         .map(|face| Arc::new(face.clone()))
 }
@@ -699,9 +730,7 @@ pub(crate) fn effective_prepare_face(obj: &GameObject) -> Option<&BackFaceData> 
     if obj.layer1_copy_effect.is_some() {
         return obj.copied_prepare_face.as_deref();
     }
-    obj.back_face
-        .as_ref()
-        .filter(|face| is_prepare_spell_face(face))
+    stored_alternative_face(obj).filter(|face| is_prepare_spell_face(face))
 }
 
 /// CR 722.2b: the prepare spell a database card face's printed card carries —
@@ -762,9 +791,16 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 /// target by an effect such as Torch the Tower or Obliterating Bolt. It is
 /// resolution-installed in the live replacement store, is not a copiable value,
 /// and ends when that object leaves the battlefield (CR 400.7).
+///
+/// CR 109.2: a rider whose printed subject names a card type ("a creature dealt
+/// damage this way") carries `And[SelfRef, Typed(..)]` rather than a bare
+/// `SelfRef`; either way `valid_card` names only the carrier.
 pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
     def.event == ReplacementEvent::Moved
-        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && def
+            .valid_card
+            .as_ref()
+            .is_some_and(super::ability_rw::filter_is_self_scoped)
         && matches!(def.expiry, Some(RestrictionExpiry::EndOfTurn))
         && def.destination_zone == Some(Zone::Graveyard)
         && def.execute.as_deref().is_some_and(|execute| {
@@ -1009,22 +1045,15 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
         obj.mana_cost = halves.left.mana_cost.clone();
         obj.base_mana_cost = halves.left.mana_cost.clone();
         obj.modal_back_face = false;
-        obj.back_face = halves
-            .right
-            .as_ref()
-            .map(|right| crate::game::game_object::BackFaceData {
-                name: right.name.clone(),
-                mana_cost: right.mana_cost.clone(),
-                ..Default::default()
-            });
+        obj.back_face = stored_alternative_of_values(values);
     }
     // CR 722.2b + CR 707.2: a materialized copy of an object with a prepare
     // spell (a token copy, a conjured duplicate) has that prepare spell too, so
     // it can become prepared (CR 722.3a) and its CR 722.3c copy takes the
     // prepare spell's characteristics. Mutually exclusive with the Room branch
     // above: a Room is not a preparation card.
-    if let Some(prepare_face) = &values.prepare_face {
-        obj.back_face = Some(BackFaceData::clone(prepare_face));
+    if values.prepare_face.is_some() {
+        obj.back_face = stored_alternative_of_values(values);
     }
     // CR 707.9b: a folded name EXCEPTION is part of the materialized base —
     // the Step-1 seed restores the runtime marker from this every pass.
@@ -1032,6 +1061,28 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
         == crate::types::ability::CopiedNameOrigin::Exception)
         .then_some(crate::types::ability::CopiedNameOrigin::Exception);
     obj.base_characteristics_initialized = true;
+}
+
+/// CR 709.5b + CR 722.2b: the alternative characteristics a materialized copy stores beside its
+/// face — a Room's other half (identity only: name and door cost; the halves' text rides in the
+/// door-stamped definitions) or a prepare spell. `None` for any other values.
+pub(crate) fn stored_alternative_of_values(values: &CopiableValues) -> Option<BackFaceData> {
+    if let Some(halves) = &values.room_halves {
+        return halves.right.as_ref().map(|right| BackFaceData {
+            name: right.name.clone(),
+            mana_cost: right.mana_cost.clone(),
+            ..Default::default()
+        });
+    }
+    values.prepare_face.as_deref().cloned()
+}
+
+/// CR 722.2b + CR 709.5b: where `obj` stores its own alternative characteristics: the
+/// double-faced copy slot when set, else `back_face`.
+pub(crate) fn stored_alternative_face(obj: &GameObject) -> Option<&BackFaceData> {
+    obj.double_faced_token_alternative
+        .as_ref()
+        .or(obj.back_face.as_ref())
 }
 
 pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
@@ -1103,8 +1154,11 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         // ("no baseline ever contains a `Resolution` member"): the carry-over would
         // then compute `base ++ live_resolution` on EVERY layer pass, growing the
         // shield count by one per pass without bound — a Maze of Ith / regeneration /
-        // Fog shield would prevent N damage events instead of one. Reachable on any
-        // transform round-trip, which stashes the live face and restores it.
+        // Fog shield would prevent N damage events instead of one. Load-bearing for
+        // the live-snapshot writers that remain (the face-down entry stash,
+        // specialize, conspiracy setup, the reload fallback); face swaps use
+        // `snapshot_object_base_face`, whose replacement store never holds a
+        // `Resolution` def.
         //
         // Same guard `copiable_replacement_definitions` (producer side) and
         // `GameObject::sync_missing_base_characteristics` (back-fill side) already
@@ -1138,14 +1192,18 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
 /// deliberately ignoring any live fields that continuous effects (CR 613) may
 /// have altered.
 ///
-/// Use this instead of [`snapshot_object_face`] whenever the snapshot is taken
-/// from a permanent already on the battlefield — specifically when turning it
-/// face down via a spell or ability (CR 708.2a). At that point the live fields
-/// may include layer-applied modifications (e.g. a +1/+1 anthem making a 2/2
-/// appear as 3/3). If those inflated values were stored in `back_face`,
-/// [`apply_back_face_to_object`] would write them into both live and base on
-/// restoration (CR 708.8), causing the anthem to reapply from an already-
-/// inflated baseline and produce a permanently-wrong value.
+/// CR 707.2 + CR 613.1: this is the snapshot for every face stash that records a
+/// face from an object whose live fields may carry continuous effects: face
+/// swaps in any zone ([`swap_object_faces`] and the `transform.rs` stash), flip
+/// (`flip::stash_flip_face`), and turning a permanent face down via a spell or
+/// ability (CR 708.2a). The live fields may include layer-applied modifications
+/// (e.g. a +1/+1 anthem making a 2/2 appear as 3/3, or Painter's Servant's color
+/// on a card in hand). If those inflated values were stored in `back_face`,
+/// [`apply_back_face_to_object`] would write them into both live and base when
+/// the face returns (CR 708.8 for face-down), causing the effect to reapply from
+/// an already-inflated baseline and produce a permanently-wrong value. Callers
+/// materialize an uninitialized base first
+/// (`GameObject::sync_missing_base_characteristics`).
 ///
 /// Fields with no base equivalent (`modal`, `additional_cost`, `strive_cost`,
 /// `casting_restrictions`, `casting_options`) are invariant after card creation
@@ -1854,8 +1912,17 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
 /// database layout metadata and the parsed meld instruction. A forged effect
 /// whose three named faces are not all database-backed meld faces is excluded.
 fn build_meld_pair_registry(db: &CardDatabase) -> HashMap<String, MeldPairRecord> {
+    // CR 701.42a + CR 712.4a: a meld instruction is printed on one card of a
+    // meld pair, so only meld cards' faces can carry one.
+    meld_pairs_from_faces(db, db.faces_with_layout(LayoutKind::Meld))
+}
+
+fn meld_pairs_from_faces<'a>(
+    db: &CardDatabase,
+    faces: impl Iterator<Item = &'a CardFace>,
+) -> HashMap<String, MeldPairRecord> {
     let mut registry = HashMap::new();
-    for (_, face) in db.face_iter() {
+    for face in faces {
         let mut effects = Vec::new();
         collect_meld_effects_from_face(face, &mut effects);
         for (source, partner, result) in effects {
@@ -2053,7 +2120,13 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 }
                 // CR 712.12: Restore layout_kind if it was cleared (e.g. after MDFC
                 // front-face choice). Ensures bounced MDFCs can prompt face choice again.
-                if back_face.layout_kind.is_none() {
+                // CR 111.1 + CR 707.2 + CR 111.10i: a token's stored face is serialized
+                // copiable values, and its layout is part of its double-faced identity —
+                // an Incubator's Phyrexian face, or a copy of one, has none. The display
+                // reference names whatever the token copies (Encouraging Aviator under
+                // Mirrorweave), so inferring from it would make a double-faced token
+                // single-faced.
+                if !obj.is_token && back_face.layout_kind.is_none() {
                     back_face.layout_kind = db
                         .get_by_name(&card_face.name)
                         .and_then(|rules| match &rules.layout {
@@ -2066,8 +2139,7 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                             // flip permanent's stashed alternative face stays
                             // excluded from the double-faced paths.
                             CardLayout::Flip(..) => Some(LayoutKind::Flip),
-                            // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
-                            // back-face layout tracking. Assign when WotC publishes SOS CR update.
+                            // CR 722.2b + CR 722.2c: a preparation card's prepare spell is a stored alternative of one card, so its face keeps the `Prepare` tag (a single-faced alternative, not a double face).
                             CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
                             _ => None,
                         })
@@ -2246,7 +2318,63 @@ mod tests {
     use super::*;
     use crate::game::game_object::PrototypeFormState;
     use crate::types::ability::ChooseOneOfKind;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::format::FormatConfig;
+
+    /// CR 614.1a + CR 400.7 + CR 707.2: the resolution-installed die-exile rider is
+    /// recognized by the carrier-scoped `valid_card` it carries, bare (a subject with
+    /// no card-type noun) or conjoined with the subject's type (CR 109.2). A `Moved`
+    /// rider whose `valid_card` has no `SelfRef` conjunct could match other objects,
+    /// so it is not the carrier-bound rider.
+    #[test]
+    fn runtime_die_exile_rider_is_recognized_by_a_carrier_scoped_valid_card() {
+        let rider = |valid_card: TargetFilter| {
+            let exile = AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    library_shuffle: Default::default(),
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(valid_card)
+                .destination_zone(Zone::Graveyard)
+                .execute(exile);
+            def.expiry = Some(RestrictionExpiry::EndOfTurn);
+            def
+        };
+        let creature = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        // Positive reach: both carrier-scoped shapes are the rider, so the predicate
+        // is live and the negative below is not vacuous.
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::SelfRef
+        )));
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, creature()],
+            }
+        )));
+        // A typed filter with no `SelfRef` conjunct is not carrier-scoped.
+        assert!(!is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![creature()],
+            }
+        )));
+        assert!(!is_runtime_target_die_exile_replacement(&rider(creature())));
+    }
 
     /// Pre-PR saves persist Horde token-layout objects with default `Card`
     /// routing and no `printed_ref`, so the face reapply skips them and a
@@ -2922,7 +3050,10 @@ mod tests {
     /// A same-object face rewrite must carry the live resolution shield while
     /// keeping it out of both printed face snapshots. Each direction is checked
     /// before and after repeated layer evaluation so a dropped shield and a
-    /// per-pass duplicate both fail this production-writer regression.
+    /// per-pass duplicate both fail this production-writer regression: let
+    /// `swap_object_faces` store the live snapshot again, unfiltered, and base
+    /// holds a `Resolution` def and the per-object resolution count grows between
+    /// the `evaluate_layers` passes.
     #[test]
     fn transform_round_trip_does_not_duplicate_a_resolution_shield() {
         fn printed_def() -> ReplacementDefinition {
@@ -3007,6 +3138,122 @@ mod tests {
              (pass 1: {after_first}, pass 2: {after_second})"
         );
         assert_eq!(after_second, 1, "exactly one carried shield must survive");
+    }
+
+    /// CR 707.2 + CR 613.1 + CR 611.3a: `swap_object_faces` stores the face it
+    /// turns away as that face's copiable values — its base fields — in every
+    /// zone, not only on the battlefield.
+    ///
+    /// Case (i): the nearest printed board is Valentin, Dean of the Vein in hand
+    /// under Painter's Servant ("All cards that aren't on the battlefield, spells,
+    /// and permanents are the chosen color in addition to their other colors."),
+    /// cast as Lisette, Dean of the Root. The live colors carry the painted red;
+    /// the base colors are the printed black. The real board is the
+    /// `grub_storied_matriarch_769` integration row; this pins the building block.
+    ///
+    /// Case (ii): no printed card reaches a face swap with an uninitialized base:
+    /// every card object is installed by `apply_card_face_to_object`, which sets
+    /// `base_characteristics_initialized`. The nearest printed shape is the
+    /// Incubator token from Blighted Burgeoning ("When this Aura enters, incubate
+    /// 2. (Create an Incubator token with two +1/+1 counters on it and "{2}:
+    /// Transform this token." It transforms into a 0/0 Phyrexian artifact
+    /// creature.)"). `incubate::resolve` leaves its flag unset until its first
+    /// layer pass. The case is still needed because a stash must hold the
+    /// face's copiable values even when no layer pass has seeded the base,
+    /// which is how many unit fixtures build swap subjects (`create_object`
+    /// plus live-only writes). For those, the sync mirrors
+    /// `reset_recipient_to_base`'s materialization (CR 613.1).
+    ///
+    /// Revert-failing: let `swap_object_faces` store the live snapshot again and
+    /// (i) keeps red in the stored face; drop its
+    /// `sync_missing_base_characteristics` call and (ii) stores no P/T and no
+    /// card types.
+    #[test]
+    fn swap_object_faces_stores_copiable_values_in_every_zone() {
+        // (i) A painted card in hand: live colors differ from the printed base.
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Front Face".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.base_color = vec![ManaColor::Black];
+            obj.base_characteristics_initialized = true;
+            let mut back = snapshot_object_base_face(obj);
+            back.name = "Back Face".to_string();
+            back.power = Some(4);
+            back.toughness = Some(4);
+            back.color = vec![ManaColor::Black, ManaColor::Green];
+            back.layout_kind = Some(LayoutKind::Modal);
+            obj.back_face = Some(back);
+            // The CR 611.3a effect's live write, as a layer pass leaves it.
+            obj.color = vec![ManaColor::Black, ManaColor::Red];
+        }
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        let obj = &state.objects[&id];
+        assert_eq!(obj.name, "Back Face", "reach-guard: the swap happened");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Front Face");
+        assert_eq!(
+            stored.color,
+            vec![ManaColor::Black],
+            "CR 707.2: the stored face holds its printed colors, not the painted red"
+        );
+        assert_eq!(
+            stored.layout_kind,
+            Some(LayoutKind::Modal),
+            "the stored slot's layout is preserved"
+        );
+
+        swap_object_faces(state.objects.get_mut(&id).unwrap());
+        let obj = &state.objects[&id];
+        assert_eq!(
+            obj.name, "Front Face",
+            "reach-guard: the swap back happened"
+        );
+        assert_eq!(obj.color, vec![ManaColor::Black]);
+        assert_eq!(obj.base_color, vec![ManaColor::Black]);
+
+        // (ii) A fixture whose base no layer pass has seeded: live-only writes.
+        let fixture = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Unseeded Front".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&fixture).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            let mut back = snapshot_object_face(obj);
+            back.name = "Unseeded Back".to_string();
+            obj.back_face = Some(back);
+            assert!(
+                !obj.base_characteristics_initialized && obj.base_power.is_none(),
+                "reach-guard: the fixture's base is unseeded"
+            );
+        }
+
+        swap_object_faces(state.objects.get_mut(&fixture).unwrap());
+        let obj = &state.objects[&fixture];
+        assert_eq!(obj.name, "Unseeded Back", "reach-guard: the swap happened");
+        let stored = obj.back_face.as_ref().expect("the front face is stored");
+        assert_eq!(stored.name, "Unseeded Front");
+        assert_eq!((stored.power, stored.toughness), (Some(2), Some(2)));
+        assert_eq!(stored.card_types.core_types, vec![CoreType::Creature]);
     }
 
     use crate::database::CardDatabase;
@@ -3353,6 +3600,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -3969,6 +4217,105 @@ mod tests {
             &intrinsic_copiable_values(&creature_with_stored_face(None)),
         );
         assert_eq!(plain_copy.back_face, None);
+    }
+
+    /// A double-faced copy token: its other face in `back_face` (a Transform
+    /// layout) and `alternative` beside it in the double-faced copy slot.
+    fn double_faced_token_with(alternative: Option<BackFaceData>) -> GameObject {
+        let mut obj = creature_with_stored_face(Some(BackFaceData {
+            name: "Encouraging Aviator".to_string(),
+            layout_kind: Some(LayoutKind::Transform),
+            ..BackFaceData::default()
+        }));
+        obj.is_token = true;
+        obj.double_faced_token_alternative = alternative;
+        obj
+    }
+
+    /// CR 722.2b + CR 707.8a: a double-faced copy token whose copied values carry
+    /// a prepare spell keeps it in the double-faced copy slot, beside its other
+    /// face. Both prepare readers find it there, and a Layer-1 copy effect still
+    /// replaces it (CR 613.1a). Nearest printed board: Mirrorweave making Kessig
+    /// Prowler a copy of Encouraging Aviator, then Cackling Counterpart copying
+    /// the Prowler. The `None`-slot control is the board before this change: the
+    /// other face is no prepare spell.
+    #[test]
+    fn prepare_readers_find_a_double_faced_tokens_prepare_spell_beside_its_other_face() {
+        let jump = stored_instant_face(Some(LayoutKind::Prepare));
+        let token = double_faced_token_with(Some(jump.clone()));
+        assert_eq!(copiable_prepare_face(&token).as_deref(), Some(&jump));
+        assert_eq!(effective_prepare_face(&token), Some(&jump));
+        assert_eq!(
+            intrinsic_copiable_values(&token).prepare_face.as_deref(),
+            Some(&jump),
+            "CR 722.2b: the prepare spell stays a copiable value of the token"
+        );
+
+        // CR 613.1a: under a Layer-1 copy effect the copy's values decide.
+        let mut copied = double_faced_token_with(Some(jump.clone()));
+        copied.layer1_copy_effect = Some(crate::types::ability::CopyEffectInstanceRef {
+            continuous_effect_id: 1,
+            modification_index: 0,
+        });
+        assert_eq!(effective_prepare_face(&copied), None);
+
+        // Control: with no slot the other face is the only stored face, and it is
+        // not a prepare spell.
+        let plain = double_faced_token_with(None);
+        assert_eq!(copiable_prepare_face(&plain), None);
+        assert_eq!(effective_prepare_face(&plain), None);
+    }
+
+    /// CR 709.5b + CR 707.8a: a double-faced copy token whose copied values are a
+    /// Room's keeps the Room's other half in the double-faced copy slot, so its
+    /// own halves are the base (left) half and that slot's half, not its other
+    /// face. The `None`-slot control reads the other face, as before this change.
+    #[test]
+    fn own_room_halves_reads_a_double_faced_tokens_room_half_beside_its_other_face() {
+        let mut token = double_faced_token_with(Some(BackFaceData {
+            name: "Right".to_string(),
+            ..BackFaceData::default()
+        }));
+        token.base_name = "Left".to_string();
+        token.base_card_types = CardType {
+            core_types: vec![CoreType::Enchantment],
+            subtypes: vec!["Room".to_string()],
+            ..CardType::default()
+        };
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Left");
+        assert_eq!(
+            halves.right.map(|half| half.name),
+            Some("Right".to_string())
+        );
+
+        // CR 707.8a + CR 712.8f: a token copying a modal double-faced permanent
+        // with its back face up enters back face up, and the slot keeps the
+        // halves in printed order.
+        token.modal_back_face = true;
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Left");
+        assert_eq!(
+            halves.right.map(|half| half.name),
+            Some("Right".to_string()),
+            "CR 709.5b: a back-face-up token's halves stay in printed order"
+        );
+
+        // Control: a Room with no slot whose right half was cast reads its live
+        // half as the right one.
+        token.double_faced_token_alternative = None;
+        let halves = crate::game::room::own_room_halves(&token);
+        assert_eq!(halves.left.name, "Encouraging Aviator");
+        assert_eq!(halves.right.map(|half| half.name), Some("Left".to_string()));
+
+        token.modal_back_face = false;
+        assert_eq!(
+            crate::game::room::own_room_halves(&token)
+                .right
+                .map(|half| half.name),
+            Some("Encouraging Aviator".to_string()),
+            "control: without the slot the stored face is read as the other half"
+        );
     }
 
     /// CR 722.2b + CR 707.2 + CR 613.1a: a Layer-1 copy carries the prepare
@@ -4843,6 +5190,42 @@ mod tests {
         CardDatabase::from_json_str(&json).expect("export db should parse")
     }
 
+    #[test]
+    fn meld_pair_registry_equals_the_every_face_walk_on_the_committed_fixture() {
+        let db = crate::test_support::shared_card_db();
+        let expected = meld_pairs_from_faces(db, db.face_iter().map(|(_, face)| face));
+        assert!(!expected.is_empty());
+        assert_eq!(build_meld_pair_registry(db), expected);
+    }
+
+    #[test]
+    fn hydrating_a_lazily_loaded_fixture_types_only_the_games_cards_and_meld_cards() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::test_support::load_fixture;
+
+        let db = load_fixture();
+        let mut scenario = GameScenario::new();
+        scenario.add_real_card(P0, "Well of Lost Dreams", Zone::Battlefield, &db);
+        scenario.add_real_card(P0, "Plains", Zone::Library, &db);
+        let game_faces = db.face_index.typed_face_count();
+
+        rehydrate_game_from_card_db(&mut scenario.state, &db);
+
+        let meld_faces: std::collections::HashSet<&String> = db
+            .layout_index
+            .iter()
+            .filter(|(_, kind)| **kind == LayoutKind::Meld)
+            .flat_map(|(oracle_id, _)| &db.oracle_id_index[oracle_id])
+            .collect();
+        assert!(!scenario.state.meld_pair_registry.is_empty());
+        assert_eq!(scenario.state.all_card_names.len(), db.card_names().len());
+        assert_eq!(
+            db.face_index.typed_face_count(),
+            game_faces + meld_faces.len()
+        );
+    }
+
     /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,
     /// not arbitrary effect text, is the authority for canonical meld pairs.
     #[test]
@@ -5586,6 +5969,7 @@ mod tests {
                 definition: Box::new(conjure_ability("token_static", Zone::Hand)),
             });
         let token = Effect::Token {
+            enters_blocking: None,
             name: "T".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

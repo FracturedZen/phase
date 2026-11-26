@@ -1198,6 +1198,7 @@ fn unrevealed_search_type_gate_reads_selected_target() {
             filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         })
     );
     assert!(put.optional);
@@ -2639,7 +2640,12 @@ fn skullwinder_etb_parses_choose_opponent() {
 fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
     assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
-    let Effect::Sacrifice { target, count, .. } = &*def.effect else {
+    let Effect::Sacrifice {
+        target,
+        count: crate::types::ability::SacrificeSelection::Count(count),
+        ..
+    } = &*def.effect
+    else {
         panic!("expected Effect::Sacrifice, got {:?}", def.effect);
     };
     assert!(

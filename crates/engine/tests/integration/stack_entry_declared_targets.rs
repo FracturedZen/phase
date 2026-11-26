@@ -1640,6 +1640,7 @@ fn a_spell_given_new_targets_at_a_prompt_without_slot_addresses_targets_the_new_
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
         player: P1,
         stack_entry_index: index,
+        stack_entry_id: None,
         scope: RetargetScope::All,
         current_targets: vec![TargetRef::Object(first)],
         slots: Vec::new(),
@@ -2776,7 +2777,7 @@ fn a_kicked_spell_with_a_later_target_chosen_together_targets_both() {
         .expect("the spell is castable");
     loop {
         let action = match &runner.state().waiting_for {
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(bear), TargetRef::Player(P1)],
             },

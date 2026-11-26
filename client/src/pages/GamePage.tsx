@@ -77,6 +77,7 @@ import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
 import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { isFocusTargetAvailable } from "../components/ui/focusTarget.ts";
 import { ActionButton } from "../components/board/ActionButton.tsx";
+import { ActionRailStatusRow } from "../components/board/ActionRailStatusRow.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
@@ -135,6 +136,7 @@ import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
 import { EntryControllerModal } from "../components/modal/EntryControllerModal.tsx";
+import { ReplacementDecisionOrderModal } from "../components/modal/ReplacementDecisionOrderModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -1236,7 +1238,11 @@ function GamePageContent({
     ),
     [handleKickPlayer, isOnlineMode, opponentDisplayName, isP2PHost, splitBoardActive],
   );
-  const playerHud = useMemo(() => <PlayerHud />, []);
+  // The action rail's status row keeps clear of the HUD on short landscape
+  // screens, so it needs the HUD's node. A callback ref into state (the setter
+  // is stable, so the memo holds) hands over each node the HUD mounts with.
+  const [playerHudElement, setPlayerHudElement] = useState<HTMLDivElement | null>(null);
+  const playerHud = useMemo(() => <PlayerHud ref={setPlayerHudElement} />, []);
 
   useAudioContext("battlefield");
 
@@ -1845,21 +1851,7 @@ function GamePageContent({
               <div className="hidden max-lg:portrait:block max-lg:portrait:w-full">
                 <TurnStatusLine />
               </div>
-              <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
-                {/* <lg only: desktop conveys phase via the PhaseDot strips in
-                    PlayerHud, which are hidden on mobile. */}
-                <MobilePhaseChip className="lg:hidden" />
-                <TurnStatusLine />
-                <HandBadge />
-                <DayNightBadge />
-                {/* CR 117.3d: standing priority-yield summary chip, beside the
-                    Full Control toggle (self-hides when no yields stand). */}
-                <PriorityYieldList />
-                {/* CR 603.5: standing "don't ask again" auto-choice summary chip,
-                    beside the priority-yield chip (self-hides when none stand). */}
-                <MayTriggerAutoChoiceList />
-                <FullControlToggle />
-              </div>
+              <ActionRailStatusRow playerHud={playerHudElement} />
               <ActionButton />
             </>
           )}
@@ -2149,6 +2141,7 @@ function GamePageContent({
             <AnnouncingOpponentModal />
             <GiftRecipientModal />
             <EntryControllerModal />
+            <ReplacementDecisionOrderModal />
             <TributeModal />
             <CombatTaxModal />
             <AlternativeCostModal />
@@ -3610,7 +3603,6 @@ function AbilityChoiceModal() {
   return (
     <ChoiceModal
       title={localized?.name || obj.name}
-      scrollable
       footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
@@ -3775,11 +3767,11 @@ function DefilerPaymentModal() {
       title={t("gamePage.defiler.title")}
       subtitle={t("gamePage.defiler.subtitle", { lifeCost: life_cost })}
       options={[
-        { id: "pay", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
-        { id: "skip", label: t("gamePage.defiler.decline") },
+        { id: "0", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
+        { id: "1", label: t("gamePage.defiler.decline") },
       ]}
       onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+        dispatch({ type: "DecideOptionalCost", data: { index: id === "0" ? 0 : 1 } })
       }
       onClose={() => dispatch({ type: "CancelCast" })}
     />
@@ -4087,10 +4079,55 @@ function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string })
   );
 }
 
+function PriorUnlessPollChoices() {
+  const { t } = useTranslation("game");
+  const poll = useGameStore((s) => s.gameState?.pending_player_scope_unless_punishment);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (!poll || (poll.payments.length === 0 && poll.declining_players.length === 0)) {
+    return null;
+  }
+
+  return (
+    <div className="mb-3 space-y-1 rounded-lg border border-white/10 bg-black/25 px-3 py-2 text-xs text-gray-300">
+      {poll.payments.map((payment) => {
+        const choice =
+          payment.action === "Sacrifice"
+            ? payment.objects
+                .map((pin) => objects?.[pin.object_id]?.name)
+                .filter((name): name is string => Boolean(name))
+                .join(", ") || t("gamePage.cost.sacrifice_one")
+            : t("gamePage.cost.discardCard");
+        return (
+          <div key={`pay-${payment.player}`}>
+            {t("gamePage.unlessPayment.priorChoice", { id: payment.player + 1, choice })}
+          </div>
+        );
+      })}
+      {poll.declining_players.map((playerId) => (
+        <div key={`decline-${playerId}`}>
+          {t("gamePage.unlessPayment.priorChoice", {
+            id: playerId + 1,
+            choice: t("gamePage.unlessPayment.dontPay"),
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // CR 118.12a: the engine names the object the payment decides (each revealed
+  // card of a Sword-Point Diplomacy loop), so the payer knows what they protect.
+  const affectedObjectId =
+    waitingFor?.type === "UnlessPayment" ? waitingFor.data.affected_object : undefined;
+  const affectedObject = useGameStore((s) =>
+    affectedObjectId != null ? s.gameState?.objects[affectedObjectId] : undefined,
+  );
+  const inspectHoverProps = useInspectHoverProps();
   const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
@@ -4124,6 +4161,15 @@ function UnlessPaymentPanel() {
               size="sm"
             />
           </h3>
+          {affectedObject && affectedObjectId != null && (
+            <p
+              className="-mt-2 mb-3 text-center text-xs font-medium text-gray-400"
+              {...inspectHoverProps(affectedObjectId)}
+            >
+              {affectedObject.name}
+            </p>
+          )}
+          <PriorUnlessPollChoices />
           <div className="flex justify-center gap-3">
             <button
               onClick={() =>
@@ -4162,9 +4208,13 @@ function UnlessPaymentChooseCostModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
 
+  const affectedObjectId = waitingFor.data.affected_object;
+  const affectedObject =
+    affectedObjectId != null ? objects?.[affectedObjectId] : undefined;
   const costs = waitingFor.data.costs as Array<{
     type: string;
     cost?: { type: string; shards?: string[]; generic?: number };
@@ -4182,10 +4232,13 @@ function UnlessPaymentChooseCostModal() {
   return (
     <ChoiceModal
       title={t("gamePage.unlessPayment.titleChooseOne", { effect })}
+      subtitle={affectedObject?.name}
+      previewObjectId={affectedObject ? affectedObjectId : undefined}
       options={[
         ...branchOptions,
         { id: "decline", label: t("gamePage.unlessPayment.takeEffect") },
       ]}
+      footer={<PriorUnlessPollChoices />}
       onChoose={(id) => {
         // CR 118.12a: Typed `UnlessCostBranch` discriminant — `Decline`
         // falls through to the effect, `Pay { index }` selects the

@@ -436,6 +436,78 @@ describe("TargetingOverlay", () => {
     });
   });
 
+  it("labels an up-to keep with nothing selected as a confirm, not a skip", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 21,
+          name: "Keeper One",
+        }),
+        buildGameObjectWithCoreTypes(["Creature"], {
+          id: 22,
+          name: "Keeper Two",
+        }),
+      ),
+      waiting_for: {
+        type: "KeepExactPermanentsChoice",
+        data: {
+          player: 0,
+          target_player: 0,
+          eligible: [21, 22],
+          required_count: 2,
+          minimum_count: 0,
+          source_id: 50,
+          remaining_players: [],
+          all_kept: [],
+          scoped_players: [0],
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByRole("button", { name: "Confirm (0/2)" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Skip" })).toBeNull();
+  });
+
+  it("still labels a non-keep optional range with nothing selected as a skip", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObjectWithCoreTypes(["Land"], {
+          id: 21,
+          name: "Tapped Land",
+          tapped: true,
+        }),
+      ),
+      waiting_for: {
+        type: "ChooseUntapSubset",
+        data: { player: 0, group: [21], max: 1 },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByRole("button", { name: "Skip" })).toBeTruthy();
+  });
+
   it("cancels crew selection back to priority", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const gameState = createGameState({
@@ -816,10 +888,11 @@ describe("TargetingOverlay", () => {
 
   it("keeps the expanded description collapsible when the caption stops overflowing", async () => {
     mockDescriptionOverflow(true);
-    const resizeCallbacks: ResizeObserverCallback[] = [];
+    const resizeObservers: { callback: ResizeObserverCallback; targets: Element[] }[] = [];
     class ControlledResizeObserver {
-      constructor(callback: ResizeObserverCallback) { resizeCallbacks.push(callback); }
-      observe = vi.fn();
+      private readonly targets: Element[] = [];
+      constructor(callback: ResizeObserverCallback) { resizeObservers.push({ callback, targets: this.targets }); }
+      observe = vi.fn((target: Element) => { this.targets.push(target); });
       unobserve = vi.fn();
       disconnect = vi.fn();
     }
@@ -843,10 +916,15 @@ describe("TargetingOverlay", () => {
       name: `Show the full description: ${description}`,
     }));
     expect(screen.getAllByText(description)).toHaveLength(2);
-    expect(resizeCallbacks.length).toBeGreaterThan(0);
+    // The caption line's own observer, not the prompt block's (which publishes
+    // the block's top and bottom edges for the stack panel).
+    const captionObservers = resizeObservers.filter(({ targets }) =>
+      targets.some((target) => !target.hasAttribute("data-targeting-prompt")),
+    );
+    expect(captionObservers.length).toBeGreaterThan(0);
 
     mockDescriptionOverflow(false);
-    act(() => resizeCallbacks.forEach((callback) => callback([], {} as ResizeObserver)));
+    act(() => captionObservers.forEach(({ callback }) => callback([], {} as ResizeObserver)));
     fireEvent.click(screen.getByRole("button", { name: `Show less: ${description}` }));
     expect(screen.getAllByText(description)).toHaveLength(1);
     await waitFor(() => expect(screen.queryByRole("button", {

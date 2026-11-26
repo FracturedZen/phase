@@ -161,6 +161,8 @@ impl From<&ResourceAxis> for AxisKey {
             ResourceAxis::SacTriggers => AxisKey::Sac,
             // CR 704.5c: the per-victim poison axis has one aggregate key.
             ResourceAxis::Poison(_) => AxisKey::Counter(CounterClass::Poison, ObjectClass::Player),
+            // CR 107.14: likewise the per-seat energy axis.
+            ResourceAxis::Energy(_) => AxisKey::Counter(CounterClass::Energy, ObjectClass::Player),
         }
     }
 }
@@ -472,6 +474,10 @@ fn type_filter_excludes_creature(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: Scheme is a positive type — same conservative `false` as
+        // Battle (a scheme filter is not a creature exclusion, and `Non`'s
+        // duality reads the sibling predicate below).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -499,6 +505,8 @@ fn type_filter_matches_all_creatures(tf: &TypeFilter) -> bool {
         | TypeFilter::Planeswalker
         | TypeFilter::Battle
         | TypeFilter::Kindred
+        // CR 314.1: not every creature is a scheme (none is).
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Subtype(_) => false,
@@ -920,7 +928,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         // CR 701.21a: sacrificing produces sac + LTB (+ dies for creature filters,
         // §3.5) — same polarity as the 4a `AbilityCost::Sacrifice` cost arm.
         Effect::Sacrifice { target, count, .. } => {
-            let (a, mag) = count_seed(count);
+            let (a, mag) = count.count_expr().map_or((1, AxisMagnitude::Unbounded), count_seed);
             b.add_sac(a, mag);
             b.add_ltb(a, mag);
             if sac_produces_death(target) {
@@ -995,6 +1003,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         Effect::StartYourEngines { .. }
         | Effect::ChangeSpeed { .. }
         | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::ResumeDamageBatch { .. }
         | Effect::Pump { .. }
         | Effect::PairWith { .. }
         | Effect::Regenerate { .. }
@@ -1110,6 +1119,10 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::AbandonScheme
+        // CR 701.32b: re-firing projects no axis (no modeled zone change,
+        // mana, or counters) — the re-fired triggers project as their own
+        // resolutions, not this node's.
+        | Effect::SetSchemeInMotion { .. }
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
@@ -1297,7 +1310,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         | TriggerMode::ExcessDamageAll
         | TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
+        | TriggerMode::AbilityTriggered { .. }
         | TriggerMode::Countered
         | TriggerMode::YouAttackUnblocked
         | TriggerMode::AttackerBlocked
@@ -2019,8 +2032,7 @@ fn fold_one_of(acc: &mut NodeAcc, costs: &[AbilityCost]) {
 
 /// CR 106.1+: enumerate every nonzero [`ResourceVector`] component of `net` as a
 /// signed `(ResourceAxis, amount)` pair — the input to the produces/requires
-/// derivation. Adding a `ResourceVector` field without extending this walk is a
-/// compile error via [`AxisKey::from`]'s exhaustiveness.
+/// derivation.
 fn net_axis_components(net: &ResourceVector) -> Vec<(ResourceAxis, i64)> {
     let mut out = Vec::new();
     for (i, &n) in net.mana.iter().enumerate() {
@@ -3228,6 +3240,7 @@ mod tests {
     }
     fn token(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Servo".into(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -3248,7 +3261,7 @@ mod tests {
     fn sacrifice(target: TargetFilter) -> Effect {
         Effect::Sacrifice {
             target,
-            count: fixed(1),
+            count: fixed(1).into(),
             min_count: 0,
         }
     }
@@ -4433,6 +4446,19 @@ mod tests {
         assert_eq!(
             trigger_axis(&TriggerDefinition::new(TriggerMode::LifeLost)),
             Some(AxisKey::Life)
+        );
+    }
+
+    /// CR 107.14: Engine B's seat-free graph key reads every seat's energy axis as the one
+    /// player-energy counter key its own nets accumulate.
+    #[test]
+    fn a_seats_energy_axis_keys_as_the_player_energy_counter() {
+        assert_eq!(
+            AxisKey::from(&ResourceAxis::Energy(PlayerId(3))),
+            AxisKey::from(&ResourceAxis::Counter(
+                CounterClass::Energy,
+                ObjectClass::Player
+            ))
         );
     }
 }

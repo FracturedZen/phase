@@ -168,6 +168,7 @@ pub fn gate_candidates(
             candidate,
             payment_successor: None,
             payment_step: None,
+            payment_trace: None,
         })
         .collect();
     gate_prepared_candidates(state, decision, prepared, ai_player, config, context)
@@ -552,10 +553,11 @@ fn cast_has_relevant_payoff(
         .get(&caster)
         .map_or(0, |spells| spells.len());
 
-    // CR 502.2a: Day/Night counts the active TEAM's spells. The day/night
-    // transition reducer currently keys this on `active_player`, so do not
-    // treat any shared-team boundary as proven until that separate authority
-    // becomes team-aware.
+    // CR 502.2a + CR 731.2a + CR 731.2b: with shared team turns, Day/Night reads the most
+    // spells any one member of the active team cast (`day_night::record_previous_turn`).
+    // Whether this cast moves that across a threshold depends on the caster's team and the
+    // teammates' own counts, which this narrow check does not model, so a cast by a player
+    // with a teammate is never treated as proven unchanged.
     let caster_has_teammate = !engine::game::players::teammates(state, caster).is_empty();
     if state.day_night.is_some() && caster_has_teammate {
         return true;
@@ -1105,8 +1107,17 @@ fn trigger_is_proven_irrelevant(
         .valid_source
         .as_ref()
         .is_some_and(|filter| target_filter_is_proven_disjoint_from_spell(filter, spell));
+    // CR 701.9a + CR 702.29c: Both self hooks require discarding their source from hand.
+    // A battlefield source is already outside hand. The off-zone scan only visits
+    // a definition in hand if it functions there.
+    let self_discard_outside_hand = matches!(
+        definition.mode,
+        TriggerMode::Cycled | TriggerMode::Discarded
+    ) && definition.valid_card == Some(TargetFilter::SelfRef)
+        && !trigger_definition_functions_in_zone(definition, Zone::Hand);
     disjoint_cast_hook
         || disjoint_target_hook
+        || self_discard_outside_hand
         || matches!(definition.mode, TriggerMode::Attacks)
         || (matches!(definition.mode, TriggerMode::ChangesZone)
             && definition.zone_change_clauses.is_empty()
@@ -1155,6 +1166,7 @@ fn type_filter_is_proven_disjoint_from_spell(
         TypeFilter::Planeswalker => lacks(CoreType::Planeswalker),
         TypeFilter::Battle => lacks(CoreType::Battle),
         TypeFilter::Kindred => lacks(CoreType::Kindred),
+        TypeFilter::Scheme => lacks(CoreType::Scheme),
         TypeFilter::Permanent => !spell.card_types.core_types.iter().any(|card_type| {
             matches!(
                 card_type,
@@ -2252,6 +2264,7 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use engine::types::ability::TurnWindow;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
         CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
@@ -2293,6 +2306,16 @@ mod tests {
 
     fn funded_zero_congregate_state() -> (GameState, ObjectId) {
         let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), congregate)
+    }
+
+    fn add_funded_congregate(scenario: &mut GameScenario) -> ObjectId {
         scenario.at_phase(Phase::PreCombatMain);
         let congregate = scenario
             .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE_ORACLE)
@@ -2303,12 +2326,7 @@ mod tests {
             .id();
         scenario.with_mana_pool(P0, pooled_mana(ManaType::Colorless, 3));
         scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
-        let mut runner = scenario.build();
-        let state = runner.state_mut();
-        state.active_player = P0;
-        state.priority_player = P0;
-        state.waiting_for = WaitingFor::Priority { player: P0 };
-        (state.clone(), congregate)
+        congregate
     }
 
     fn funded_zero_harvest_state() -> (GameState, ObjectId) {
@@ -2346,9 +2364,10 @@ mod tests {
 
     fn spells_cast_this_turn() -> QuantityExpr {
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         }
     }
@@ -2940,6 +2959,126 @@ mod tests {
         outcome.assert_life_delta(P0, 2);
     }
 
+    const TITANOTH_REX_ORACLE: &str = "Trample\nCycling {1}{G} ({1}{G}, Discard this card: Draw a card.)\nWhen you cycle this card, put a trample counter on target creature you control.";
+
+    fn assert_zero_congregate_ignores_self_discard(
+        state: &GameState,
+        congregate: ObjectId,
+        source: ObjectId,
+        mode: TriggerMode,
+    ) {
+        let object = &state.objects[&source];
+        assert!(spell_identity_is_available_to_caster(state, P0, object));
+        assert!(active_trigger_definitions(state, object).any(|active| {
+            let definition = active.definition;
+            definition.mode == mode
+                && definition.valid_card == Some(TargetFilter::SelfRef)
+                && trigger_definition_functions_in_zone(definition, object.zone)
+        }));
+        assert!(
+            !zero_cast_is_retained(state, congregate),
+            "known-zero Congregate must be rejected with {} in {:?}",
+            object.name,
+            object.zone
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_exiled_titanoth_rex() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let rex = scenario
+            .add_creature_from_oracle(P1, "Titanoth Rex", 11, 11, TITANOTH_REX_ORACLE)
+            .id();
+        let swords = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Swords to Plowshares",
+                true,
+                "Exile target creature. Its controller gains life equal to its power.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::White, 1));
+        let mut runner = scenario.build();
+        let outcome = runner.cast(swords).target_objects(&[rex]).resolve();
+        outcome.assert_zone(&[rex], Zone::Exile);
+        outcome.assert_life_delta(P1, 11);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { player } if *player == P0
+        ));
+        assert!(outcome.state().stack.is_empty());
+        assert!(outcome.state().battlefield.is_empty());
+        assert_zero_congregate_ignores_self_discard(
+            outcome.state(),
+            congregate,
+            rex,
+            TriggerMode::Cycled,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_graveyard_titanoth_rex() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let rex = scenario
+            .add_creature_to_graveyard(P0, "Titanoth Rex", 11, 11)
+            .from_oracle_text(TITANOTH_REX_ORACLE)
+            .id();
+        let runner = scenario.build();
+        assert_zero_congregate_ignores_self_discard(
+            runner.state(),
+            congregate,
+            rex,
+            TriggerMode::Cycled,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_ignores_graveyard_titanbones() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let titanbones = scenario
+            .add_creature_to_graveyard(P0, "Titanbones, Towering Heart", 4, 3)
+            .from_oracle_text("Reach\nWhenever you gain life, put two +1/+1 counters on Titanbones.\nWhen you discard this card, you gain 3 life.")
+            .id();
+        let runner = scenario.build();
+        assert_zero_congregate_ignores_self_discard(
+            runner.state(),
+            congregate,
+            titanbones,
+            TriggerMode::Discarded,
+        );
+    }
+
+    #[test]
+    fn zero_congregate_is_retained_for_graveyard_cast_trigger() {
+        let mut scenario = GameScenario::new();
+        let congregate = add_funded_congregate(&mut scenario);
+        let phoenix = scenario
+            .add_creature_to_graveyard(P0, "Managorger Phoenix", 2, 2)
+            .from_oracle_text("Flying\nManagorger Phoenix can't block.\nWhenever you cast a spell, if Managorger Phoenix is in your graveyard, put a flame counter on Managorger Phoenix for each {R} in that spell's mana cost. If Managorger Phoenix has five or more flame counters on it, return it to the battlefield and it perpetually gets +1/+1.")
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state();
+        let object = &state.objects[&phoenix];
+        assert!(active_trigger_definitions(state, object).any(|active| {
+            active.definition.mode == TriggerMode::SpellCast
+                && trigger_definition_functions_in_zone(active.definition, object.zone)
+        }));
+        assert!(has_relevant_functioning_trigger(state, congregate));
+        assert!(zero_cast_is_retained(state, congregate));
+        let committed = runner.cast(congregate).target_player(P0).commit();
+        assert!(committed.state().stack.iter().any(|entry| {
+            entry.source_id == phoenix
+                && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+        }));
+    }
+
     #[test]
     fn zero_cast_day_night_thresholds_are_paired() {
         for (day_night, prior_casts) in [(DayNight::Day, 0), (DayNight::Night, 1)] {
@@ -2990,7 +3129,7 @@ mod tests {
 
             assert!(
                 cast_has_relevant_payoff(&state, PlayerId(1), None),
-                "a nonactive teammate's {day_night:?} boundary is retained until the transition authority is team-aware"
+                "a nonactive teammate's {day_night:?} boundary is retained: this check does not model the team's counts"
             );
 
             state.day_night = None;
@@ -3119,9 +3258,10 @@ mod tests {
     fn zero_cast_dynamic_object_option_and_permission_consumers_are_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let history = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let option_spell = create_object(
@@ -3733,9 +3873,10 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     target: TargetFilter::Controller,
@@ -3762,9 +3903,10 @@ mod tests {
     fn spell_count_after_this_cast() -> QuantityExpr {
         QuantityExpr::Difference {
             left: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             right: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -4265,9 +4407,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -4421,9 +4564,10 @@ mod tests {
             .push(CastingRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -4586,9 +4730,10 @@ mod tests {
 
         let hook = add_battlefield_trigger(state, 91_004, TriggerMode::Attacks);
         let cast_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         {
@@ -4844,9 +4989,10 @@ mod tests {
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
         let spell_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                window: TurnWindow::ThisTurn,
             },
         };
         let object = state
@@ -5440,7 +5586,7 @@ mod tests {
         let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
         static_definition.condition = Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(TargetFilter::Or {
                         filters: vec![
@@ -5448,6 +5594,7 @@ mod tests {
                             TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         ],
                     }),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -5509,9 +5656,10 @@ mod tests {
                 .condition(
                     engine::types::ability::ReplacementCondition::OnlyIfQuantity {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                         comparator: Comparator::GE,
@@ -5575,9 +5723,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -5618,7 +5767,7 @@ mod tests {
                 shards: vec![ManaCostShard::Blue],
             },
             spell_filter: None,
-            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+            dynamic_count: Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Or {
                     filters: vec![
@@ -5626,6 +5775,7 @@ mod tests {
                         TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                     ],
                 }),
+                window: TurnWindow::ThisTurn,
             }),
             reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
@@ -6938,9 +7088,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for amount in [nested_filter_x, spell_ledger] {
@@ -10279,6 +10430,13 @@ mod tests {
         runner.act(target.unwrap()).unwrap();
         let mut paid = false;
         while !runner.state().stack.is_empty() {
+            // CR 805.5b: the holding team passes together. Passing only the
+            // representative stalls a shared-team window, so the stack would
+            // never empty here.
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                let _ = runner.pass_holding_team();
+                continue;
+            }
             let state = runner.state();
             let action = match &state.waiting_for {
                 WaitingFor::UnlessPayment { player, .. } if *player == P0 => {
@@ -11845,12 +12003,33 @@ mod tests {
             let mut state = scenario.build().state().clone();
             activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
             let entry = state.stack.back().expect("Psionic Entity's ability");
-            assert!(
-                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
-                    .iter()
-                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
-                "reach guard: the 3-damage node acts on the Entity"
-            );
+            let reaches = engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry);
+            if protected {
+                // CR 702.16e via the candidate authority (Matt R15): the
+                // Entity's own protection proposes into the replacement
+                // pipeline, so the stack_reach replacement query claims the
+                // 3-damage node and it acts on nothing — while the
+                // 2-to-player node still reaches P0.
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Player(P0)]),
+                    "protected: reach is intact for the 2-to-player node"
+                );
+                assert!(
+                    reaches
+                        .iter()
+                        .all(|reach| reach.acted_on != vec![TargetRef::Object(entity)]),
+                    "protected: the 3-damage node is claimed by protection"
+                );
+            } else {
+                assert!(
+                    reaches
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                    "reach guard: the 3-damage node acts on the Entity"
+                );
+            }
             assert_eq!(will_target_die_from_stack(&state, entity), !protected);
             assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
         }

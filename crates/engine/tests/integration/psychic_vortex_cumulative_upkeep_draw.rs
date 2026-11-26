@@ -1720,7 +1720,7 @@ fn a_repeated_draw_cost_on_an_empty_library_is_paid_then_loses() {
     );
     let lost = event_index(
         &result.events,
-        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+        |event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0),
     )
     .expect("CR 121.4: the player who drew from an empty library loses");
     assert!(paid < lost, "the payment completes before the loss");
@@ -1812,7 +1812,7 @@ fn declining_every_skip_offers_each_prompt_pays_then_loses() {
     .expect("the paid epilogue resolved the upkeep ability");
     let lost = event_index(
         &result.events,
-        |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0),
+        |event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0),
     )
     .expect("CR 121.4: P0 drew from an empty library and loses");
     assert!(paid < lost, "the payment completes before the loss");
@@ -4379,6 +4379,78 @@ fn a_mana_upkeep_keeps_its_mana_window() {
     runner
         .act(GameAction::PayUnlessCost { pay: true })
         .expect("the tapped mana pays the upkeep");
+    assert_eq!(zone_of(&runner, remora), Zone::Battlefield);
+}
+
+/// Ashnod's Altar, verbatim Oracle text.
+const ASHNODS_ALTAR_ORACLE: &str = "Sacrifice a creature: Add {C}{C}.";
+
+/// CR 605.3a + CR 702.24a: Mystic Remora's "Cumulative upkeep {1}" asks for
+/// mana, so a mana ability with a sacrifice cost is admitted at its prompt:
+/// Ashnod's Altar ("Sacrifice a creature: Add {C}{C}.") is offered and
+/// activated, Grizzly Bears is sacrificed to it, and the {C}{C} it adds pays
+/// the upkeep. The control for the manaless-payment refusals of the same
+/// activation (`scoped_unless_payer_per_iteration.rs`).
+#[test]
+fn a_mana_upkeep_admits_a_sacrifice_mana_ability() {
+    let (mut runner, remora, (altar, bears)) = upkeep_board(
+        "Mystic Remora",
+        MYSTIC_REMORA_ORACLE,
+        0,
+        &STAGED_LIBRARY,
+        |scenario| {
+            let altar = scenario
+                .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR_ORACLE)
+                .id();
+            (altar, scenario.add_creature(P0, "Grizzly Bears", 2, 2).id())
+        },
+    );
+    advance_through_upkeep(&mut runner);
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                player: P0,
+                cost: AbilityCost::Mana { .. },
+                ..
+            }
+        ),
+        "reach guard: Mystic Remora's upkeep asks for mana: {:?}",
+        runner.state().waiting_for
+    );
+    let (flat, _, by_object) = engine::ai_support::legal_actions_full(runner.state());
+    assert!(
+        flat.iter()
+            .chain(by_object.values().flatten())
+            .any(|action| matches!(
+                action,
+                GameAction::ActivateAbility { source_id, .. } if *source_id == altar
+            )),
+        "Ashnod's Altar's mana ability is offered at a mana payment"
+    );
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("CR 605.3a: a mana ability may be activated when an effect asks for mana");
+    if matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }) {
+        runner
+            .act(GameAction::SelectCards { cards: vec![bears] })
+            .expect("Grizzly Bears is sacrificed to the Altar");
+    }
+    assert_eq!(zone_of(&runner, bears), Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(ManaType::Colorless),
+        2,
+        "the Altar added {{C}}{{C}}"
+    );
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the Altar's mana pays the upkeep");
     assert_eq!(zone_of(&runner, remora), Zone::Battlefield);
 }
 

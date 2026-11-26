@@ -401,9 +401,19 @@ fn resolve_choice(
     // none of its `waiting_for` arms, and its parked-cost-move fallback returns
     // `NotAffiliated` when no root is parked), so this fast path can never steal
     // a window the payment witness below owns.
-    if let WaitingFor::Priority { player } = state.waiting_for {
-        if priority::pass_priority_structurally_legal(state, player) {
-            return Ok((acting, GameAction::PassPriority, false, None));
+    if let WaitingFor::Priority { .. } = state.waiting_for {
+        // CR 805.5b: pass the first unpassed decision owner — re-issuing the
+        // parked holder's pass never advances a shared team and eddies to the
+        // step cap. Individual seats are their own whole team, so the holder
+        // keeps its fast path exactly.
+        if let Some(owner) = turn_control::decision_owners(state)
+            .into_iter()
+            .find(|owner| {
+                !state.priority_passes.contains(owner)
+                    && priority::pass_priority_structurally_legal(state, *owner)
+            })
+        {
+            return Ok((owner, GameAction::PassPriority, false, None));
         }
     }
 
@@ -589,37 +599,15 @@ fn resolve_choice(
             .ok_or_else(|| BailReason::NoLegalAction {
                 waiting_for: format!("{:?}", state.waiting_for),
             })?,
-        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
-        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
-        // way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => GameAction::RespondToShortcut {
-            response: engine::ai_support::smart_shortcut_response(state, *player),
-        },
-        WaitingFor::RespondToPrecastCopyShortcut {
-            player,
-            epoch,
-            breakpoint_ids,
-            ..
-        } => {
-            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
-                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                engine::analysis::loop_check::ShortcutResponse::Accept => {
-                    engine::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            GameAction::PrecastCopyShortcut {
-                epoch: *epoch,
-                response,
-            }
+        // CR 732.2b: a rollout takes the conservative answer to a shortcut proposal.
+        WaitingFor::RespondToShortcut { .. } | WaitingFor::RespondToPrecastCopyShortcut { .. } => {
+            actions
+                .iter()
+                .find(|action| crate::search::is_shortcut_accept(action))
+                .cloned()
+                .ok_or_else(|| BailReason::NoLegalAction {
+                    waiting_for: format!("{:?}", state.waiting_for),
+                })?
         }
 
         _ => {
@@ -764,6 +752,7 @@ pub(crate) mod projection_fixtures {
     use super::*;
     use engine::game::scenario::GameScenario;
     use engine::game::zones::create_object;
+    use engine::types::format::FormatConfig;
     use engine::types::identifiers::CardId;
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
@@ -933,6 +922,48 @@ pub(crate) mod projection_fixtures {
         // authority.
         state.combat = Some(engine::game::combat::CombatState::default());
         state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        state
+    }
+
+    /// A 2HG state at the AI team's precombat main from which `project_to`
+    /// must cross the shared-team priority windows to
+    /// `ProjectionHorizon::OpponentAttackersDeclared` on P2's turn, with
+    /// `ai_player = P0` and `target_opponent = P2`.
+    ///
+    /// Traversal: P0 passes, P1 passes (the team window completes instead of
+    /// eddying on P0), empty-hand phases advance, P2's turn runs its draw
+    /// from a stocked library, and P2 declares its bear. Without the
+    /// per-owner fast path the first window re-passes P0 256 times and bails
+    /// `StepCapExceeded`.
+    ///
+    /// Libraries are stocked for all four seats: the traversal crosses the
+    /// P2-team draw step, and an empty library there would end the game
+    /// (CR 704.5b) and bail `GameOverDuringProjection` — a red positive arm
+    /// for the wrong reason. P0's team holds no creatures, so its combat
+    /// skips declaration (CR 508.8) without policy branches of its own.
+    pub(crate) fn two_headed_giant_precombat_fixture() -> GameState {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        state.stack.clear();
+        state.creatures_attacked_this_turn.clear();
+        spawn_vanilla_creature(&mut state, PlayerId(2), "Projection Bear", 2, 2);
+        for player in [0u8, 1, 2, 3] {
+            for i in 0..5u64 {
+                create_object(
+                    &mut state,
+                    CardId(900 + u64::from(player) * 10 + i),
+                    PlayerId(player),
+                    format!("Filler {i}"),
+                    Zone::Library,
+                );
+            }
+        }
         state
     }
 
@@ -1254,6 +1285,54 @@ mod tests {
         );
     }
 
+    /// CR 805.5b: the projection fast path passes each unpassed team member
+    /// in turn instead of re-issuing the parked holder's pass to the step
+    /// cap, and `project_to` crosses a shared-team window to its horizon
+    /// with every living member recorded passed.
+    #[test]
+    fn project_to_crosses_a_shared_team_window_with_every_member_passed() {
+        let base = projection_fixtures::two_headed_giant_precombat_fixture();
+
+        // Fast-path unit level: the second choice passes the teammate, not P0
+        // again — re-issuing P0's pass is the eddy this test kills.
+        let mut state = base.clone();
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("a parked team window offers a pass");
+        assert_eq!(seat, PlayerId(0));
+        assert!(matches!(action, GameAction::PassPriority));
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the holder's pass applies");
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::Priority { player } if player == PlayerId(0)
+            ),
+            "the team must still hold priority after one pass, got {:?}",
+            state.waiting_for
+        );
+        let (seat, action, _, _) = resolve_choice(&state, PlayerId(0), PlayerId(2))
+            .expect("the teammate still owes a pass");
+        assert_eq!(
+            seat,
+            PlayerId(1),
+            "the fast path must advance to the unpassed teammate, not re-pass P0"
+        );
+        let submitter = turn_control::authorized_submitter_for_player(&state, seat);
+        apply_interaction_for_simulation(&mut state, submitter, seat, action)
+            .expect("the teammate's pass applies");
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+
+        // End to end: the horizon traversal completes instead of eddy-bailing.
+        projection_fixtures::assert_traverses_to(
+            &base,
+            PlayerId(0),
+            PlayerId(2),
+            ProjectionHorizon::OpponentAttackersDeclared,
+        );
+    }
+
     #[test]
     fn projection_declines_optional_loop_shortcut_from_legal_actions() {
         let mut state = GameState::new_two_player(42);
@@ -1271,7 +1350,6 @@ mod tests {
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
-            road: engine::analysis::loop_check::OfferRoad::Ring,
             counted_take: Default::default(),
             period: Default::default(),
         };
@@ -1771,5 +1849,57 @@ mod tests {
             ..k1
         };
         assert_ne!(k1, k2);
+    }
+
+    /// R6 (projection leg). A rollout answers a shortcut proposal with the Accept although the
+    /// Shorten is issued: on the Cauldron Familiar board P1 holds Relic of Progenitus, so its
+    /// place-1 Shorten is admitted.
+    #[test]
+    fn a_rollout_accepts_a_shortcut_proposal() {
+        use engine::analysis::decision_template::IterationCount;
+        use engine::analysis::loop_check::ShortcutResponse;
+        use std::io::Read;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/fixtures/familiar_relic_turn5_2p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).expect("the Familiar dump opens"))
+            .read_to_string(&mut json)
+            .expect("the Familiar dump inflates");
+        let json = engine::types::game_state::record_captured_onsets_json(&json);
+        let document: serde_json::Value =
+            serde_json::from_str(&json).expect("the Familiar dump is JSON");
+        let mut state = serde_json::from_value::<engine::types::game_state::PersistedGameState>(
+            document["gameState"].clone(),
+        )
+        .expect("the Familiar dump decodes")
+        .into_game_state()
+        .expect("the Familiar dump restores");
+        engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(12),
+                template: None,
+            },
+        )
+        .expect("P0 declares the shortcut");
+        let accept = GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        };
+        assert_eq!(
+            legal_actions(&state),
+            vec![
+                accept.clone(),
+                GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Shorten { at_iteration: 1 },
+                },
+            ],
+            "reach-guard: the Shorten is issued"
+        );
+
+        let (seat, action, _, _) =
+            resolve_choice(&state, PlayerId(1), PlayerId(0)).expect("the window has answers");
+        assert_eq!((seat, action), (PlayerId(1), accept));
     }
 }

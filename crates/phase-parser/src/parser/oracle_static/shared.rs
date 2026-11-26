@@ -1,14 +1,14 @@
 // CR 604 / CR 613 — shared static parser infrastructure.
 
-use super::anthem::rewrite_self_pronoun_subject;
+use super::anthem::{rewrite_self_pronoun_subject, PrintedSubject};
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::types::ability::BlockPairDirection;
+use crate::types::ability::{BlockPairDirection, PlayerScope};
 use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
-use nom::combinator::{map_opt, not, success, value};
+use nom::combinator::{map_opt, not, peek, success, value};
 use nom::multi::many1;
 
 use crate::parser::oracle_nom::error::oracle_err;
@@ -452,7 +452,12 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
     let predicate = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))?;
 
-    parse_continuous_gets_has(predicate.original, affected, description)
+    parse_continuous_gets_has(
+        predicate.original,
+        affected,
+        description,
+        PrintedSubject::Other,
+    )
 }
 
 /// CR 509.1c + CR 604.1 + CR 611.3a: the inverted `"As long as <cond>, <self-ref>
@@ -904,7 +909,11 @@ impl GrantedCastKeywordKind {
 /// pass binds each one once the affected set is known. Binding is **per
 /// quantity**, keyed on the scope the parser recorded for that individual
 /// counter read, so a static that reads counters on `~` AND on its recipient
-/// keeps both referents: the explicit `Source` read is never touched.
+/// keeps both referents: the explicit `Source` read is never touched. The
+/// counter-kind census of a pronoun ("for each kind of counter on it") reaches
+/// this pass as a `SelfRef` placeholder — from the anthem / continuous route's
+/// deferred entry, or from a combat tax on the source permanent itself — and is
+/// bound by the same pass (see `bind_anaphoric_counter_ref`).
 ///
 /// This is the quantity-axis twin of `StaticCondition::RecipientHasCounters`
 /// (the recipient analog of `HasCounters` on the condition axis) — the two
@@ -970,11 +979,37 @@ fn bind_anaphoric_counters_in_condition(cond: &mut StaticCondition, bound: Objec
 
 /// CR 608.2k: The leaf binder — retargets a deferred counter anaphor and leaves
 /// every other `QuantityRef` and every already-bound scope untouched.
+///
+/// Two pronoun forms reach it. The counter COUNT ("for each +1/+1 counter on
+/// it") parks the pronoun on `ObjectScope::Anaphoric`. The counter-KIND census
+/// ("for each kind of counter on it/them") arrives as `SelfRef`: the
+/// placeholder the anthem / continuous route's deferred entry
+/// (`oracle_quantity::parse_for_each_clause_deferred`) emits for a pronoun of
+/// either number, or a combat tax's census, which `parse_combat_tax_body` reads
+/// only for a tax on the source permanent itself (so it stays `SelfRef`). Every
+/// other entry declines the pronoun census, and an explicit "~" is declined by
+/// every census entry.
+///
+/// CR 611.3a + CR 613.4c: a self-scoped static keeps `SelfRef` (the pronoun
+/// names the source). In a per-recipient static the pronoun names each affected
+/// object, so the census is rebound to the identity filter that follows the
+/// recipient (`FilterProp::Another` is recipient-relative while a recipient is
+/// bound, `game::filter`). The rebound filter is no longer `SelfRef`, so a second
+/// lowering pass leaves it untouched.
 fn bind_anaphoric_counter_ref(qty: &mut QuantityRef, bound: ObjectScope) {
-    if let QuantityRef::CountersOn { scope, .. } = qty {
-        if *scope == ObjectScope::Anaphoric {
+    match qty {
+        QuantityRef::CountersOn { scope, .. } if *scope == ObjectScope::Anaphoric => {
             *scope = bound;
         }
+        QuantityRef::DistinctCounterKindsAmong { filter }
+            if bound == ObjectScope::Recipient && matches!(filter, TargetFilter::SelfRef) =>
+        {
+            *filter =
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }]));
+        }
+        _ => {}
     }
 }
 
@@ -1044,6 +1079,8 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Scalar designation payload: no quantity to extract.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -1059,15 +1096,14 @@ fn continuous_modification_dynamic_quantity_mut(
 
 /// CR 608.2k: Bind every **deferred** counter anaphor in a dynamic magnitude to
 /// `bound`. Mirrors `rebind_anaphoric_object_scope` (`oracle_effect/mod.rs`),
-/// the effect-side authority for the same pronoun, and touches only
-/// `ObjectScope::Anaphoric` — an explicit `Source` (`~`) or `Target` ("that
-/// creature") counter read in the same expression keeps its own referent.
+/// the effect-side authority for the same pronoun, and touches only the pronoun
+/// forms `bind_anaphoric_counter_ref` names — an explicit `Source` (`~`) or
+/// `Target` ("that creature") counter read in the same expression keeps its own
+/// referent.
 fn bind_anaphoric_counters(expr: &mut QuantityExpr, bound: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::CountersOn { scope, .. },
-        } if *scope == ObjectScope::Anaphoric => *scope = bound,
-        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => bind_anaphoric_counter_ref(qty, bound),
+        QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -1220,6 +1256,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SourceIsBlocking
             | StaticCondition::SourceIsBlocked
             | StaticCondition::IsMonarch { .. }
+            | StaticCondition::IsDefendingPlayer { .. }
             | StaticCondition::HasBoon { .. }
             | StaticCondition::IsInitiative
             | StaticCondition::NoMonarch
@@ -1229,7 +1266,9 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
+            | StaticCondition::PlayerAttackedPlayer { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -1237,7 +1276,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -1344,6 +1383,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -1383,6 +1423,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::PtComparison { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
+        | FilterProp::CardTypeCount { .. }
         | FilterProp::ManaSymbolCount { .. }
         | FilterProp::HasSupertype { .. }
         | FilterProp::IsChosenCreatureType
@@ -4321,16 +4362,70 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// target-anaphoric in spell bodies (Awaken the Sleeper), and a blanket arm would
 /// mis-bind every attached-subject static. See
 /// `parse_contraction_source_state_condition`.
+///
+/// `subject` is the host line's printed subject. It does not widen the SelfRef
+/// gate above; it only narrows which rewrite arms run inside it (the plural
+/// "they haven't dealt … damage yet" arm needs [`PrintedSubject::SourceNamed`]),
+/// because several callers hardcode `affected: SelfRef` for any subject.
 pub(crate) fn parse_affected_scoped_static_condition(
     text: &str,
     affected: Option<&TargetFilter>,
+    subject: PrintedSubject,
 ) -> Option<StaticCondition> {
     let text = text.trim().trim_end_matches('.');
     if matches!(affected, Some(TargetFilter::SelfRef)) {
-        parse_static_condition(&rewrite_self_pronoun_subject(text))
+        parse_static_condition(&rewrite_self_pronoun_subject(text, subject))
     } else {
         parse_static_condition(text)
     }
+}
+
+/// CR 611.3a: classify a static's host line by its printed subject — the ONE
+/// derivation of [`PrintedSubject`]. `SourceNamed` exactly when the line opens
+/// with the source's own self-reference vocabulary (`~` or a
+/// `SELF_REF_TYPE_PHRASES` entry such as "this creature" / "this Aura")
+/// followed by a word boundary that completes the subject; everything else
+/// ("enchanted creature", "creatures you control", "each artifact", a bare
+/// "it", "~'s …") is `Other`. A self-reference followed by any subject
+/// connective is not a complete subject: a coordinator (`subject_list_separator`
+/// or a bare " or ") or a connective (" together with ", " as well as ",
+/// " plus ", " along with ") makes it a compound ("~ and enchanted creature",
+/// "this creature or each other creature"), which is `Other`, so the plural
+/// "they" gate is never bound to the source alone. Coordinators inside the
+/// predicate ("~ can't attack or block", "~ has flying and haste") are not
+/// adjacent to the self-reference and stay `SourceNamed`.
+pub(crate) fn printed_subject(tp: &TextPair<'_>) -> PrintedSubject {
+    let mut source_named = (
+        crate::parser::oracle_nom::duration::parse_self_reference_subject,
+        peek(tag::<_, _, OracleError<'_>>(" ")),
+        not(peek(alt((
+            subject_list_separator,
+            value((), tag(" or ")),
+            value((), tag(" together with ")),
+            value((), tag(" as well as ")),
+            value((), tag(" plus ")),
+            value((), tag(" along with ")),
+        )))),
+    );
+    match source_named.parse(tp.lower.trim_start()) {
+        Ok(_) => PrintedSubject::SourceNamed,
+        Err(_) => PrintedSubject::Other,
+    }
+}
+
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`.
+/// Chained Throatseeker's printed "can't attack unless defending player is
+/// poisoned" is a valid attack restriction (CR 508.1c), but the engine does
+/// not yet evaluate a poison condition against each candidate defender during
+/// attack legality, so such a rider stays `Unrecognized` as an honest gap.
+fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
+    matches!(
+        cond,
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::DefendingPlayer
+        }
+    ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
+        || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
 }
 
 /// Parse the trailing " unless [condition]" clause of a combat-restriction
@@ -4349,13 +4444,26 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        // CR 508.1c + CR 122.1f: "defending player is poisoned" is a valid attack
+        // restriction, but candidate-defender attack-legality evaluation does not
+        // support a poison condition yet. Keep the rider `Unrecognized` so the
+        // restriction remains an honest gap.
+        if is_defending_player_poisoned_for_attack_restriction(&condition) {
+            return Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: format!("unless {original}"),
+                }),
+            });
+        }
         return Some(condition);
     }
     // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when
     // <condition> is false — fall back to the shared static-condition parser and
     // negate, so a recognized inner condition (e.g. Heroic Defiance's most-common-
     // color check) gates the grant instead of being swallowed as Unrecognized.
-    if let Some(condition) = parse_affected_scoped_static_condition(original, affected) {
+    if let Some(condition) =
+        parse_affected_scoped_static_condition(original, affected, printed_subject(tp))
+    {
         return Some(StaticCondition::Not {
             condition: Box::new(condition),
         });
@@ -4630,7 +4738,7 @@ pub(crate) fn parse_if_static_condition(
     affected: Option<&TargetFilter>,
 ) -> Option<StaticCondition> {
     let condition_text = split_trailing_if_condition_tp(tp)?;
-    parse_affected_scoped_static_condition(condition_text, affected)
+    parse_affected_scoped_static_condition(condition_text, affected, printed_subject(tp))
 }
 
 /// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
@@ -4659,7 +4767,7 @@ pub(crate) fn parse_as_long_as_static_condition(
         return None;
     }
     let (_, as_long_as_text) = tp.split_around(" as long as ")?;
-    parse_affected_scoped_static_condition(as_long_as_text.original, affected)
+    parse_affected_scoped_static_condition(as_long_as_text.original, affected, printed_subject(tp))
 }
 
 /// Result of the combat-tax nom parse.
@@ -7078,14 +7186,25 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
     // CR 508.1c + CR 310.5: " you or permanents you control" defends battles too,
     // so it is a distinct filter from " you or planeswalkers you control". Both
     // longer phrases precede the bare " you" (nom `alt` is leftmost-match).
+    // CR 508.1b + CR 310.5: the singular " you or a permanent you control"
+    // (Immortal Obligation) names the same defended set as " you or permanents
+    // you control".
     opt(alt((
-        value(
-            AttackTargetFilter::PlayerOrPermanents,
-            tag(" you or permanents you control"),
-        ),
-        value(
-            AttackTargetFilter::PlayerOrPlaneswalker,
-            tag(" you or planeswalkers you control"),
+        preceded(
+            tag(" you or "),
+            alt((
+                value(
+                    AttackTargetFilter::PlayerOrPermanents,
+                    (
+                        alt((tag("permanents"), tag("a permanent"))),
+                        tag(" you control"),
+                    ),
+                ),
+                value(
+                    AttackTargetFilter::PlayerOrPlaneswalker,
+                    tag("planeswalkers you control"),
+                ),
+            )),
         ),
         value(
             AttackTargetFilter::Planeswalker { subtype: None },

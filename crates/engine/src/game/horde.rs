@@ -1115,8 +1115,10 @@ fn reveal_library_token(
         source_id: card_id,
         controller: horde,
         attach_to: TokenHostRequest::NotRequested,
+        blocking_attacker: None,
     };
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: horde,
         spec: Box::new(spec),
         copy: None,
@@ -2738,7 +2740,8 @@ mod tests {
             state.objects[&first[0]]
                 .card_types
                 .subtypes
-                .contains(&"Orc".to_string()),
+                .iter()
+                .any(|i| i == "Orc"),
             "the amassed army is an Orc Army"
         );
         assert!(

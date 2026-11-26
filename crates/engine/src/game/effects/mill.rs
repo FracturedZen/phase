@@ -275,6 +275,7 @@ pub(crate) fn complete_mill_delivery(
     destination: Zone,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
+    let settled_from = events.len();
     let is_mill = is_mill_move(destination, &position);
     let mut moved = Vec::new();
     for object_id in cards {
@@ -297,7 +298,32 @@ pub(crate) fn complete_mill_delivery(
     // (such as Grenzo, Dungeon Warden; Cellar Door) can find them on both the
     // synchronous and resumed-after-replacement paths.
     state.last_zone_changed_ids = moved;
+    // CR 701.17c + CR 608.2c: the settling batch publishes its own results - the
+    // `Milled` it just emitted, never the rest of the action's buffer - into the
+    // tracked set a later clause of the instruction reads (a `player_scope`
+    // clause's detached tail, or the parked continuation's own chain). This is the
+    // one seam a mill reaches on the paused (CR 616.1) and unpaused path alike.
+    super::publish_settled_mill_to_continuation_reader(
+        state,
+        public_milled_results(&events[settled_from..]),
+    );
     BatchMoveResult::Done
+}
+
+/// CR 701.17c: the cards an effect that refers to milled cards can find — each
+/// `Milled` in `events` whose destination is a public zone ("as long as that
+/// zone is a public zone"). The caller passes the span its own batch emitted, so
+/// the selector never has to attribute events to a batch. The single authority
+/// for both the synchronous tracked-set harvest and the settling batch's own
+/// publication.
+pub(crate) fn public_milled_results(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::Milled { object_id, to, .. } if to.is_public() => Some(*object_id),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -332,6 +358,28 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 701.17c: only a milled card whose destination zone is public can be
+    /// found by an effect that refers to it. Synthetic events: no printed card
+    /// routes a milled card to a private zone.
+    #[test]
+    fn public_milled_results_keep_only_public_destinations() {
+        let milled = |id: u64, to: Zone| GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(id),
+            to,
+        };
+        let events = [
+            milled(1, Zone::Graveyard),
+            milled(2, Zone::Exile),
+            milled(3, Zone::Hand),
+            milled(4, Zone::Library),
+        ];
+        assert_eq!(
+            public_milled_results(&events),
+            vec![ObjectId(1), ObjectId(2)]
+        );
     }
 
     /// Every `GameEvent::Milled` in `events`, as `(player, object, destination)`.
@@ -411,6 +459,11 @@ mod tests {
     /// redirects, the first milled card surfaces a CR 616.1 ordering prompt, so
     /// the helper must return `false`, leave `state.waiting_for` set to that
     /// prompt, and park the undelivered tail.
+    ///
+    /// Since the live staged scheduler, every milled card is consulted before
+    /// any prompt appears and each holds its own ordering decision, so the
+    /// parked prompt is first P1's CR 101.4c choice of which card's decision
+    /// to make first; answering it publishes the per-card ordering choice.
     #[test]
     fn apply_mill_after_replacement_reports_per_card_pause_to_caller() {
         let mut state = GameState::new_two_player(42);
@@ -443,6 +496,7 @@ mod tests {
             );
         }
 
+        let milled: Vec<ObjectId> = state.players[1].library.iter().take(3).copied().collect();
         let mut events = Vec::new();
         let delivered = apply_mill_after_replacement(
             &mut state,
@@ -462,11 +516,15 @@ mod tests {
             !delivered,
             "a per-card CR 616.1 pause must be reported as a non-delivery (false)"
         );
-        assert!(
-            matches!(
-                state.waiting_for,
-                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
-            ),
+        // CR 101.4c + CR 616.1: the staged sweep consulted every milled card,
+        // so P1 holds one ordering decision per card and the parked prompt is
+        // P1's choice of which to make first.
+        assert_eq!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::ReplacementDecisionOrder {
+                player: PlayerId(1),
+                objects: milled.clone(),
+            },
             "the per-card ordering prompt must be parked in waiting_for"
         );
         assert!(
@@ -480,6 +538,31 @@ mod tests {
         // instrument failing to fire.
         assert!(library_departures(&events).is_empty());
         assert!(milled_events(&events).is_empty());
+
+        // The parked prompt is answerable: making the first card's decision
+        // first publishes that card's CR 616.1 ordering choice.
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::SelectCards {
+                cards: vec![milled[0]],
+            },
+        )
+        .expect("P1 makes the first milled card's decision first");
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "the first card's ordering choice is published, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state
+                .pending_replacement
+                .as_ref()
+                .and_then(|pending| pending.proposed.affected_object_id()),
+            Some(milled[0])
+        );
     }
 
     /// V8 — CR 701.17a: milling is a move toward the graveyard. `Effect::Mill`

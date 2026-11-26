@@ -402,6 +402,7 @@ fn jace_trigger_clause_parses_to_subtype_defended_restriction() {
                         ProhibitedActivity::Attack {
                             defended,
                             protected_player,
+                            protected_scope: None,
                         },
                     ..
                 },
@@ -1126,6 +1127,7 @@ fn jace_unbound_scoped_player_falls_back_to_controller() {
                     subtype: Some("Jace".to_string()),
                 },
                 protected_player: None,
+                protected_scope: None,
             },
         },
     };
@@ -1488,7 +1490,8 @@ fn jace_shared_combat_fires_once_per_opponent() {
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                // CR 805.5b: the holding team passes together.
+                if runner.pass_holding_team().is_err() {
                     break;
                 }
             }

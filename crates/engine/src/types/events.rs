@@ -15,7 +15,7 @@ use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
-use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
+use super::game_state::{InstructionLead, LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
 };
@@ -113,8 +113,8 @@ pub enum ManaTapState {
     FromTapTriggersResolved,
 }
 
-/// CR 605.4a: Records whether the triggered mana abilities coupled to one
-/// aggregate mana-ability production event have already resolved inline.
+/// CR 605.4a + CR 608.2p: Controls how a mana production event is offered
+/// to triggered mana abilities. Ordinary triggers can observe every state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaAbilityTriggerState {
     /// Coupled triggered mana abilities have not yet resolved.
@@ -122,11 +122,32 @@ pub enum ManaAbilityTriggerState {
     Pending,
     /// Coupled triggered mana abilities resolved inline during a payment.
     InlineResolved,
+    /// With loop detection off, only ordinary triggers may observe a triggered
+    /// mana ability’s production. This prevents new mana-trigger chains.
+    ObserversOnly,
 }
 
 impl ManaAbilityTriggerState {
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending)
+    }
+}
+
+/// CR 603.2c + CR 608.2p: One recipient event represents the whole mana
+/// ability resolution, regardless of how many players received its mana.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ManaResolutionShare {
+    /// An additional recipient's event or a payload recorded before totals.
+    #[default]
+    RecipientOnly,
+    /// CR 614.1a: Total mana added across all recipients after replacement.
+    WholeResolution { total: u32 },
+}
+
+impl ManaResolutionShare {
+    pub fn is_recipient_only(&self) -> bool {
+        matches!(self, Self::RecipientOnly)
     }
 }
 
@@ -227,7 +248,7 @@ impl ManaTapState {
     }
 
     /// Serde `skip_serializing_if` predicate — omit the default from the wire.
-    fn is_not_from_tap(&self) -> bool {
+    pub(crate) fn is_not_from_tap(&self) -> bool {
         matches!(self, ManaTapState::NotFromTap)
     }
 }
@@ -395,9 +416,12 @@ pub struct EventObjectSnapshot {
 /// moment immediately before its instruction.
 ///
 /// Deliberately not an `Option`: the absent case is a named policy. A payload
-/// saved before this field existed, or any event built without an instruction
-/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
-/// control-change trigger. It is never reconstructed from current state.
+/// saved before this field existed, any event built without an instruction
+/// capture, or a change a full layer evaluation derived on a board with no
+/// look-back control-change trigger to read it
+/// (`triggers::look_back_control_change_listener_exists`), is `Unrecorded`,
+/// and `Unrecorded` never authorizes a look-back control-change trigger. It is
+/// never reconstructed from current state.
 ///
 /// `Observed` holds only the key of its observation in
 /// `GameState::control_change_observations`. The observation itself (latched
@@ -435,6 +459,23 @@ pub struct ControlChangeObservation {
     /// against a doubler the instruction itself moved or removed.
     #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
     pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    /// CR 603.10 + CR 113.7a: for a change a full layer evaluation derived,
+    /// every functioning gain-side control-change watcher ("when you gain
+    /// control of ~"), with its controller, immediately AFTER the change. A
+    /// derived change is published at the next drain, after later instructions
+    /// of the same resolution may have moved its watcher (CR 608.2c), so its
+    /// gain-side triggers are collected from this latch and never from a later
+    /// board. `None` (an instruction-published change, or a payload saved
+    /// before this field): the gain side is an ordinary trigger, collected from
+    /// the board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_watchers: Option<std::sync::Arc<Vec<TriggerSourceContext>>>,
+    /// CR 603.2d + CR 603.10: the functioning trigger-doubling statics, with
+    /// their controllers, on the same post-change board `gain_watchers` was
+    /// latched on. A latched gain-side trigger is counted against these, not
+    /// against the board at publication (where a doubler may have left).
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub gain_doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
@@ -491,6 +532,8 @@ impl ControlChangeInstructionCapture {
                 subject: subject.clone(),
                 watchers: self.watchers.clone(),
                 doublers: self.doublers.clone(),
+                gain_watchers: None,
+                gain_doublers: std::sync::Arc::default(),
             })
     }
 }
@@ -526,6 +569,17 @@ pub struct ControlChangeLink {
     pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub published: std::collections::BTreeSet<ObjectId>,
+}
+
+/// CR 613.1b + CR 603.2: a control change a full layer evaluation derived and no
+/// instruction announced, waiting to be published into an action's event buffer
+/// (`layers::publish_layer_control_changes`). `subject` is the exact incarnation
+/// whose controller the pass changed (CR 400.7); `event` is always the
+/// `GameEvent::ControllerChanged` it publishes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedControlChange {
+    pub subject: ObjectIncarnationRef,
+    pub event: GameEvent,
 }
 
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
@@ -748,6 +802,7 @@ impl EventObjectSnapshot {
             | TypeFilter::Kindred
             | TypeFilter::Permanent
             | TypeFilter::Card
+            | TypeFilter::Scheme
             | TypeFilter::Any
             | TypeFilter::Subtype(_) => Supported,
             TypeFilter::Non(inner) => Self::classify_type_filter(inner).negate(),
@@ -783,6 +838,7 @@ impl EventObjectSnapshot {
             | FilterProp::HasColor { .. }
             | FilterProp::NotColor { .. }
             | FilterProp::ColorCount { .. }
+            | FilterProp::CardTypeCount { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
             | FilterProp::Historic
@@ -895,6 +951,7 @@ impl EventObjectSnapshot {
             // follow-up (option a): snapshot prepared onto EventObjectSnapshot.
             | FilterProp::Prepared
             | FilterProp::WasPlayed
+            | FilterProp::CastThisTurn { .. }
             // CR 108.2 + CR 108.2b: event snapshots retain token status but not whether
             // a nontoken object is a copy, so card representation cannot be reconstructed.
             | FilterProp::RepresentedByCard
@@ -984,6 +1041,36 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 603.7: whether a triggered ability that triggered is an ability of its
+/// source or a delayed triggered ability an effect created. Public projection
+/// of the scheduler's private firing identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggeredAbilityOrigin {
+    /// A triggered ability its source has (CR 603.1).
+    SourceAbility,
+    /// CR 603.7: a delayed triggered ability.
+    Delayed,
+}
+
+/// CR 104.3: why a player lost the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LossReason {
+    /// CR 704.5a / CR 704.6a / CR 904.13b: their life total (where life is shared, their team's) is 0 or less.
+    LifeTotal,
+    /// CR 704.5b: they attempted to draw from an empty library.
+    DrewFromEmptyLibrary,
+    /// CR 704.5c / CR 704.6b: poison counters at the threshold `players::poison_loss_measure` applies.
+    Poison,
+    /// CR 704.6c: 21 or more combat damage from one commander.
+    CommanderDamage,
+    /// CR 104.3a / CR 810.8b / CR 904.13b: they (or, where life is shared, their teammate) conceded.
+    Conceded,
+    /// CR 104.3e: an effect stated that they lose.
+    EffectStatedLoss,
+    /// CR 104.2b: an effect stated that an opponent of theirs wins.
+    OpponentWon,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -1010,15 +1097,11 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
-    /// CR 805.4d: one phase occurrence FOR one player. Synthetic — produced
-    /// only by `occurrence_trigger_events` for an opponent-scoped phase
-    /// trigger on a shared team turn, so each eligible opponent gets their
-    /// own firing bound to themselves. Never emitted into the global event
-    /// batch. Admission gates MUST treat it exactly like `PhaseChanged`
-    /// (active-player-based); only per-firing BINDING reads `player_id`.
-    PhaseChangedForPlayer {
+    /// CR 603.2b + CR 805.4d: the beginning of `phase` as one appropriate player's step — the
+    /// context of a phase trigger's firing for that player. Never emitted into the event stream.
+    PhaseChangedFor {
         phase: Phase,
-        player_id: PlayerId,
+        player: PlayerId,
     },
     /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
@@ -1033,6 +1116,12 @@ pub enum GameEvent {
         /// synthetic events that do not carry cast-time characteristics.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cast_mana_value: Option<u32>,
+        /// CR 601.2h: Total mana actually paid for this cast. Zero is a known payment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_mana_spent: Option<u32>,
+        /// CR 400.7: The incarnation that became cast.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cast_incarnation: Option<u64>,
     },
     /// CR 702.140c + CR 730.2: A mutating creature spell merged with a target
     /// creature, forming a mutated permanent. Emitted by
@@ -1141,6 +1230,11 @@ pub enum GameEvent {
         /// `Unknown` for an event predating the field; omitted on the wire then.
         #[serde(default, skip_serializing_if = "BoundActivationCost::is_unknown")]
         activation_cost: BoundActivationCost,
+        /// CR 606.4 + CR 602.2b + CR 603.4: loyalty counters actually removed
+        /// to pay this activation, after replacement effects. `None` is unknown
+        /// or inapplicable; a tracked zero is `Some(0)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loyalty_counters_removed: Option<u32>,
     },
     /// CR 603.6a: Enters-the-battlefield and zone-change triggers fire on this
     /// event. `from` is `None` when an object is created directly in a zone
@@ -1198,14 +1292,21 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
         tap_state: ManaTapState,
     },
-    /// CR 605.1b: A mana ability resolved and produced mana; a triggered mana
-    /// ability's production is emitted only while loop detection samples. Unlike
-    /// `ManaAdded`, this is one aggregate event per ability resolution; unlike
-    /// `TappedForMana`, it also covers mana abilities without a tap cost.
+    /// CR 605.1b + CR 608.2p: An activated mana ability reports one aggregate
+    /// event per recipient, including abilities without a tap cost. A completed
+    /// activation with no output reports one empty event for its activator.
+    /// A triggered mana ability reports an event per mana instruction that
+    /// deposits mana. With loop detection off, only ordinary triggers can
+    /// observe those triggered-mana production events.
     ManaAbilityProduced {
         player_id: PlayerId,
         source_id: ObjectId,
         produced: Vec<ManaType>,
+        #[serde(
+            default,
+            skip_serializing_if = "ManaResolutionShare::is_recipient_only"
+        )]
+        resolution: ManaResolutionShare,
         #[serde(default, skip_serializing_if = "ManaAbilityTriggerState::is_pending")]
         trigger_state: ManaAbilityTriggerState,
     },
@@ -1310,8 +1411,10 @@ pub enum GameEvent {
     BecameForetold {
         object_id: ObjectId,
     },
+    /// CR 104.3 + CR 704.3: a player left the game by losing, and every reason found for it; never empty.
     PlayerLost {
         player_id: PlayerId,
+        reasons: std::collections::BTreeSet<LossReason>,
     },
     MulliganStarted,
     CardsDrawn {
@@ -1370,6 +1473,20 @@ pub enum GameEvent {
     },
     StackPushed {
         object_id: ObjectId,
+    },
+    /// CR 603.2 + CR 603.3d: a triggered ability triggered and reached
+    /// placement. `stack_entry: None` = removed during placement (CR 603.3c,
+    /// CR 603.3d). `controller` is the ability's controller (CR 603.3a).
+    /// `causes` is engine bookkeeping for the observer matcher. The event
+    /// stream never carries it (`filter_events_for_viewer`); state carriers do,
+    /// redacted per viewer (CR 400.2 + CR 708.5). It is never empty: an
+    /// occurrence with no cause record is not emitted.
+    AbilityTriggered {
+        stack_entry: Option<ObjectId>,
+        source_id: ObjectId,
+        controller: PlayerId,
+        origin: TriggeredAbilityOrigin,
+        causes: Vec<GameEvent>,
     },
     StackResolved {
         object_id: ObjectId,
@@ -1551,6 +1668,15 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 608.2c + CR 603.2c: how many events of the instruction that
+        /// removed the counters precede this one, so two removals of one
+        /// resolution that came from different instructions are two events
+        /// ("Whenever one or more counters are removed" triggers once for each)
+        /// while removals of one instruction are one simultaneous event. `None`
+        /// when no watched instruction was open at the emit site; such removals
+        /// are indistinguishable and group together.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_lead: Option<InstructionLead>,
     },
     TokenCreated {
         object_id: ObjectId,
@@ -1753,6 +1879,12 @@ pub enum GameEvent {
     },
     DayNightChanged {
         new_state: String,
+        /// CR 731.1a: the designation the game lost. `None` when the game gained
+        /// its first designation (CR 731.1 + CR 702.145d + CR 702.145g).
+        /// `day_night::set_designation` emits nothing for an unchanged designation,
+        /// so `Some(_)` always represents a change from one designation to the other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<crate::types::game_state::DayNight>,
     },
     TurnedFaceUp {
         object_id: ObjectId,
@@ -1943,6 +2075,14 @@ pub enum GameEvent {
         player_id: PlayerId,
         sides: u8,
         result: Option<u8>,
+        /// CR 614.1c + CR 614.12 + CR 113.6 + CR 603.10: the entrant whose as-enters
+        /// replacement made this roll before its entry happened. Its abilities do not
+        /// function yet, so it alone is not an observer of this event. `None` for
+        /// every other roll. CR 603.2 + CR 603.10: the roll's observers are collected
+        /// when it is rolled, with the battlefield as it is then, and placed with its
+        /// entry; every other scan refuses a stamped roll.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_entry_source: Option<ObjectId>,
     },
     /// CR 706.6: A die roll ignored by a replacement (Barbarian Class, Pixie
     /// Guide, Wyll) — the NATURAL value, before any modifier (modifiers never
@@ -2248,6 +2388,21 @@ pub enum GameEvent {
 }
 
 impl GameEvent {
+    /// CR 601.2h + CR 601.2i: Capture the completed cast from its stack object.
+    pub(crate) fn spell_cast(
+        spell: &crate::game::game_object::GameObject,
+        controller: PlayerId,
+    ) -> Self {
+        Self::SpellCast {
+            card_id: spell.card_id,
+            controller,
+            object_id: spell.id,
+            cast_mana_value: Some(spell.spell_mana_value()),
+            cast_mana_spent: Some(spell.mana_spent_to_cast_amount),
+            cast_incarnation: Some(spell.incarnation),
+        }
+    }
+
     /// CR 400.7 + CR 608.2h: a `PermanentTapped` event for `object_id`, stamped
     /// with the incarnation of the permanent that is tapped now, so a later
     /// "that permanent's controller" names this object even if it has left and
@@ -2370,6 +2525,37 @@ mod tests {
     }
 
     #[test]
+    fn spell_cast_facts_preserve_zero_and_accept_legacy_events() {
+        let event = GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id: ObjectId(2),
+            cast_mana_value: Some(4),
+            cast_mana_spent: Some(0),
+            cast_incarnation: Some(7),
+        };
+        let mut json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["data"]["cast_mana_spent"], 0);
+        assert_eq!(
+            serde_json::from_value::<GameEvent>(json.clone()).unwrap(),
+            event
+        );
+        let data = json["data"].as_object_mut().unwrap();
+        data.remove("cast_mana_spent");
+        data.remove("cast_incarnation");
+        let legacy: GameEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            legacy,
+            GameEvent::SpellCast {
+                cast_mana_spent: None,
+                cast_incarnation: None,
+                cast_mana_value: Some(4),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn ability_activated_kind_round_trips() {
         // CR 606.2 + CR 605.1a: the discriminator survives serialization.
         for kind in [
@@ -2385,6 +2571,7 @@ mod tests {
                 trigger_state: crate::types::events::ActivationTriggerState::Pending,
                 stack_entry: None,
                 activation_cost: BoundActivationCost::Unknown,
+                loyalty_counters_removed: None,
             };
             let json = serde_json::to_value(&event).unwrap();
             let back: GameEvent = serde_json::from_value(json).unwrap();
@@ -2393,6 +2580,39 @@ mod tests {
                 other => panic!("expected AbilityActivated, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn ability_activated_loyalty_tally_preserves_zero_and_defaults_for_legacy_events() {
+        let event = |loyalty_counters_removed| GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: ObjectId(9),
+            kind: ActivatedAbilityKind::Loyalty,
+            departed_source_lki: None,
+            trigger_state: ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(42)),
+            activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed,
+        };
+        for count in [Some(0), Some(3)] {
+            let original = event(count);
+            let wire = serde_json::to_value(&original).unwrap();
+            assert_eq!(wire["data"]["loyalty_counters_removed"], count.unwrap());
+            assert_eq!(serde_json::from_value::<GameEvent>(wire).unwrap(), original);
+        }
+
+        let mut legacy = serde_json::to_value(event(Some(3))).unwrap();
+        legacy["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("loyalty_counters_removed");
+        assert!(matches!(
+            serde_json::from_value::<GameEvent>(legacy).unwrap(),
+            GameEvent::AbilityActivated {
+                loyalty_counters_removed: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2407,6 +2627,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let named = event(Some(ObjectId(42)));
         let json = serde_json::to_value(&named).unwrap();
@@ -2434,6 +2655,7 @@ mod tests {
             trigger_state: ActivationTriggerState::Pending,
             stack_entry: None,
             activation_cost,
+            loyalty_counters_removed: None,
         };
         let x_cost = AbilityCost::Composite {
             costs: vec![

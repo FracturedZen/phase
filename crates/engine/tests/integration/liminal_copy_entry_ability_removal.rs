@@ -491,6 +491,7 @@ fn parked_created_ids(runner: &GameRunner) -> Option<Vec<ObjectId>> {
             | ResolutionFrame::SpellResolution(_)
             | ResolutionFrame::MutateMerge(_)
             | ResolutionFrame::CipherEncode(_)
+            | ResolutionFrame::EntryAttackSeat(_)
             | ResolutionFrame::PostReplacement(_) => None,
         })
         .last()
@@ -665,7 +666,7 @@ fn drive_carried(
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -759,6 +760,7 @@ fn drive_carried(
             | WaitingFor::RemoveCountersChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::CombatTaxPayment { .. }
+            | WaitingFor::ReplacementDecisionOrder { .. }
             | WaitingFor::PhyrexianPayment { .. } => {
                 panic!("unexpected prompt {}", runner.waiting_for_kind())
             }
@@ -1824,7 +1826,9 @@ fn legacy_counter_pause_restores_the_owed_color_choice_without_repeating_counter
         },
         |runner, prompt| {
             if matches!(prompt, Prompt::Replacement)
-                && replacement_sources(runner).contains(&"Hardened Scales".to_string())
+                && replacement_sources(runner)
+                    .iter()
+                    .any(|i| i == "Hardened Scales")
             {
                 assert!(!has_color_choice(runner, the_token(runner, VOICE_NAME)));
                 paused = Some(runner.state().clone());
@@ -3153,7 +3157,7 @@ fn banner_linked_entry_population(carry: PauseCarry, resident_bear: bool) -> Row
         .contains(&ChosenAttribute::CreatureType("Bear".to_string())));
     let automaton = &runner.state().objects[&the_token(&runner, "Universal Automaton")];
     assert!(
-        automaton.card_types.subtypes.contains(&"Bear".to_string()),
+        automaton.card_types.subtypes.iter().any(|i| i == "Bear"),
         "F2: the co-entering changeling is a Bear on the settled board: {:?}",
         automaton.card_types
     );

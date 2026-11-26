@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -214,7 +214,7 @@ impl Walk<'_> {
             .sub_ability
             .as_deref()
             .zip(prepared.sub_ability.as_deref())
-            .filter(|(_, sub)| is_instead_override(sub));
+            .filter(|(_, sub)| super::is_instead_override(sub));
         let swap = match (board, instead) {
             (Some(board), Some((_, sub))) => self.instead_swap(board, &bound, sub, before),
             _ => Some(false),
@@ -420,14 +420,6 @@ fn resolves_once_as_bound(bound: &ResolvedAbility) -> bool {
     bound.player_scope.is_none()
         && !super::resolves_for_each_target_player(bound)
         && bound.repeat_for.is_none()
-}
-
-/// CR 608.2c: a node that replaces its parent's effect when its condition
-/// holds.
-fn is_instead_override(node: &ResolvedAbility) -> bool {
-    node.condition
-        .as_ref()
-        .is_some_and(AbilityCondition::is_instead_override)
 }
 
 /// A condition that reads only what the entry's context recorded when it was
@@ -900,6 +892,8 @@ fn proposed_events(
         target,
         amount: 1,
         is_combat: false,
+        source_name: None,
+        source_incarnation: None,
         applied: Default::default(),
     };
     let moves = |destinations: &[Zone]| -> Vec<ProposedEvent> {
@@ -1011,6 +1005,10 @@ fn proposed_events(
                         actor: bound.controller,
                         object_id: *id,
                         counter_type: counter_type.clone(),
+                        // CR 614.16: `PutCounter` / `MultiplyCounter` are
+                        // resolving-effect instructions (`Other` would
+                        // misclassify this reach candidate as cost/TBA).
+                        cause: CounterCause::ResolvingEffect,
                     },
                     count: 1,
                     applied: Default::default(),
@@ -1031,6 +1029,7 @@ fn proposed_events(
                         object_id: object.id,
                         counter_type,
                         count: 1,
+                        loyalty_cost_root: None,
                         applied: Default::default(),
                     })
             })

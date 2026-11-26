@@ -99,9 +99,12 @@ fn narrow_core_type(filter: &Option<TargetFilter>) -> Option<CoreType> {
         // Non-narrow filter shapes — broad emission carries the trigger.
         // CR 308.1: Kindred is a non-permanent supplemental type, never a
         // narrowing battlefield-trigger card type.
+        // CR 314.1: Scheme is a command-zone card type, never a narrowing
+        // battlefield-trigger card type.
         TypeFilter::Instant
         | TypeFilter::Sorcery
         | TypeFilter::Kindred
+        | TypeFilter::Scheme
         | TypeFilter::Permanent
         | TypeFilter::Card
         | TypeFilter::Any
@@ -194,15 +197,22 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         | TriggerMode::DamageReceived
         | TriggerMode::ExcessDamage
         | TriggerMode::ExcessDamageAll => push(TriggerEventKey::DealsDamage),
-        TriggerMode::DamagePreventedOnce => return (keys, true),
+        // CR 615.13: prevention triggers consult only the `DamagePrevented` bucket.
+        // The event side already pushes this key (see the `GameEvent::DamagePrevented`
+        // arm below), so the two halves now agree and the mode leaves the
+        // all-triggers fallback. Deliberately NOT folded into the `DealsDamage` arm
+        // above — prevention is a distinct event with its own key, and folding would
+        // re-widen the consult set.
+        TriggerMode::DamagePreventedOnce => push(TriggerEventKey::DamagePrevented),
 
         // --- Spells / abilities ---
         TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy | TriggerMode::SpellCopy => {
             push(TriggerEventKey::SpellCast(narrow));
         }
+        // CR 603.2 + CR 603.3b: an observer of another ability triggering.
+        TriggerMode::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
@@ -475,8 +485,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
-        // CR 904.9: resolved by the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event-driven dispatch. Neither a key nor unclassified.
         TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
@@ -509,13 +519,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
-        GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
-        // CR 805.4d: a fanned occurrence indexes under its phase like the
-        // production event (synthetic occurrences never enter the batch, but
-        // the key must exist if one is ever indexed).
-        GameEvent::PhaseChangedForPlayer { phase, .. } => {
-            push(TriggerEventKey::BeginningOfPhase(*phase))
-        }
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -555,6 +559,8 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::XValueChosen { .. } => {}
         GameEvent::AbilityActivated { .. } => push(TriggerEventKey::AbilityOrCopyActivated),
+        // CR 603.2 + CR 603.3b: a triggered ability triggered.
+        GameEvent::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         GameEvent::ZoneChanged {
             from,
             to,
@@ -808,20 +814,21 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
-        EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
         EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::Attach
+        EffectKind::DayTimeChange
+        | EffectKind::Attach
         | EffectKind::AttachAll
         | EffectKind::Equip
         | EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::ResumeDamageBatch
         | EffectKind::EachDealsDamageEqualToPower
         | EffectKind::EachSourceDealsDamage
         | EffectKind::Draw
@@ -952,6 +959,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ArrangePlanarDeckTop
         | EffectKind::Planeswalk
         | EffectKind::AbandonScheme
+        | EffectKind::SetSchemeInMotion
         | EffectKind::ChaosEnsues
         // Redistribute emits LifeChanged handled by that event's own arm; no
         // EffectResolved-dispatching matcher. No-op here.
@@ -1222,6 +1230,20 @@ pub fn ensure_ready(state: &mut GameState) {
     }
 }
 
+/// CR 603.2: whether the trigger index holds any source under `key`. A phased-out or
+/// stale entry is not filtered here, so a caller may only use the answer as an
+/// over-approximation. Reads only the keyed bucket: `unclassified` holds objects
+/// whose definitions could not be keyed or that carry a synthetic keyword trigger,
+/// and a definition whose mode maps to `key` is always in that key's bucket.
+pub(crate) fn has_keyed_trigger_source(state: &mut GameState, key: &TriggerEventKey) -> bool {
+    ensure_ready(state);
+    state
+        .trigger_index
+        .by_key
+        .get(key)
+        .is_some_and(|bucket| !bucket.is_empty())
+}
+
 /// CR 603.2: Public consult helper. Returns the union of buckets the event
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
@@ -1388,6 +1410,53 @@ mod tests {
         assert!(!route);
     }
 
+    /// CR 603.2 + CR 603.3b: each printed observer shape registers under
+    /// `AbilityTriggered` and never in `unclassified`, so the keyed bucket is
+    /// exactly the set of observers (`has_keyed_trigger_source`'s premise).
+    #[test]
+    fn ability_triggered_shapes_key_only_their_own_bucket() {
+        use crate::types::statics::TriggerCause;
+        use crate::types::triggers::CausedAbilitySource;
+        for (cause, source) in [
+            (
+                TriggerCause::CreatureAttacking,
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                CausedAbilitySource::Any,
+            ),
+        ] {
+            let def = TriggerDefinition::new(TriggerMode::AbilityTriggered { cause, source })
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+            let (keys, route) = keys_from_trigger_def(&def);
+            assert_eq!(keys.as_slice(), [TriggerEventKey::AbilityTriggered]);
+            assert!(!route);
+        }
+        let event = GameEvent::AbilityTriggered {
+            stack_entry: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            origin: crate::types::events::TriggeredAbilityOrigin::SourceAbility,
+            causes: Vec::new(),
+        };
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            keys_from_event(&event, &state).as_slice(),
+            [TriggerEventKey::AbilityTriggered]
+        );
+    }
+
     #[test]
     fn sacrificed_emits_three_keys() {
         // CR 701.21 + CR 603.6c: sacrifice triggers reach via three keys.
@@ -1397,6 +1466,53 @@ mod tests {
         assert!(keys.contains(&TriggerEventKey::Sacrificed));
         assert!(keys.contains(&TriggerEventKey::LeaveBattlefield(Some(CoreType::Creature))));
         assert!(keys.contains(&TriggerEventKey::Dies(Some(CoreType::Creature))));
+    }
+
+    /// CR 615.13: `DamagePreventedOnce` is routed by the dedicated
+    /// `DamagePrevented` key, NOT by the all-triggers fallback.
+    ///
+    /// Revert-failing: restoring `=> return (keys, true)` makes `keys` empty and
+    /// `route` true, flipping both assertions. The paired `keys_from_event`
+    /// assertion proves the two halves of the index agree, so the key is live
+    /// rather than merely present on the definition side.
+    #[test]
+    fn damage_prevented_once_uses_keyed_lookup_not_fallback() {
+        let def = TriggerDefinition::new(TriggerMode::DamagePreventedOnce);
+        let (keys, route) = keys_from_trigger_def(&def);
+        assert!(
+            keys.contains(&TriggerEventKey::DamagePrevented),
+            "prevention triggers must register under the DamagePrevented key"
+        );
+        assert!(
+            !route,
+            "prevention triggers must leave the all-triggers fallback bucket"
+        );
+
+        // Paired reach-guard: the event side pushes the same key, so a
+        // `DamagePrevented` event actually consults this bucket.
+        let state = GameState::new_two_player(42);
+        let event_keys = keys_from_event(
+            &GameEvent::DamagePrevented {
+                source_id: ObjectId(1),
+                target: crate::types::ability::TargetRef::Player(PlayerId(0)),
+                amount: 4,
+            },
+            &state,
+        );
+        assert!(
+            event_keys.contains(&TriggerEventKey::DamagePrevented),
+            "the event side must push the key the definition side registers under"
+        );
+
+        // Negative: an unrelated event does not consult the prevention bucket.
+        let unrelated = keys_from_event(
+            &GameEvent::CardsDrawn {
+                player_id: PlayerId(0),
+                count: 1,
+            },
+            &state,
+        );
+        assert!(!unrelated.contains(&TriggerEventKey::DamagePrevented));
     }
 
     #[test]

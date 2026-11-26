@@ -678,16 +678,20 @@ impl GameScenario {
         builder
     }
 
-    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle
-    /// text. Mirrors `add_creature_from_oracle`; no existing helper places a
-    /// land on the battlefield with parsed Oracle text (`add_basic_land` wires a
-    /// hard-coded mana ability; `add_land_to_hand` places in `Zone::Hand`).
+    /// Add a nonbasic land to the battlefield with abilities parsed from Oracle text.
     pub fn add_land_from_oracle(
         &mut self,
         player: PlayerId,
         name: &str,
         oracle_text: &str,
     ) -> CardBuilder<'_> {
+        let mut builder = self.add_land(player, name);
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a nonbasic land to the battlefield so its type line can be set before parsing.
+    pub fn add_land(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
         let card_id = CardId(self.state.next_object_id);
         let id = create_object(
             &mut self.state,
@@ -706,12 +710,10 @@ impl GameScenario {
         // matching `add_creature`'s override.
         obj.summoning_sick = false;
 
-        let mut builder = CardBuilder {
+        CardBuilder {
             state: &mut self.state,
             id,
-        };
-        builder.from_oracle_text(oracle_text);
-        builder
+        }
     }
 
     /// Add a nonland, noncreature permanent (e.g. an enchantment) to the
@@ -938,6 +940,39 @@ impl GameScenario {
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.base_card_types = obj.card_types.clone();
         // CR 301.1: artifacts have no power/toughness unless they are also creatures.
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add an enchantment card to hand with abilities parsed from Oracle text.
+    ///
+    /// Mirrors `add_artifact_to_hand_from_oracle` for enchantments (CR 303.1).
+    /// Subtypes (e.g. Aura, CR 303.4) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_enchantment_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 208.3: a noncreature object not on the battlefield has power or
+        // toughness only if it has a power and toughness printed on it.
 
         let mut builder = CardBuilder {
             state: &mut self.state,
@@ -1648,8 +1683,10 @@ impl GameRunner {
                 && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
                 && self.state.stack.is_empty()
             {
-                pass_events
-                    .extend(apply_as_current(&mut self.state, GameAction::PassPriority)?.events);
+                // CR 805.5b: the whole holding team must pass to leave the
+                // window — passing only the representative stalls a shared
+                // team here with no budget, so this loop would never end.
+                pass_events.extend(self.pass_holding_team()?);
             }
             let mut result = apply_as_current(&mut self.state, action)?;
             pass_events.append(&mut result.events);
@@ -1724,6 +1761,67 @@ impl GameRunner {
         let _ = apply_as_current(&mut self.state, GameAction::PassPriority);
     }
 
+    /// CR 805.5b: pass priority once for the current holder and every living
+    /// teammate, collecting the emitted events.
+    ///
+    /// A team passes only when no member wishes to act, and the engine
+    /// advances a window only after every living player has passed — so a
+    /// driver that passes solely as the current holder stalls on any
+    /// shared-team window (the holder's pass alone never advances it).
+    /// Passing holder + teammates is exactly one current-holder pass in
+    /// individual-turn formats (`teammates` is empty there), so single-seat
+    /// drivers keep their behavior.
+    ///
+    /// CR 723.3 + CR 723.5: each seat's pass is submitted as its authorized
+    /// submitter, so a controlled seat's pass is made by its controller —
+    /// the same mapping `apply_as_current` performs.
+    pub fn pass_holding_team(&mut self) -> Result<Vec<GameEvent>, EngineError> {
+        let holder = match &self.state.waiting_for {
+            WaitingFor::Priority { player } => *player,
+            other => {
+                return Err(EngineError::InvalidAction(format!(
+                    "pass_holding_team needs a Priority window, got {other:?}"
+                )))
+            }
+        };
+        let holding_team = super::topology::team_id(&self.state, holder);
+        let mut seats = vec![holder];
+        seats.extend(super::players::teammates(&self.state, holder));
+        // CR 117.3d + CR 117.4: the holder holds priority, so its pass is
+        // always submitted — even over a pass recorded earlier in the window
+        // (CR 117.5: a trigger put on the stack as a player would receive
+        // priority hands priority back without clearing that record). Skipping the holder would submit nothing and leave every
+        // drain loop spinning on an unchanged window. CR 805.5b: a teammate
+        // that already passed is skipped — its pass stands until a game
+        // action clears it. Collected up front: the filter borrows the pass
+        // records while the submit loop below needs the state mutably.
+        let seats: Vec<PlayerId> = seats
+            .into_iter()
+            .filter(|&seat| seat == holder || !self.state.priority_passes.contains(&seat))
+            .collect();
+        let mut events = Vec::new();
+        for seat in seats {
+            let submitter = super::turn_control::authorized_submitter_for_player(&self.state, seat);
+            events.extend(
+                super::engine::apply(&mut self.state, submitter, GameAction::PassPriority)?.events,
+            );
+            // CR 805.5b + CR 805.8: a submitter outside the team (a whole-team
+            // controller) can complete the team's pass early — stop once the
+            // window leaves the holding team instead of submitting stale
+            // passes into the next team's window and losing these events to
+            // the `?` above.
+            let still_holding = matches!(
+                &self.state.waiting_for,
+                WaitingFor::Priority { player }
+                    if super::topology::team_id(&self.state, *player) == holding_team
+            );
+            if !still_holding {
+                break;
+            }
+        }
+        Ok(events)
+    }
+
     /// Drive `auto_advance` and then drain Upkeep and Draw priority windows so
     /// callers can test PreCombatMain trigger behavior without rebuilding the
     /// "skip empty priority steps" optimization at every call site. Stops as
@@ -1738,8 +1836,9 @@ impl GameRunner {
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
 
         // Drain priority windows until the active player has priority during
-        // PreCombatMain. Each iteration passes both players through one step;
-        // bounded loop guards against unexpected non-priority states.
+        // PreCombatMain. Each iteration passes the holding team through one
+        // step (one seat in individual-turn formats); bounded loop guards
+        // against unexpected non-priority states.
         for _ in 0..8 {
             if self.state.phase == Phase::PreCombatMain {
                 break;
@@ -1747,11 +1846,9 @@ impl GameRunner {
             if !matches!(waiting, WaitingFor::Priority { .. }) {
                 break;
             }
-            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
-                _ => break,
+            match self.pass_holding_team() {
+                Ok(_) => waiting = self.state.waiting_for.clone(),
+                Err(_) => break,
             }
         }
         waiting
@@ -1784,15 +1881,14 @@ impl GameRunner {
             if !matches!(waiting, WaitingFor::Priority { .. }) {
                 break;
             }
-            let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
-            match (r1, r2) {
-                (Ok(first), Ok(result)) => {
-                    events.extend(first.events);
-                    events.extend(result.events);
-                    waiting = result.waiting_for;
+            // CR 805.5b: pass the holding team, not a fixed two seats — a
+            // shared team (or a wider table) needs every living member.
+            match self.pass_holding_team() {
+                Ok(passed) => {
+                    events.extend(passed);
+                    waiting = self.state.waiting_for.clone();
                 }
-                _ => break,
+                Err(_) => break,
             }
         }
         events
@@ -1911,8 +2007,8 @@ impl GameRunner {
             if !matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
                 break;
             }
-            match apply_as_current(&mut self.state, GameAction::PassPriority) {
-                Ok(result) => events.extend(result.events),
+            match self.pass_holding_team() {
+                Ok(passed) => events.extend(passed),
                 Err(_) => break,
             }
         }
@@ -1925,6 +2021,44 @@ impl GameRunner {
         }
     }
 
+    /// Whether a player must pass priority now to move from the first combat
+    /// damage step to the second (CR 510.4): the CR 510.3 window between the two
+    /// steps is open with an empty stack, so one more pass round starts the
+    /// regular step. The window definition is
+    /// `combat_damage::between_combat_damage_steps`; the extra conjunct only
+    /// requires that someone currently holds priority.
+    pub fn between_combat_damage_steps(&self) -> bool {
+        super::combat_damage::between_combat_damage_steps(&self.state)
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+    }
+
+    /// Pass the CR 510.3 window between the two combat damage steps until the
+    /// regular step begins, returning the events of the passes.
+    ///
+    /// One `PassPriority` per iteration with [`Self::between_combat_damage_steps`]
+    /// re-checked each time, so any seat count works (CR 117.4). A non-empty stack
+    /// leaves the predicate false and the window untouched. Panics if the window
+    /// does not close within a generous bound or a pass is rejected, rather than
+    /// hanging the test.
+    pub fn pass_combat_damage_window(&mut self) -> Vec<GameEvent> {
+        const MAX_PASSES: usize = 16;
+        let mut events = Vec::new();
+        let mut passes = 0;
+        while self.between_combat_damage_steps() {
+            assert!(
+                passes < MAX_PASSES,
+                "the window between the combat damage steps must close within {MAX_PASSES} passes"
+            );
+            events.extend(
+                self.act(GameAction::PassPriority)
+                    .expect("passing the window between the combat damage steps should succeed")
+                    .events,
+            );
+            passes += 1;
+        }
+        events
+    }
+
     /// Pass priority until the top of the stack resolves.
     pub fn resolve_top(&mut self) {
         // Keep passing priority until the stack shrinks or we can't pass anymore
@@ -1933,7 +2067,9 @@ impl GameRunner {
             if self.state.stack.len() < initial_stack_len {
                 break;
             }
-            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
+            // CR 805.5b: the holding team passes together, or a shared-team
+            // window never advances past its representative.
+            if self.pass_holding_team().is_err() {
                 break;
             }
         }
@@ -1982,7 +2118,9 @@ impl GameRunner {
             if self.state.stack.is_empty() {
                 break;
             }
-            if apply_as_current(&mut self.state, GameAction::PassPriority).is_err() {
+            // CR 805.5b: the holding team passes together, or a shared-team
+            // window never advances past its representative.
+            if self.pass_holding_team().is_err() {
                 break;
             }
         }
@@ -2096,6 +2234,7 @@ impl GameRunner {
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::EntryControllerChoice { .. } => "EntryControllerChoice",
+            WaitingFor::ReplacementDecisionOrder { .. } => "ReplacementDecisionOrder",
             WaitingFor::OrderTriggers { .. } => "OrderTriggers",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
@@ -2121,7 +2260,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -2373,6 +2512,7 @@ pub struct SpellCast<'a> {
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
     casting_variant_face: Option<CastingVariantFace>,
+    casting_keyword: Option<crate::types::keywords::Keyword>,
     free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
@@ -2403,6 +2543,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature: None,
             casting_variant: None,
             casting_variant_face: None,
+            casting_keyword: None,
             free_cast: false,
             modes: None,
             x: None,
@@ -2490,6 +2631,14 @@ impl<'a> SpellCast<'a> {
     ) -> Self {
         self.casting_variant = Some(variant);
         self.casting_variant_face = Some(face);
+        self
+    }
+
+    /// With [`Self::casting_variant`], choose the option that pays this keyword
+    /// instance, for a card with several instances of one alternative-cost
+    /// keyword (CR 113.2c + CR 601.2b).
+    pub fn casting_keyword(mut self, keyword: crate::types::keywords::Keyword) -> Self {
+        self.casting_keyword = Some(keyword);
         self
     }
 
@@ -2644,6 +2793,7 @@ impl<'a> SpellCast<'a> {
             adventure_creature,
             casting_variant,
             casting_variant_face,
+            casting_keyword,
             free_cast,
             modes,
             x,
@@ -2782,7 +2932,10 @@ impl<'a> SpellCast<'a> {
                             .enumerate()
                             .filter_map(|(index, option)| {
                                 (option.variant == variant
-                                    && casting_variant_face.is_none_or(|face| option.face == face))
+                                    && casting_variant_face.is_none_or(|face| option.face == face)
+                                    && casting_keyword.as_ref().is_none_or(|keyword| {
+                                        option.alternative_cost_keyword.as_ref() == Some(keyword)
+                                    }))
                                 .then_some(index)
                             })
                             .collect();
@@ -2824,14 +2977,18 @@ impl<'a> SpellCast<'a> {
                 // CR 601.2b: optional additional costs are chosen during
                 // announcement, before the spell is committed to the stack.
                 WaitingFor::OptionalCostChoice { .. } => {
-                    let pay = match optional {
-                        OptionalPolicy::Accept => true,
-                        OptionalPolicy::Decline => false,
+                    let index = match optional {
+                        OptionalPolicy::Accept => 0,
+                        OptionalPolicy::Decline => 1,
                         OptionalPolicy::Stop => {
                             panic!("OptionalPolicy::Stop is only valid after spell commitment")
                         }
                     };
-                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                    act_collect(
+                        runner,
+                        GameAction::DecideOptionalCost { index },
+                        &mut events,
+                    )?;
                 }
                 // Cast-time opponent choice (Gift recipient, CR 702.174a, or
                 // effect-cost player, CR 601.2h) — the driver picks the first
@@ -3935,12 +4092,16 @@ fn drive_resolution(
             }
             // CR 608.2d: leave resolution-time choices to the declared policy.
             WaitingFor::OptionalCostChoice { .. } => {
-                let pay = match policy.optional {
-                    OptionalPolicy::Accept => true,
-                    OptionalPolicy::Decline => false,
+                let index = match policy.optional {
+                    OptionalPolicy::Accept => 0,
+                    OptionalPolicy::Decline => 1,
                     OptionalPolicy::Stop => break,
                 };
-                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalCost { index },
+                    &mut events,
+                )?;
             }
             // Cast-time opponent choice (Gift recipient, CR 702.174a, or effect-cost
             // player, CR 601.2h) — the driver picks the first candidate; tests that
@@ -4074,8 +4235,11 @@ fn drive_resolution(
                 if runner.state.stack.is_empty() {
                     break;
                 }
-                match runner.act(GameAction::PassPriority) {
-                    Ok(result) => events.extend(result.events),
+                // CR 805.5b: the holding team passes together — passing only
+                // the representative stalls a shared-team window with a live
+                // stack, so the spell under test would never resolve.
+                match runner.pass_holding_team() {
+                    Ok(passed) => events.extend(passed),
                     // An unrepresentable life change is an engine limit, not an
                     // unhandled prompt: the driver must report it rather than
                     // silently stop with a partially resolved effect.
@@ -5243,7 +5407,8 @@ mod tests {
                     target: filter.clone(),
                     count: QuantityExpr::up_to(QuantityExpr::Ref {
                         qty: crate::types::ability::QuantityRef::ObjectCount { filter },
-                    }),
+                    })
+                    .into(),
                     min_count: 0,
                 },
             ))),
@@ -5455,18 +5620,36 @@ mod tests {
             crate::game::effects::resolve_ability_chain(runner.state_mut(), &put, &mut events, 0)
                 .expect("start the forwarded move");
             let mut replacement_choices = 0;
+            let mut decision_orders = 0;
             for _ in 0..8 {
-                if !matches!(
-                    runner.state().waiting_for,
-                    WaitingFor::ReplacementChoice { .. }
-                ) {
-                    break;
+                match runner.state().waiting_for.clone() {
+                    // CR 101.4c + CR 616.1: the staged sweep consulted both
+                    // entrants, so with both pausing P0 holds both decisions
+                    // and makes them in announcement order.
+                    WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                        assert_eq!(player, P0);
+                        assert_eq!(objects, vec![first, second]);
+                        decision_orders += 1;
+                        runner
+                            .act(GameAction::SelectCards {
+                                cards: vec![objects[0]],
+                            })
+                            .unwrap();
+                    }
+                    WaitingFor::ReplacementChoice { .. } => {
+                        replacement_choices += 1;
+                        runner
+                            .act(GameAction::ChooseReplacement { index: 0 })
+                            .unwrap();
+                    }
+                    _ => break,
                 }
-                replacement_choices += 1;
-                runner
-                    .act(GameAction::ChooseReplacement { index: 0 })
-                    .unwrap();
             }
+            assert_eq!(
+                decision_orders,
+                if only_second_pauses { 0 } else { 1 },
+                "P0 orders its decisions only when both entrants hold one ({only_second_pauses})"
+            );
             assert!(
                 replacement_choices >= if only_second_pauses { 1 } else { 2 },
                 "the move must pause for its replacement choice ({only_second_pauses})"
@@ -5650,12 +5833,12 @@ mod tests {
         );
     }
 
-    /// CR 608.2d + CR 701.21a: choosing to perform an impossible optional
-    /// sacrifice is not "a player does". If the current promptee controls no
-    /// legal permanent, the APNAP offer must continue to the next player rather
-    /// than treating the empty selection as an accepted sacrifice.
+    /// CR 608.2d + CR 701.21a: a player who controls no land can't sacrifice one,
+    /// so they can't choose "any player may sacrifice a land of their choice" and
+    /// aren't offered it. The offer goes to the player who can, and no reward
+    /// is drawn before anyone sacrifices.
     #[test]
-    fn any_player_may_impossible_sacrifice_accept_continues_offer() {
+    fn any_player_may_sacrifice_is_not_offered_to_a_player_without_a_land() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let _p1_land = scenario.add_basic_land(P1, ManaColor::White);
@@ -5671,17 +5854,6 @@ mod tests {
         scenario.with_library_top(P0, &["Reward Card"]);
         let mut runner = scenario.build();
 
-        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
-        match wf {
-            WaitingFor::OpponentMayChoice {
-                player, remaining, ..
-            } => {
-                assert_eq!(player, P0, "controller is still offered first");
-                assert_eq!(remaining, vec![P1], "opponent remains queued");
-            }
-            other => panic!("expected first OpponentMayChoice, got {other:?}"),
-        }
-
         let hand_before = runner
             .state
             .players
@@ -5690,18 +5862,18 @@ mod tests {
             .unwrap()
             .hand
             .len();
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("empty sacrifice accept should advance to next player");
-
-        match &runner.state.waiting_for {
-            WaitingFor::OpponentMayChoice { player, .. } => {
+        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
                 assert_eq!(
-                    *player, P1,
-                    "empty accept must not end the offer or fire the if-a-player-does rider"
+                    player, P1,
+                    "CR 608.2d: the controller controls no land, so the first offer is the opponent's"
                 );
+                assert!(remaining.is_empty(), "no other seat is queued");
             }
-            other => panic!("expected opponent offer after impossible accept, got {other:?}"),
+            other => panic!("expected the opponent's OpponentMayChoice, got {other:?}"),
         }
         let hand_after = runner
             .state
@@ -5712,8 +5884,9 @@ mod tests {
             .hand
             .len();
         assert_eq!(
-            hand_after, hand_before,
-            "no card should be drawn because no sacrifice happened"
+            hand_after,
+            hand_before - 1,
+            "only the cast spell left the hand; no card is drawn because no sacrifice happened"
         );
     }
 
@@ -5762,11 +5935,11 @@ mod tests {
         }
     }
 
-    /// CR 101.4 + CR 608.2d: an impossible exact-three acceptance is skipped
-    /// without recording acceptance, and the APNAP offer advances to the next
-    /// player whose selection is feasible.
+    /// CR 101.4 + CR 608.2d: a player without three cards in their graveyard
+    /// can't make the exact selection, so they can't choose the option and are
+    /// never offered it; the player who can is the first and only seat offered.
     #[test]
-    fn carrion_wurm_impossible_first_accept_advances_to_feasible_player() {
+    fn carrion_wurm_is_offered_only_to_the_player_who_can_exile_three() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5784,24 +5957,22 @@ mod tests {
         let mut runner = scenario.build();
 
         attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("infeasible first acceptance advances");
-        assert!(matches!(
-            &runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
-        ));
-        assert!(!runner.state().player_actions_this_way.contains(&(
-            P0,
-            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
-        )));
-        assert!(p0_cards
-            .iter()
-            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        match &runner.state().waiting_for {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(
+                    *player, P1,
+                    "CR 608.2d: the controller can't exile three, so the first offer is P1's"
+                );
+                assert!(remaining.is_empty(), "no other seat is queued");
+            }
+            other => panic!("expected P1's OpponentMayChoice, got {other:?}"),
+        }
 
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("feasible second acceptance opens exact choice");
+            .expect("the feasible acceptance opens the exact choice");
         match &runner.state().waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,
@@ -5835,6 +6006,13 @@ mod tests {
             .iter()
             .all(|card| runner.state().objects[card].zone == Zone::Exile));
         assert!(runner.state().objects[&wurm].assigns_no_combat_damage);
+        assert!(p0_cards
+            .iter()
+            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        assert!(!runner.state().player_actions_this_way.contains(&(
+            P0,
+            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
+        )));
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -5876,11 +6054,11 @@ mod tests {
         ));
     }
 
-    /// CR 608.2d: when every player lacks three eligible cards, exhausting the
-    /// APNAP offers with impossible acceptances is equivalent to no player
-    /// performing the instruction.
+    /// CR 608.2d: when every player lacks three eligible cards, no player can
+    /// choose the option, so no one is offered it and no player performs the
+    /// instruction: the rider stays closed.
     #[test]
-    fn carrion_wurm_all_infeasible_acceptances_leave_rider_false() {
+    fn carrion_wurm_with_no_player_able_to_exile_three_offers_no_one() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5890,23 +6068,32 @@ mod tests {
         scenario.add_spell_to_graveyard(P1, "P1 Only Card", true);
         let mut runner = scenario.build();
 
-        attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("controller cannot make exact selection");
+        runner.advance_to_combat();
         assert!(matches!(
             runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
+            WaitingFor::DeclareAttackers { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("last player also cannot make the exact selection");
+            .declare_attackers(&[(wurm, AttackTarget::Player(P1))])
+            .expect("declare Carrion attacker");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == wurm),
+            "the Wurm's attack trigger is on the stack"
+        );
+        // An `OpponentMayChoice` would stop the drive here: nothing answers it.
+        runner.advance_until_stack_empty();
 
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "CR 608.2d: no player can exile three, so no one is offered; got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
         assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
         assert!(runner.state().active_ability_continuation().is_none());
     }
 
@@ -6095,29 +6282,67 @@ mod tests {
             })
             .expect("selected move parks for replacement ordering");
 
-        assert!(matches!(
+        // CR 101.4c + CR 616.1: the staged sweep consulted all three selected
+        // cards and P0 holds one ordering decision for each, so the move parks
+        // first on P0's choice of which to make first.
+        assert_eq!(
             runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ));
-        assert!(runner.state().active_change_zone_frame().is_some());
+            WaitingFor::ReplacementDecisionOrder {
+                player: P0,
+                objects: selected.to_vec(),
+            }
+        );
+        // R4c: a three-member ChangeZone population parks the staged marker +
+        // batch child; the legacy `pending` carrier is gone for this shape. The
+        // typed completion is the family authority.
+        assert!(
+            runner.state().active_change_zone_frame().is_none(),
+            "a multi-member population must not fall back to the legacy carrier"
+        );
+        assert!(
+            runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.is_change_zone_population()
+            )),
+            "the ChangeZone delivery parks its staged resume carrier at the replacement choice"
+        );
         assert!(runner.state().resolution_stack.iter().any(|frame| matches!(
             frame,
             crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
         )));
         assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
 
-        for _ in 0..selected.len() {
-            if !matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ) {
-                break;
+        // Make the decisions in announcement order: P0 orders them while two or
+        // more remain, and each published choice is answered.
+        let mut answered = 0;
+        for _ in 0..2 * selected.len() {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ReplacementDecisionOrder { player, objects } => {
+                    assert_eq!(player, P0);
+                    assert_eq!(objects, selected[answered..].to_vec());
+                    assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
+                    runner
+                        .act(GameAction::SelectCards {
+                            cards: vec![objects[0]],
+                        })
+                        .expect("P0 makes the next selected card's decision first");
+                }
+                WaitingFor::ReplacementChoice { .. } => {
+                    assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
+                    runner
+                        .act(GameAction::ChooseReplacement { index: 0 })
+                        .expect("chosen redirect advances the selected move");
+                    answered += 1;
+                }
+                _ => break,
             }
-            assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
-            runner
-                .act(GameAction::ChooseReplacement { index: 0 })
-                .expect("chosen redirect advances the selected move");
         }
+        assert_eq!(
+            answered,
+            selected.len(),
+            "every selected card's choice is asked"
+        );
 
         assert_ne!(runner.state().objects[&selected[0]].zone, Zone::Exile);
         assert!(runner.state().objects[&wurm].assigns_no_combat_damage);
@@ -6126,6 +6351,14 @@ mod tests {
             WaitingFor::Priority { .. }
         ));
         assert!(runner.state().active_change_zone_frame().is_none());
+        assert!(
+            !runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.staged.is_some()
+            )),
+            "answering the replacement choice drains the staged ChangeZone owner"
+        );
         assert!(runner.state().active_ability_continuation().is_none());
     }
 
@@ -6517,9 +6750,9 @@ mod tests {
         let state = runner.state();
         assert_eq!(state.players.len(), 4);
         assert_eq!(state.seat_order.len(), 4);
-        for i in 0..4 {
-            assert_eq!(state.players[i].id, PlayerId(i as u8));
-            assert_eq!(state.players[i].life, 20);
+        for (i, player) in state.players.iter().enumerate() {
+            assert_eq!(player.id, PlayerId(i as u8));
+            assert_eq!(player.life, 20);
         }
     }
 

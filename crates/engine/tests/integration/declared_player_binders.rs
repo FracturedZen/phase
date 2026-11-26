@@ -155,7 +155,7 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
                     .expect("t");
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                r.act(GameAction::DecideOptionalCost { pay: true })
+                r.act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kick");
             }
             WaitingFor::ManaPayment { .. } => {
@@ -467,6 +467,7 @@ fn paid_instead_delegator_does_not_shift_the_declared_slot() {
 
 fn curse_token(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Curse".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -510,6 +511,7 @@ fn aura_token_attaches_to_the_declared_player() {
 
 fn soldier_token(owner: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Soldier".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),

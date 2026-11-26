@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::game::deck_loading::{
-    add_deck_copies, hydrate_loaded_game_from_card_db, load_next_game_decks,
-    rebind_retained_printings, DeckEntry, DeckPayload, PlayerDeckPayload,
+    add_deck_copies, hydrate_loaded_game_from_card_db, load_next_game_decks, DeckEntry,
+    DeckPayload, PlayerDeckPayload,
 };
 use crate::types::events::GameEvent;
 use crate::types::format::{CompanionSlot, SideboardPolicy};
@@ -181,87 +181,72 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate both bracket inputs and the printings record so the pool rebuilt by
+    // Propagate both bracket inputs so the pool rebuilt by
     // `load_next_game_decks` in the next game retains the same reconciled effective tier.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
-    //
-    // CR 100.4 + CR 203.1 + CR 206.1: each seat's retained printing rows are rebound to
-    // the lists it plays next (`rebind_retained_printings`); the record itself is carried
-    // by `load_next_game_decks`.
     let companion_slot = state.format_config.companion_slot();
     let ai_decks = state
         .deck_pools
         .iter()
         .filter(|p| p.player != PlayerId(0) && p.player != PlayerId(1))
-        .map(|p| {
-            rebind_retained_printings(
-                p,
-                PlayerDeckPayload {
-                    main_deck: (*p.current_main).clone(),
-                    sideboard: (*p.current_sideboard).clone(),
-                    commander: (*p.current_commander).clone(),
-                    companion: companion_for_rebuild(p, companion_slot),
-                    attraction_deck: Vec::new(),
-                    planar_deck: Vec::new(),
-                    scheme_deck: (*p.registered_scheme_deck).clone(),
-                    contraption_deck: Vec::new(),
-                    sticker_sheets: state
-                        .players
-                        .iter()
-                        .find(|player| player.id == p.player)
-                        .map(|player| player.sticker_sheets.clone())
-                        .unwrap_or_default(),
-                    signature_spell: (*p.current_signature_spell).clone(),
-                    bracket_tier: p.bracket_tier,
-                    estimated_bracket_tier: p.estimated_bracket_tier,
-                    printings: Vec::new(),
-                    printing_entry_names: Vec::new(),
-                },
-            )
+        .map(|p| PlayerDeckPayload {
+            main_deck: (*p.current_main).clone(),
+            sideboard: (*p.current_sideboard).clone(),
+            commander: (*p.current_commander).clone(),
+            companion: companion_for_rebuild(p, companion_slot),
+            attraction_deck: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: (*p.registered_scheme_deck).clone(),
+            contraption_deck: Vec::new(),
+            sticker_sheets: state
+                .players
+                .iter()
+                .find(|player| player.id == p.player)
+                .map(|player| player.sticker_sheets.clone())
+                .unwrap_or_default(),
+            signature_spell: (*p.current_signature_spell).clone(),
+            bracket_tier: p.bracket_tier,
+            estimated_bracket_tier: p.estimated_bracket_tier,
+            printings: Vec::new(),
+            printing_entry_names: Vec::new(),
         })
         .collect();
 
     Ok(DeckPayload {
-        player: rebind_retained_printings(
-            p0,
-            PlayerDeckPayload {
-                main_deck: (*p0.current_main).clone(),
-                sideboard: (*p0.current_sideboard).clone(),
-                commander: (*p0.current_commander).clone(),
-                companion: companion_for_rebuild(p0, companion_slot),
-                attraction_deck: Vec::new(),
-                planar_deck: (*p0.registered_planar_deck).clone(),
-                scheme_deck: (*p0.registered_scheme_deck).clone(),
-                contraption_deck: Vec::new(),
-                sticker_sheets: state.players[0].sticker_sheets.clone(),
-                signature_spell: (*p0.current_signature_spell).clone(),
-                bracket_tier: p0.bracket_tier,
-                estimated_bracket_tier: p0.estimated_bracket_tier,
-                printings: Vec::new(),
-                printing_entry_names: Vec::new(),
-            },
-        ),
-        opponent: rebind_retained_printings(
-            p1,
-            PlayerDeckPayload {
-                main_deck: (*p1.current_main).clone(),
-                sideboard: (*p1.current_sideboard).clone(),
-                commander: (*p1.current_commander).clone(),
-                companion: companion_for_rebuild(p1, companion_slot),
-                attraction_deck: Vec::new(),
-                planar_deck: Vec::new(),
-                scheme_deck: (*p1.registered_scheme_deck).clone(),
-                contraption_deck: Vec::new(),
-                sticker_sheets: state.players[1].sticker_sheets.clone(),
-                signature_spell: (*p1.current_signature_spell).clone(),
-                bracket_tier: p1.bracket_tier,
-                estimated_bracket_tier: p1.estimated_bracket_tier,
-                printings: Vec::new(),
-                printing_entry_names: Vec::new(),
-            },
-        ),
+        player: PlayerDeckPayload {
+            main_deck: (*p0.current_main).clone(),
+            sideboard: (*p0.current_sideboard).clone(),
+            commander: (*p0.current_commander).clone(),
+            companion: companion_for_rebuild(p0, companion_slot),
+            attraction_deck: Vec::new(),
+            planar_deck: (*p0.registered_planar_deck).clone(),
+            scheme_deck: (*p0.registered_scheme_deck).clone(),
+            contraption_deck: Vec::new(),
+            sticker_sheets: state.players[0].sticker_sheets.clone(),
+            signature_spell: (*p0.current_signature_spell).clone(),
+            bracket_tier: p0.bracket_tier,
+            estimated_bracket_tier: p0.estimated_bracket_tier,
+            printings: Vec::new(),
+            printing_entry_names: Vec::new(),
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: (*p1.current_main).clone(),
+            sideboard: (*p1.current_sideboard).clone(),
+            commander: (*p1.current_commander).clone(),
+            companion: companion_for_rebuild(p1, companion_slot),
+            attraction_deck: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: (*p1.registered_scheme_deck).clone(),
+            contraption_deck: Vec::new(),
+            sticker_sheets: state.players[1].sticker_sheets.clone(),
+            signature_spell: (*p1.current_signature_spell).clone(),
+            bracket_tier: p1.bracket_tier,
+            estimated_bracket_tier: p1.estimated_bracket_tier,
+            printings: Vec::new(),
+            printing_entry_names: Vec::new(),
+        },
         ai_decks,
         // cEDH bracket validation ran at game 1 setup; decks haven't
         // changed between games, so re-validation is unnecessary.
@@ -756,6 +741,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -1260,8 +1246,8 @@ mod tests {
     }
 
     /// CR 732.2a opt-in persistence across the ENGINE between-games rebuild. A Bo3 match
-    /// created with the detector On (projected onto `loop_detection` by `set_match_config`)
-    /// must KEEP it On after `restart_between_games_with_starting_player` builds a fresh
+    /// created with the detector Interactive (projected onto `loop_detection` by
+    /// `set_match_config`) must KEEP it Interactive after `restart_between_games_with_starting_player` builds a fresh
     /// `GameState::new` for game 2. This guards the engine `match_flow` rebuild — distinct
     /// from the server-core `rebuild_pregame_state` path — which a raw `match_config = …`
     /// assignment silently drops, because a fresh `GameState::new` defaults the runtime
@@ -1269,7 +1255,7 @@ mod tests {
     ///
     /// REVERT-FAIL: change the rebuild back to `next_state.match_config = state.match_config;`
     /// ⇒ `next_state.loop_detection` stays at the `GameState::new` default Off and the
-    /// post-restart `On` assertion fails (the opt-in vanishes for game 2/3 of the match).
+    /// post-restart `Interactive` assertion fails (the opt-in vanishes for game 2/3 of the match).
     #[test]
     fn bo3_restart_preserves_loop_detection_opt_in() {
         use crate::types::game_state::LoopDetectionMode;
@@ -1278,10 +1264,10 @@ mod tests {
         let mut state = GameState::new_two_player(17);
         state.set_match_config(MatchConfig {
             match_type: MatchType::Bo3,
-            loop_detection: LoopDetectionMode::On,
+            loop_detection: LoopDetectionMode::Interactive,
         });
         // Creation-time projection holds for game 1.
-        assert_eq!(state.loop_detection, LoopDetectionMode::On);
+        assert_eq!(state.loop_detection, LoopDetectionMode::Interactive);
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
@@ -1355,10 +1341,13 @@ mod tests {
         // ...and the detector opt-in survived the fresh-state rebuild.
         assert_eq!(
             state.loop_detection,
-            LoopDetectionMode::On,
+            LoopDetectionMode::Interactive,
             "detector opt-in must persist across the engine between-games rebuild"
         );
-        assert_eq!(state.match_config.loop_detection, LoopDetectionMode::On);
+        assert_eq!(
+            state.match_config.loop_detection,
+            LoopDetectionMode::Interactive
+        );
     }
 
     /// Debug capability must survive the ENGINE between-games rebuild, exactly
@@ -1660,10 +1649,9 @@ mod tests {
         );
     }
 
-    /// CR 100.4 + CR 203.1 + CR 206.1: every seat's payload, including an `ai_decks` seat,
-    /// is rebound from that seat's own retained printing record.
+    /// CR 100.4 + CR 203.1 + CR 206.1: every seat loads its own retained printings.
     #[test]
-    fn deck_payload_from_current_pools_rebinds_every_seat_from_its_own_record() {
+    fn continuation_load_binds_every_seat_from_its_own_record() {
         use crate::types::card_printing::{
             CardPrinting, DeckFaceLookupName, DeckPrinting, DeckPrintingRecord, DeckSection,
         };
@@ -1677,10 +1665,7 @@ mod tests {
                     section: DeckSection::MainDeck,
                     name: name.clone(),
                     count: 2,
-                    printing: CardPrinting {
-                        set_code: format!("seat-{seat}"),
-                        collector_number: "1".to_string(),
-                    },
+                    printing: CardPrinting::owner(format!("seat-{seat}"), "1"),
                 };
                 let lookup =
                     DeckFaceLookupName::of(DeckSection::MainDeck, &basic_land(&name), name.clone());
@@ -1703,25 +1688,21 @@ mod tests {
             1,
             "reach: seat 2 is an ai_decks seat"
         );
-        for (seat, deck) in [&payload.player, &payload.opponent, &payload.ai_decks[0]]
-            .into_iter()
-            .enumerate()
-        {
-            let name = format!("P{seat}");
-            assert_eq!(
-                deck.printings.len(),
-                1,
-                "seat {seat} gets exactly its own row"
-            );
-            assert_eq!(deck.printings[0].name, name);
-            assert_eq!(deck.printings[0].count, 2);
-            assert_eq!(deck.printings[0].printing.set_code, format!("seat-{seat}"));
-            let bindings: Vec<_> = deck
-                .printing_entry_names
-                .iter()
-                .map(|binding| (binding.section, binding.entry_index, binding.name.as_str()))
+        let mut next = GameState::new(state.format_config.clone(), 3, 42);
+        load_next_game_decks(&mut next, &payload, &state.deck_pools);
+        for seat in 0..3 {
+            let objects: Vec<_> = next
+                .objects
+                .values()
+                .filter(|object| object.owner == PlayerId(seat))
                 .collect();
-            assert_eq!(bindings, [(DeckSection::MainDeck, 0, name.as_str())]);
+            assert_eq!(objects.len(), 2, "seat {seat} loads both copies");
+            let expected = CardPrinting::owner(format!("seat-{seat}"), "1");
+            for object in objects {
+                assert_eq!(object.name, format!("P{seat}"));
+                assert_eq!(object.printing.get().as_deref(), Some(&expected));
+                assert_eq!(object.base_printing.get().as_deref(), Some(&expected));
+            }
         }
     }
 
