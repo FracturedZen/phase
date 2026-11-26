@@ -18118,10 +18118,10 @@ mod random_result_resolution_context_tests {
         );
     }
 
-    /// The Nth-from-top sibling: `[A, B, H]` second from the top of `[A, B, C]`
-    /// settles as `[A, H, B, C]` — the same image the restored H delivery
-    /// already produced. The arrangement still reorders A and B (CR 701.20d), so
-    /// an unchanged image must not skip their retirement.
+    /// The Nth-from-top sibling (CR 401.4, #10216): `[A, B, H]` second from
+    /// the top of `[A, B, C]` lands as one group counted against the card that
+    /// stays put, so it settles as `[C, A, B, H]` rather than the
+    /// `[A, H, B, C]` the restored H delivery produced, which moves C as well.
     #[test]
     fn restored_legacy_nth_from_top_arrangement_settles_the_exact_chosen_order() {
         let (state, events, cards) =
@@ -18132,7 +18132,26 @@ mod random_result_resolution_context_tests {
             &state,
             &events,
             &cards,
-            &[cards.a, cards.hand, cards.b, cards.c],
+            &[cards.c, cards.a, cards.b, cards.hand],
+            false,
+        );
+    }
+
+    /// An unchanged image still retires the library-origin members: `[H, A, B]`
+    /// first from the top of `[A, B, C]` settles as `[H, A, B, C]`, the same
+    /// image the restored H delivery already produced. The arrangement still
+    /// reorders A and B (CR 701.20d), so it must not skip their retirement.
+    #[test]
+    fn restored_legacy_nth_from_top_unchanged_image_still_retires_library_members() {
+        let (state, events, cards) =
+            restore_and_drain_legacy_arrangement(LibraryPosition::NthFromTop { n: 1 }, |cards| {
+                vec![cards.hand, cards.a, cards.b]
+            });
+        assert_legacy_arrangement_settled(
+            &state,
+            &events,
+            &cards,
+            &[cards.hand, cards.a, cards.b, cards.c],
             true,
         );
     }
