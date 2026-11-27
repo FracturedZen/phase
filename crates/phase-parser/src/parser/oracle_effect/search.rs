@@ -694,8 +694,8 @@ fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetF
     // searcher (`searcher_is_library_owner` is false for Typed) — unlike bare
     // ParentTargetController, which is Assassin's Trophy ("its controller may
     // search their library").
-    let prior_object_controller = !has_declared_player
-        && matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget));
+    let prior_object_controller =
+        !has_declared_player && matches!(ctx.object_pronoun_ref, Some(TargetFilter::ParentTarget));
     let that_player_is_triggering = matches!(
         super::imperative::that_player_library_filter(ctx),
         TargetFilter::TriggeringPlayer

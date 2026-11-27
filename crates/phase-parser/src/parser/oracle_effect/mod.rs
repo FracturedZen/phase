@@ -61950,9 +61950,7 @@ fn haunting_echoes_search_that_players_library_binds_named_player() {
         Some(TargetFilter::ParentTarget) | Some(TargetFilter::DeclaredPlayer { .. }) => true,
         Some(TargetFilter::Typed(tf)) => matches!(
             tf.controller,
-            Some(ControllerRef::ParentTargetController)
-                | Some(ControllerRef::TargetPlayer)
-                | None
+            Some(ControllerRef::ParentTargetController) | Some(ControllerRef::TargetPlayer) | None
         ),
         _ => false,
     };
