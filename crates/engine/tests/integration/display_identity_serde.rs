@@ -143,6 +143,7 @@ fn legacy_latched_snapshot_without_token_art_deserializes() {
 /// so stripping their keys reproduces the pre-bundle skip-serialized shape.
 fn printed_card_copy_token_spec() -> CopyTokenSpec {
     CopyTokenSpec {
+        blocking_attacker: None,
         values: Box::new(sample_values()),
         display: DisplayIdentity {
             display_source: DisplaySource::Card,
@@ -154,11 +155,14 @@ fn printed_card_copy_token_spec() -> CopyTokenSpec {
         additional_modifications: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(1),
         controller: PlayerId(0),
         // Synthetic spec: no donor in scope (serde shape fixture only).
         donor: None,
+        // Single-faced synthetic values: no other face to carry.
+        double_faced: None,
     }
 }
 

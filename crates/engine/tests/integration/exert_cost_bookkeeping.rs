@@ -18,12 +18,13 @@
 //! creature, so the observer tests pair Resolute Survivors (observer) with a
 //! cost-exerter (Arena of Glory, Fervent Paincaster, Oasis Ritualist).
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::support::shared_card_db;
 use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
 use engine::game::functioning_abilities::active_trigger_definitions;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::printed_cards::{
     install_card_db, rehydrate_game_from_card_db_with_finalization, CardDbRehydrationFinalization,
 };
@@ -1316,13 +1317,14 @@ fn restore_copy_with_real_db(state: &GameState, trusted: bool) -> GameRunner {
 }
 
 fn restore_copy_json_with_real_db(json: serde_json::Value) -> GameRunner {
+    static DB: LazyLock<Arc<CardDatabase>> = LazyLock::new(|| {
+        Arc::new(
+            CardDatabase::from_integration_fixture_cached()
+                .expect("load the actual integration CardDatabase"),
+        )
+    });
     shared_card_db().expect("real integration fixture is required");
-    let db = Arc::new(
-        CardDatabase::from_export_reader(flate2::read::GzDecoder::new(
-            &include_bytes!("../fixtures/integration_cards.json.gz")[..],
-        ))
-        .expect("load the actual integration CardDatabase"),
-    );
+    let db = Arc::clone(&DB);
     let restored = serde_json::from_value::<PersistedGameState>(json)
         .expect("decode saved copy")
         .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)

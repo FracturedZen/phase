@@ -1,3 +1,4 @@
+import { deckEntryKey, type DeckEntry } from "../../../services/deckParser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
@@ -6,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 
 import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
-import { resolveCommander } from "../../../services/deckParser";
+import { resolveCommander } from "../../../services/commanderResolution";
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
 import { withSavedDeckLibrary } from "../../../services/savedDeckTransaction";
 import {
@@ -20,10 +21,9 @@ vi.mock("../../../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
 }));
 vi.mock("../../../hooks/useDecks", () => ({ loadPreconDeckMap: vi.fn() }));
-vi.mock("../../../services/deckParser", async () => {
-  const actual = await vi.importActual<typeof import("../../../services/deckParser")>("../../../services/deckParser");
-  return { ...actual, resolveCommander: vi.fn(async (deck) => deck) };
-});
+vi.mock("../../../services/commanderResolution", () => ({
+  resolveCommander: vi.fn(async (deck) => deck),
+}));
 vi.mock("../CardSearch", () => ({
   CardSearch: ({ onResults }: { onResults: (cards: unknown[], total: number) => void }) => {
     useEffect(() => { onResults([], 0); }, [onResults]);
@@ -37,13 +37,13 @@ vi.mock("../DeckList", () => ({
     onRemoveCard,
   }: {
     deck: { main: Array<{ name: string; count: number }> };
-    onRemoveCard: (name: string, section: "main" | "sideboard") => void;
+    onRemoveCard: (entry: DeckEntry, section: "main" | "sideboard") => void;
   }) => (
     <div>
       {deck.main.map((entry) => (
-        <div key={entry.name}>
+        <div key={deckEntryKey(entry)}>
           <span>{entry.count} {entry.name}</span>
-          <button type="button" onClick={() => onRemoveCard(entry.name, "main")}>
+          <button type="button" onClick={() => onRemoveCard(entry, "main")}>
             remove-{entry.name}
           </button>
         </div>

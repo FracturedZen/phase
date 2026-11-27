@@ -151,7 +151,7 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Mana,
         win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        deferral: None,
     },
     ComboRow {
         name: "Grim Monolith + Power Artifact",
@@ -640,6 +640,14 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         gated_on: None,
         deferral: None,
     },
+    ComboRow {
+        name: "Displacer Kitten + Blazing Firesinger",
+        cards: &["Displacer Kitten", "Blazing Firesinger"],
+        family: ResourceFamily::Mana,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
+    },
 ];
 
 #[cfg(test)]
@@ -758,6 +766,7 @@ pub(crate) enum ComboDriver {
 pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (0, ComboDriver::Offline(drive_offline_heliod_ballista)),
     (1, ComboDriver::Offline(drive_offline_kilo_freed_relic)),
+    (3, ComboDriver::Offline(drive_offline_basalt_rings)),
     (4, ComboDriver::Offline(drive_offline_grim_power)),
     (6, ComboDriver::Offline(drive_offline_devoted_vizier)),
     (9, ComboDriver::Offline(drive_offline_bloom_freed)),
@@ -781,6 +790,7 @@ pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
         60,
         ComboDriver::Offline(drive_archaeomancer_time_warp_offer),
     ),
+    (61, ComboDriver::Offline(drive_kitten_firesinger_offer)),
 ];
 
 /// Number of rows in the corpus.
@@ -800,10 +810,11 @@ pub fn row(idx: usize) -> &'static ComboRow {
 /// mismatch is a `Failed` — this is the comparison the revert-probe pins: dropping
 /// the `win_kind == row.win_kind && family_matches_axis(..)` check (rubber-stamping
 /// any `Some(cert)`), or treating `None` as confirmed, flips a Failed to Confirmed.
+/// A certificate naming no win kind wins nothing, so it is compared as `Advantage`.
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == Some(row.win_kind)
+            if cert.win_kind.unwrap_or(WinKind::Advantage) == row.win_kind
                 && cert
                     .unbounded
                     .iter()
@@ -1705,6 +1716,106 @@ pub(crate) fn drive_offline_grim_power(db: &CardDatabase) -> Option<LoopCertific
     })
 }
 
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana. Basalt Monolith ("{T}:
+/// Add {C}{C}{C}." / "{3}: Untap this artifact.") taps for {C}{C}{C}, then activates its untap;
+/// Rings of Brighthearth ("Whenever you activate an ability, if it isn't a mana ability, you may
+/// pay {2}. If you do, copy that ability. You may choose new targets for the copy.") copies it
+/// (CR 707.10). The copy resolves first and untaps Monolith, which taps again while the original
+/// waits on the stack (CR 605.3a: a mana ability is activated whenever its controller has
+/// priority), and the original then untaps it once more. A steady cycle starts and ends with
+/// Monolith tapped: two taps for {C}x6 in, {3} + {2} out, +{C} net.
+pub(crate) fn drive_offline_basalt_rings(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_basalt_rings(db, true)
+}
+
+/// [`drive_offline_basalt_rings`] answering Rings' "you may pay {2}" with `copy`. Declining
+/// leaves one tap per {3} untap, so no loop stands.
+pub(crate) fn drive_basalt_rings(db: &CardDatabase, copy: bool) -> Option<LoopCertificate> {
+    let (board, cycle) = basalt_rings_board(db)?;
+    run_combo(board, |probe| {
+        let _ = cycle.run(probe, copy);
+    })
+}
+
+/// The Basalt Monolith + Rings of Brighthearth board and the cycle that drives it.
+pub(crate) fn basalt_rings_board(db: &CardDatabase) -> Option<(ComboBoard, BasaltRingsCycle)> {
+    let board = build_board(db, CORPUS[3].cards)?;
+    let monolith = board.ids[0];
+    let untap_idx = ability_index_where(board.runner.state(), monolith, is_untap_effect)?;
+    let tap_idx = ability_index_where(board.runner.state(), monolith, is_mana_effect)?;
+    Some((
+        board,
+        BasaltRingsCycle {
+            monolith,
+            untap_idx,
+            tap_idx,
+        },
+    ))
+}
+
+/// One Basalt Monolith + Rings of Brighthearth cycle: tap Monolith if it is untapped, activate
+/// its untap, answer Rings' "you may pay {2}", and tap Monolith whenever it is untapped while P0
+/// holds priority, until the stack is empty.
+pub(crate) struct BasaltRingsCycle {
+    pub(crate) monolith: ObjectId,
+    untap_idx: usize,
+    tap_idx: usize,
+}
+
+impl BasaltRingsCycle {
+    /// Drives one cycle, answering Rings' prompt with `copy`. `Some(answered)` when the cycle
+    /// reached an empty-stack priority window, `answered` saying whether Rings' prompt came;
+    /// `None` when an action was refused or an unexpected prompt appeared.
+    pub(crate) fn run(&self, probe: &mut LoopProbe, copy: bool) -> Option<bool> {
+        let tapped = |probe: &LoopProbe| {
+            probe
+                .runner()
+                .state()
+                .objects
+                .get(&self.monolith)
+                .is_some_and(|object| object.tapped)
+        };
+        let activate = |probe: &mut LoopProbe, ability_index: usize| {
+            probe
+                .act(GameAction::ActivateAbility {
+                    source_id: self.monolith,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .ok()
+        };
+        if !tapped(probe) {
+            activate(probe, self.tap_idx)?;
+        }
+        activate(probe, self.untap_idx)?;
+        let mut answered = false;
+        for _ in 0..32 {
+            let state = probe.runner().state();
+            let action = match &state.waiting_for {
+                // CR 605.3a: tap the untapped Monolith for mana whenever P0 holds priority,
+                // including between the copy and the original untap resolving.
+                WaitingFor::Priority { .. } if !tapped(probe) => {
+                    activate(probe, self.tap_idx)?;
+                    continue;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => return Some(answered),
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                    GameAction::PassPriority
+                }
+                // Rings' "you may pay {2}": accepting copies the untap.
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    answered = true;
+                    GameAction::DecideOptionalEffect { accept: copy }
+                }
+                WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
+                _ => return None,
+            };
+            probe.act(action).ok()?;
+        }
+        None
+    }
+}
+
 /// #47 SPIKE FEEDER + ARCHANGEL OF THUNE — infinite +1/+1 counters + life. Spike
 /// removes a counter to gain 2 life; Archangel returns a counter to each creature.
 /// Board identical modulo counters; unbounded axes are counters + life.
@@ -1803,10 +1914,15 @@ pub(crate) fn drive_offline_selvala_staff(db: &CardDatabase) -> Option<LoopCerti
 /// zero; +1 proliferate trigger/cycle, board identical.
 pub(crate) fn drive_offline_kilo_freed_relic(db: &CardDatabase) -> Option<LoopCertificate> {
     let mut board = build_board(db, CORPUS[1].cards)?;
+    attach_aura(board.runner.state_mut(), board.ids[1], board.ids[0]);
+    run_kilo_freed_relic(board)
+}
+
+/// The Kilo/Freed/Relic cycle over the CORPUS[1] board once Freed enchants Kilo.
+fn run_kilo_freed_relic(board: ComboBoard) -> Option<LoopCertificate> {
     let kilo = board.ids[0];
     let freed = board.ids[1];
     let relic = board.ids[2];
-    attach_aura(board.runner.state_mut(), freed, kilo);
     // Relic's "tap a creature: add mana" ability (the one that taps Kilo) — found
     // by its `TapCreatures` cost (Relic has two mana abilities; the tap-self one
     // would not fire Kilo's trigger).
@@ -1831,6 +1947,25 @@ pub(crate) fn drive_offline_kilo_freed_relic(db: &CardDatabase) -> Option<LoopCe
         );
         activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
     })
+}
+
+/// The Kilo/Freed/Relic engine with Scheming Aspirant ("Whenever you proliferate, each opponent
+/// loses 2 life and you gain 2 life.") for P0, P1 starting at `life` with `poison` counters:
+/// each cycle costs P1 2 life and, from one poison counter on, adds one (CR 701.34a).
+pub(crate) fn drive_offline_kilo_freed_relic_aspirant(
+    db: &CardDatabase,
+    life: i32,
+    poison: u32,
+) -> Option<LoopCertificate> {
+    let mut board = build_board(db, CORPUS[1].cards)?;
+    attach_aura(board.runner.state_mut(), board.ids[1], board.ids[0]);
+    let state = board.runner.state_mut();
+    install_on_battlefield(state, db, "Scheming Aspirant", P0)?;
+    let victim = state.players.iter_mut().find(|p| p.id == P1)?;
+    victim.life = life;
+    victim.poison_counters = poison;
+    settle_layers(state);
+    run_kilo_freed_relic(board)
 }
 
 /// PR-7 acceptance — PENTAD PRISM under the KILO + FREED + RELIC proliferate engine.
@@ -1915,9 +2050,14 @@ pub(crate) fn drive_offline_pentad_prism_seeded(
 /// `WinKind::Advantage` and NO damage axis. Standalone (not in `DRIVERS`, no `CORPUS`
 /// row) — mirrors `drive_offline_pentad_prism_seeded`; the Damage/`LethalDamage` family
 /// is already the corpus's row 0 (Heliod+Ballista), so no new row is warranted.
+///
+/// `victim` is the ping's target; `equipment` names a card installed for P0 and attached to
+/// Ballista.
 pub(crate) fn drive_offline_kilo_freed_relic_ballista(
     db: &CardDatabase,
     seed_counters: u32,
+    victim: PlayerId,
+    equipment: Option<&str>,
 ) -> Option<LoopCertificate> {
     use crate::types::ability::{AbilityCost, Effect};
 
@@ -1939,6 +2079,10 @@ pub(crate) fn drive_offline_kilo_freed_relic_ballista(
                     seed_counters,
                 );
             }
+        }
+        if let Some(name) = equipment {
+            let equipment = install_on_battlefield(state, db, name, P0)?;
+            attach_aura(state, equipment, ballista);
         }
         settle_layers(state);
     }
@@ -1967,7 +2111,12 @@ pub(crate) fn drive_offline_kilo_freed_relic_ballista(
             Some(TargetRef::Object(kilo)),
         );
         activate_and_resolve(probe, freed, freed_untap, Some(TargetRef::Object(kilo)));
-        activate_and_resolve(probe, ballista, ballista_ping, Some(TargetRef::Player(P1)));
+        activate_and_resolve(
+            probe,
+            ballista,
+            ballista_ping,
+            Some(TargetRef::Player(victim)),
+        );
     })
 }
 
@@ -2096,9 +2245,8 @@ pub(crate) fn drive_offline_marwyn_sword(db: &CardDatabase) -> Option<LoopCertif
 
 // ===========================================================================
 // Live drain-cascade drivers. These drive the REAL per-beat `apply(PassPriority)`
-// reducer (not the offline `detect_loop` harness) so the persisted
-// `loop_detect_ring` accumulation and the reconcile-seam win shortcut are
-// exercised end-to-end.
+// reducer (not the offline `detect_loop` harness) so the reconcile-seam loop
+// outcomes are exercised end-to-end.
 // ===========================================================================
 
 /// Build an N-player board with the named permanents installed on P0, each opponent
@@ -2132,10 +2280,9 @@ pub(crate) fn build_drain_board_n(
         state.active_player = P0;
         state.priority_player = P0;
         // CR 732.2a: this harness exercises the live combo-detector, so it opts the
-        // (default-OFF) detector ON. Without this the reconcile-seam shortcut and the
-        // loop-detection ring sampler are both gated off and no drain cascade would be
-        // shortcut to its GameOver — see `GameState::loop_detection`.
-        state.loop_detection = crate::types::game_state::LoopDetectionMode::On;
+        // (default-OFF) detector ON. Without this the reconcile-seam shortcut is gated off
+        // and no drain cascade would be shortcut to its GameOver — see `GameState::loop_detection`.
+        state.loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
     }
     let mut ids = Vec::new();
     {
@@ -2192,7 +2339,6 @@ pub(crate) struct BeatTrace {
     pub(crate) beat: usize,
     pub(crate) wf: WaitingFor,
     pub(crate) stack_len: usize,
-    pub(crate) ring_len: usize,
     /// Life total of every seat (index = `PlayerId`), snapshotted this beat. A `Vec`
     /// (not `p0_life`/`p1_life`) so the multiplayer regressions read 3- and 4-player
     /// tables without assuming a fixed count.
@@ -2227,7 +2373,6 @@ pub(crate) fn drive_pass_priority(board: &mut ComboBoard, max_beats: usize) -> V
             beat,
             wf: s.waiting_for.clone(),
             stack_len: s.stack.len(),
-            ring_len: s.loop_detect_ring.len(),
             lives: s.players.iter().map(|p| p.life).collect(),
         });
         if matches!(
@@ -2277,7 +2422,6 @@ pub(crate) fn drive_with_trigger_ordering(
             beat,
             wf: s.waiting_for.clone(),
             stack_len: s.stack.len(),
-            ring_len: s.loop_detect_ring.len(),
             lives: s.players.iter().map(|p| p.life).collect(),
         });
         if matches!(
@@ -2764,9 +2908,53 @@ pub(crate) fn drive_archaeomancer_time_warp_offer(db: &CardDatabase) -> Option<L
     })
 }
 
+/// CR 722.3c + CR 603.2 + CR 400.7: Blazing Firesinger ("This creature enters prepared.") casts
+/// its prepared Seething Song copy ("Add {R}{R}{R}{R}{R}.") for {2}{R}, and Displacer Kitten
+/// ("Whenever you cast a noncreature spell, exile up to one target nonland permanent you control,
+/// then return that card to the battlefield under its owner's control.") blinks Firesinger, which
+/// re-enters prepared as a new object with a new copy in exile, cycle by cycle until the engine
+/// offers the loop. Firesinger is cast from hand onto six Mountains, so it enters prepared through
+/// its own replacement.
+pub(crate) fn drive_kitten_firesinger_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Displacer Kitten", Zone::Battlefield, db);
+    let firesinger = scenario.add_real_card(P0, "Blazing Firesinger", Zone::Hand, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    let card_id = runner.state().objects.get(&firesinger)?.card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: firesinger,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: Default::default(),
+        })
+        .ok()?;
+    answer_to_offer(&mut runner, 400, |state| match &state.waiting_for {
+        WaitingFor::Priority { player }
+            if *player == P0
+                && state.stack.is_empty()
+                && state
+                    .objects
+                    .get(&firesinger)
+                    .is_some_and(|object| object.prepared.is_some()) =>
+        {
+            GameAction::CastPreparedCopy { source: firesinger }
+        }
+        WaitingFor::TriggerTargetSelection { .. } => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(firesinger)),
+        },
+        _ => pass_or_decline(state),
+    })
+}
+
 /// Drive one live drain cascade (idx 17 / idx 18) to its first `GameOver`. The two
 /// rows differ only by `CORPUS[idx].cards` (targeted vs untargeted drain) and share
-/// this body. P1 starts at 200 life so the win is the §3 ring shortcut, not the
+/// this body. P1 starts at 200 life so the win is the detector's shortcut, not the
 /// ~400-beat natural CR 704.5a death.
 fn drive_live_drain(db: &CardDatabase, idx: usize) -> Option<(usize, PlayerId)> {
     let mut board = build_drain_board(db, CORPUS[idx].cards, 200)?;

@@ -513,7 +513,7 @@ const NESTED_SUB_COST: &[Row] = &[
     ("m/Dreadship Reef", "Dreadship Reef", "{1}, Remove X storage counters from ~: Add X mana in any combination of {U} and/or {B}.", &[("Wastes", B, 'p')], &[("member", "storage", 2)], "Metallic Sliver", true, "tt/BF"),
     ("m/Dromar's Attendant", "Dromar's Attendant", "{1}, Sacrifice ~: Add {W}{U}{B}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Energy Refractor", "Energy Refractor", "{2}: Add one mana of any color.", &[("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
-    ("m/Evendo, Waking Haven", "Evendo, Waking Haven", "12+ | {G}, {T}: Add {G} for each creature you control.", &[("Forest", B, 'p')], &[], "Metallic Sliver", false, "tt/H"),
+    ("m/Evendo, Waking Haven", "Evendo, Waking Haven", "12+ | {G}, {T}: Add {G} for each creature you control.", &[("Forest", B, 'p')], &[("member", "charge", 12)], "Metallic Sliver", false, "tt/H"),
     ("m/Farrelite Priest", "Farrelite Priest", "{1}: Add {W}. If this ability has been activated four or more times this turn, sacrifice ~ at the beginning of the next end step.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Ferrous Lake", "Ferrous Lake", "{1}, {T}: Add {U}{R}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Fetid Heath", "Fetid Heath", "{W/B}, {T}: Add {W}{W}, {W}{B}, or {B}{B}.", &[("Plains", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
@@ -623,7 +623,7 @@ const NESTED_SUB_COST: &[Row] = &[
     ("m/Unknown Event Shores", "Unknown Event Shores", "{1}, {T}: Add 1 mana of any color.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Unknown Shores", "Unknown Shores", "{1}, {T}: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Urn of Godfire", "Urn of Godfire", "{2}: Add one mana of any color.", &[("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
-    ("m/Uthros, Titanic Godcore", "Uthros, Titanic Godcore", "12+ | {U}, {T}: Add {U} for each artifact you control.", &[("Island", B, 'p')], &[], "Metallic Sliver", false, "tt/H"),
+    ("m/Uthros, Titanic Godcore", "Uthros, Titanic Godcore", "12+ | {U}, {T}: Add {U} for each artifact you control.", &[("Island", B, 'p')], &[("member", "charge", 12)], "Metallic Sliver", false, "tt/H"),
     ("m/Verdant Eidolon", "Verdant Eidolon", "{G}, Sacrifice ~: Add three mana of any one color.", &[("Forest", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Vessel of Volatility", "Vessel of Volatility", "{1}{R}, Sacrifice ~: Add {R}{R}{R}{R}.", &[("Mountain", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Viridescent Bog", "Viridescent Bog", "{1}, {T}: Add {B}{G}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
@@ -873,14 +873,17 @@ fn unchanged_boards_read_as_before() {
 const UNCHANGED: &[Row] = &[
     ("t/cryptex", "Cryptex", "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on ~.", &[("Hill Giant", G, 'f')], &[], "Llanowar Elves", true, "tt/BF"),
     ("t/master-of-dark-rites", "Master of Dark Rites", "{T}, Sacrifice another creature: Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.", &[("Grizzly Bears", B, 'f')], &[], "Vampire Nighthawk", false, "ff/H"),
-    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "ft/H"),
+    // #9812: offered once the bounded reducer witness completes the targeted cast (was ft/H).
+    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "tt/GY"),
     ("t/springjack-pasture", "Springjack Pasture", "{T}, Sacrifice X Goats: Add X mana of any one color. You gain X life.", &[("Mountain Goat", B, 'f')], &[], "Llanowar Elves", false, "ff/H"),
     ("t/thornvault-forager", "Thornvault Forager", "{T}, Forage: Add two mana in any combination of colors.", &[("Hill Giant", G, 'f'), ("Hill Giant", G, 'f'), ("Hill Giant", G, 'f')], &[], "Grizzly Bears", false, "ff/H"),
     ("x/Eldrazi Temple", "Eldrazi Temple", "{T}: Add {C}{C}. Spend this mana only to cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("x/Rafi, Retro Racer", "Rafi, Retro Racer", "{R}, Sacrifice ~: Each player adds {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Satyr Hedonist", "Satyr Hedonist", "{R}, Sacrifice ~: Add {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Vessel of Volatility", "Vessel of Volatility", "{1}{R}, Sacrifice ~: Add {R}{R}{R}{R}.", &[("Mountain", B, 'p'), ("Wastes", B, 'p')], &[], "Barbarian Horde", true, "tt/BF"),
-    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", true, "ft/GY"),
+    // CR 601.2h: Electric Revelation's "discard a card" can't be paid from an
+    // empty hand, so neither the legality predicate nor the offer admits it.
+    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", false, "ff/GY"),
     ("e/Cloudpost", "Cloudpost", "{T}: Add {C} for each Locus on the battlefield.", &[("Glimmerpost", B, 'p'), ("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Codsworth, Handy Helper", "Codsworth, Handy Helper", "{T}: Add {W}{W}. Spend this mana only to cast Aura and/or Equipment spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Suppression Bonds", false, "ff/H"),
     ("e/Elfhame Druid", "Elfhame Druid", "{T}: Add {G}{G}. Spend this mana only to cast kicked spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Axebane Beast", false, "ff/H"),

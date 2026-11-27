@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CommanderPanel } from "../CommanderPanel";
@@ -18,45 +18,28 @@ function makeLegendaryCreature(name: string): ScryfallCard {
 }
 
 describe("CommanderPanel", () => {
-  it("keeps a backed duplicate candidate available only for commanders-inside composition", () => {
-    const name = "The Prismatic Piper";
-    const sharedProps = {
-      deck: [{ name, count: 2 }],
-      cardDataCache: new Map([[name, makeLegendaryCreature(name)]]),
+  it("renders only the supplied candidate names in order and forwards their spelling", () => {
+    const onSetCommander = vi.fn();
+    const props = {
+      commanders: [],
+      deck: [{ name: "Local Legend", count: 2 }],
+      deckComposition: "commanders-inside" as const,
+      cardDataCache: new Map(),
       deckSizeRule: { type: "Minimum" as const, data: 60 },
-      isCommanderEligible: () => true,
-      onSetCommander: vi.fn(),
+      onSetCommander,
       onRemoveCommander: vi.fn(),
     };
-
-    const inside = render(
-      <CommanderPanel
-        {...sharedProps}
-        commanders={[name]}
-        deckComposition="commanders-inside"
-      />,
-    );
-    expect(screen.getByRole("button", { name })).toBeInTheDocument();
-    inside.unmount();
-
-    const fullyDesignated = render(
-      <CommanderPanel
-        {...sharedProps}
-        commanders={[name, name]}
-        deckComposition="commanders-inside"
-      />,
-    );
-    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
-    fullyDesignated.unmount();
-
-    render(
-      <CommanderPanel
-        {...sharedProps}
-        commanders={[name]}
-        deckComposition="commanders-outside"
-      />,
-    );
-    expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    const names = ["Sheoldred // The True Scriptures", "Isamaru, Hound of Konda"];
+    const { rerender } = render(<CommanderPanel {...props} commanderCandidates={null} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    rerender(<CommanderPanel {...props} commanderCandidates={names} />);
+    const buttons = within(screen.getByText("Set as commander", { exact: false }).parentElement!)
+      .getAllByRole("button");
+    expect(buttons.map((button) => button.textContent)).toEqual(names);
+    fireEvent.click(buttons[0]);
+    expect(onSetCommander).toHaveBeenCalledWith(names[0]);
+    rerender(<CommanderPanel {...props} commanderCandidates={[]} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("renders two same-name commander slots without duplicate keys", () => {
@@ -71,7 +54,7 @@ describe("CommanderPanel", () => {
         deckComposition="commanders-inside"
         cardDataCache={new Map([[name, makeLegendaryCreature(name)]])}
         deckSizeRule={{ type: "Minimum", data: 60 }}
-        isCommanderEligible={() => true}
+        commanderCandidates={[]}
         onSetCommander={vi.fn()}
         onRemoveCommander={onRemoveCommander}
       />,
@@ -104,7 +87,7 @@ describe("CommanderPanel", () => {
           new Map(names.map((name) => [name, makeLegendaryCreature(name)]))
         }
         deckSizeRule={{ type: "Exactly", data: 100 }}
-        isCommanderEligible={() => true}
+        commanderCandidates={names}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
@@ -132,7 +115,7 @@ describe("CommanderPanel", () => {
         deckComposition="commanders-outside"
         cardDataCache={new Map()}
         deckSizeRule={{ type: "Minimum", data: 60 }}
-        isCommanderEligible={() => false}
+        commanderCandidates={[]}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
@@ -148,11 +131,75 @@ describe("CommanderPanel", () => {
         deckComposition="commanders-outside"
         cardDataCache={new Map()}
         deckSizeRule={{ type: "Exactly", data: 100 }}
-        isCommanderEligible={() => false}
+        commanderCandidates={[]}
         onSetCommander={vi.fn()}
         onRemoveCommander={vi.fn()}
       />,
     );
     expect(screen.getByText("99/100 cards")).toHaveClass("text-yellow-400");
+  });
+
+  it("does not render companion section when no companion exists in pool or selected", () => {
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Filler Card", count: 60 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        commanderCandidates={[]}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companionCandidates={[]}
+      />,
+    );
+    expect(screen.queryByText(/companion/i)).not.toBeInTheDocument();
+  });
+
+  it("renders companion slot and candidates when companionCandidates is provided", () => {
+    const onSetCompanion = vi.fn();
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Lurrus of the Dream-Den", count: 1 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        commanderCandidates={[]}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companionCandidates={["Lurrus of the Dream-Den"]}
+        onSetCompanion={onSetCompanion}
+      />,
+    );
+    expect(screen.getByText("Companion")).toBeInTheDocument();
+    const candidateBtn = screen.getByRole("button", { name: "Lurrus of the Dream-Den" });
+    expect(candidateBtn).toBeInTheDocument();
+    fireEvent.click(candidateBtn);
+    expect(onSetCompanion).toHaveBeenCalledWith("Lurrus of the Dream-Den");
+  });
+
+  it("renders selected companion with remove button and handles removal", () => {
+    const onRemoveCompanion = vi.fn();
+    render(
+      <CommanderPanel
+        commanders={[]}
+        deck={[{ name: "Lurrus of the Dream-Den", count: 1 }]}
+        deckComposition="commanders-outside"
+        cardDataCache={new Map()}
+        deckSizeRule={{ type: "Minimum", data: 60 }}
+        commanderCandidates={[]}
+        onSetCommander={vi.fn()}
+        onRemoveCommander={vi.fn()}
+        companion="Lurrus of the Dream-Den"
+        companionCandidates={["Lurrus of the Dream-Den"]}
+        onRemoveCompanion={onRemoveCompanion}
+      />,
+    );
+    expect(screen.getByText("Companion")).toBeInTheDocument();
+    expect(screen.getByText("Lurrus of the Dream-Den")).toBeInTheDocument();
+    const removeBtn = screen.getByRole("button", { name: "Remove companion" });
+    fireEvent.click(removeBtn);
+    expect(onRemoveCompanion).toHaveBeenCalled();
   });
 });

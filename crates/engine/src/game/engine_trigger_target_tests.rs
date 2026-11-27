@@ -79,6 +79,8 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
     // Manually set up the pending trigger state (as process_triggers would)
     let ability = crate::types::ability::ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             enters_modified_if: None,
             origin: Some(Zone::Battlefield),
             destination: Zone::Exile,
@@ -208,6 +210,8 @@ fn trigger_target_selection_rejects_illegal_target() {
         condition: None,
         ability: Box::new(crate::types::ability::ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
@@ -305,6 +309,8 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
             object_id: ObjectId(98),
             card_id: CardId(98),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }),
         modal: Some(ModalChoice {
             min_choices: 2,
@@ -588,6 +594,8 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
             object_id: ObjectId(99),
             card_id: CardId(99),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }),
         modal: Some(ModalChoice {
             min_choices: 1,
@@ -1085,6 +1093,8 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
             object_id: ObjectId(97),
             card_id: CardId(97),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         }),
         modal: Some(ModalChoice {
             min_choices: 2,

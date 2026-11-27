@@ -117,6 +117,7 @@ pub fn resolve(
         .map(|src| EmblemSource {
             name: src.name.clone(),
             printed_ref: src.printed_ref.clone(),
+            printing: src.printing.clone(),
         });
 
     // CR 607.1d + CR 607.5 + CR 400.7: latch the creating object's exact
@@ -150,6 +151,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::types::ability::{
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,
@@ -160,6 +162,7 @@ mod tests {
 
     fn ninja_pump_static() -> StaticDefinition {
         StaticDefinition {
+            origin: Default::default(),
             mode: StaticMode::Continuous,
             affected: Some(TargetFilter::Typed(TypedFilter {
                 type_filters: vec![crate::types::ability::TypeFilter::Subtype(
@@ -186,6 +189,7 @@ mod tests {
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         }
     }
 
@@ -197,8 +201,12 @@ mod tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,
@@ -361,6 +369,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -415,7 +425,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Sacrifice {
                 target: TargetFilter::Any,
-                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                 min_count: 0,
             },
             vec![crate::types::ability::TargetRef::Object(emblem_id)],

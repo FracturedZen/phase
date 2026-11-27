@@ -214,7 +214,13 @@ pub(crate) fn resolve_branch(
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
-    resolved.replace_target_occurrences(parent_occurrences.occurrences());
+    // CR 608.2d: a branch that makes its own resolution-time choice ("they
+    // shuffle another creature they own into their library") is not bound by
+    // the parent's targets; the shared inheritance authority decides, as it
+    // does for every other chain descent.
+    if crate::game::effects::can_inherit_parent_targets(&resolved) {
+        resolved.replace_target_occurrences(parent_occurrences.occurrences());
+    }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
     // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target
@@ -273,15 +279,6 @@ pub(crate) fn resolve_branch(
     }
     result?;
     resume_pending(state, events);
-    // NOTE: the token-choice applied seed is intentionally NOT cleared here.
-    // A branch may stash a token-bearing sub-ability into `pending_continuation`
-    // (effects/mod.rs) that drains only later, from the ChooseBranch handler at
-    // `engine_resolution_choices.rs` via `drain_pending_continuation`. Clearing
-    // here — just because `waiting_for` is momentarily back at Priority — would
-    // wipe the seed before that stashed token sub-ability proposes, re-prompting
-    // the originating token-choice replacement (issue #4886, review #3). The
-    // seed is cleared at true full-drain in `drain_pending_continuation`
-    // (Priority + no ability-continuation or repeat-for frame).
     Ok(())
 }
 
@@ -314,20 +311,22 @@ fn choosing_players(
 
     let apnap = players::apnap_order(state);
 
-    // CR 608.2c + CR 108.3 + CR 109.4: Three chooser filters are anchored to
+    // CR 608.2c + CR 108.3 + CR 109.4: Four chooser filters are anchored to
     // resolution-scoped state that `matches_player_scope` cannot see (it carries
     // no `ResolvedAbility`): `ChosenPlayer` reads the player chosen earlier this
     // resolution from `ability.chosen_players`; `ParentObjectTargetOwner` reads
-    // the owner of the ability's first object target (CR 108.3); and
+    // the owner of the ability's first object target (CR 108.3);
     // `ParentObjectTargetController` reads its controller (CR 109.4) — the chooser
     // for "that creature's controller faces a villainous choice" (Hunted by The
     // Family), where the targeted creature's controller (not owner) makes the
-    // choice and the two differ for a stolen creature. Resolve them here — this
-    // is the one caller that has the ability in scope — and order the result in
-    // APNAP (CR 701.55d). All filter out eliminated players (CR 104.3a — a player
-    // who loses leaves the game and can no longer be a chooser) and yield a
-    // single chooser, which is correct for the villainous-choice patterns these
-    // power (The Master, This Is How It Ends, Hunted by The Family).
+    // choice and the two differ for a stolen creature; and `ParentPlayerTarget`
+    // reads the ability's first player target directly (CR 115.1). Resolve them
+    // here — this is the one caller that has the ability in scope — and order
+    // the result in APNAP (CR 701.55d). All filter out eliminated players
+    // (CR 104.3a — a player who loses leaves the game and can no longer be a
+    // chooser) and yield a single chooser, which is correct for the
+    // villainous-choice patterns these power (The Master, This Is How It Ends,
+    // Hunted by The Family).
     let anchored: Option<PlayerId> = match chooser {
         PlayerFilter::ChosenPlayer { index } => {
             ability.chosen_players.get(*index as usize).copied()
@@ -337,6 +336,9 @@ fn choosing_players(
         }
         PlayerFilter::ParentObjectTargetController => {
             crate::game::ability_utils::parent_target_controller(ability, state)
+        }
+        PlayerFilter::TargetPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
         }
         _ => None,
     };
@@ -465,6 +467,7 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityKind, CardSelectionMode, Chooser, Comparator, PlayerFilter, PlayerRelation,
         PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, ZoneOwner,
@@ -552,6 +555,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: CardSelectionMode::Chosen,
@@ -706,6 +710,7 @@ mod tests {
         let food = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Food".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -717,6 +722,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -725,6 +732,7 @@ mod tests {
         let treasure = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -736,6 +744,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -902,8 +912,9 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: PlayerFilter::PlayerAttribute {
                     relation: PlayerRelation::Opponent,
-                    attr: Box::new(QuantityRef::LifeLostThisTurn {
+                    attr: Box::new(QuantityRef::LifeLost {
                         player: PlayerScope::ScopedPlayer,
+                        window: TurnWindow::ThisTurn,
                     }),
                     comparator: Comparator::GE,
                     value: Box::new(QuantityExpr::Fixed { value: 3 }),

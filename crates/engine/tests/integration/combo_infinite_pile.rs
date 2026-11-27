@@ -33,7 +33,7 @@ use engine::game::deck_loading::{
     create_object_from_card_face, load_and_hydrate_decks, resolve_deck_list, DeckList,
 };
 use engine::game::derived_views::{derive_views, FamilyCollapseState, UnboundedFamily};
-use engine::game::engine::{apply, start_game};
+use engine::game::engine::{apply, start_game_winner_plays_first};
 use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
@@ -95,13 +95,22 @@ static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     ))
 });
 
-/// The dump's offer, re-reached live: the captured offer carries no confirmed period, so it is
-/// declined and one more real Sprout Swarm cycle (buyback, convoking an untapped Saproling) brings
-/// the offer back with its period.
+/// The dump's offer, re-reached live: the save stands at P0's priority, and one more real Sprout
+/// Swarm cycle (buyback, convoking an untapped Saproling) brings the offer with its period.
 pub(crate) fn offer_state() -> GameState {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+    let state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    apply(&mut state, P0, GameAction::DeclineShortcut).expect("P0 declines the captured offer");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the save stands at P0's priority, got {:?}",
+        state.waiting_for
+    );
+    recast_to_offer(state)
+}
+
+/// One real Sprout Swarm cycle (buyback, convoking P0's lowest untapped Saproling), back to P0's
+/// offer with its period.
+fn recast_to_offer(state: GameState) -> GameState {
     let fodder = state
         .battlefield
         .iter()
@@ -576,11 +585,11 @@ fn create_saproling(state: &mut GameState, owner: PlayerId) -> ObjectId {
 fn bootstrap_4p_game(db: &CardDatabase) -> GameState {
     let decklist: DeckList =
         serde_json::from_str(&DECKLIST_4P).expect("the 4p decklist fixture must deserialize");
-    let payload = resolve_deck_list(db, &decklist);
+    let payload = resolve_deck_list(db, &engine::database::ComboTable::default(), &decklist);
     let mut state = GameState::new(FormatConfig::commander(), 4, RNG_SEED);
     load_and_hydrate_decks(&mut state, &payload, Some(db));
 
-    start_game(&mut state);
+    start_game_winner_plays_first(&mut state);
     assert!(
         matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
         "start_game with real libraries must open the mulligan (got {:?})",
@@ -1226,7 +1235,11 @@ fn real_4p_mana_and_token_boundary_drains_mana_and_still_collapses() {
 
     // Graft a token loop onto the real dump via the engine's single-authority writers — this is
     // the standard Part-2 accept footprint (a TokensCreated axis + a materialization stash).
-    state.mark_unbounded_loop(P0, &[ResourceAxis::TokensCreated]);
+    state.mark_unbounded_loop(
+        P0,
+        &[ResourceAxis::TokensCreated],
+        &[ResourceAxis::TokensCreated],
+    );
     let profile = Box::new(CopiableValues {
         name: "Saproling".to_string(),
         mana_cost: ManaCost::default(),
@@ -1631,10 +1644,8 @@ fn one_shot_bootstrap_accepted_state() -> GameState {
 /// The store and cash-out guards below are what make the surviving row HONEST rather than merely
 /// present, and they are more load-bearing here than they were when this arm asserted absence: a
 /// kept row is a claim about growth that will still land, so the test drives the real CR 500.5
-/// boundary and mints. They are also the anti-"register enablers instead" tripwire: routing this
-/// through `zones`' defuse would call `clear_unbounded_loop`, which also wipes
-/// `pending_unbounded_materialization` and its CR 732.2c bound — i.e. one dying token would
-/// cancel the collapse the whole table accepted. These rows go red the moment that happens.
+/// boundary and mints. A departure that called `clear_unbounded_loop` would also wipe
+/// `pending_unbounded_materialization` and its CR 732.2c bound, and the STORE asserts would fail.
 #[test]
 fn accepted_object_growth_row_survives_losing_its_entire_pile() {
     use engine::analysis::resource::ResourceAxis;
@@ -1793,7 +1804,7 @@ fn accepted_object_growth_row_survives_losing_its_entire_pile() {
     );
 
     // STORE: a DISPLAY revocation only. Nothing here may touch the accepted-collapse stash,
-    // the mark, or the pile — the boundary and the zone-exit defuse still read all three.
+    // the mark, or the pile.
     assert!(
         subject.pending_unbounded_materialization.contains_key(&P0),
         "the accepted-collapse stash must SURVIVE — dropping a row may not cancel growth the \
@@ -1990,6 +2001,10 @@ fn real_4p_boundary_collapse_batches_unobserved_counter_and_declines_observed_li
             ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
             ResourceAxis::Life(P0),
         ],
+        &[
+            ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+            ResourceAxis::Life(P0),
+        ],
     );
     state.register_pending_materialization(
         P0,
@@ -2122,6 +2137,10 @@ fn real_4p_counter_observer_drift_in_window_declines_batched_counter_but_still_m
         .insert(CounterType::Plus1Plus1, base_counters);
     state.mark_unbounded_loop(
         P0,
+        &[ResourceAxis::Counter(
+            CounterClass::Plus1Plus1,
+            ObjectClass::Creature,
+        )],
         &[ResourceAxis::Counter(
             CounterClass::Plus1Plus1,
             ObjectClass::Creature,
@@ -3184,6 +3203,10 @@ fn med_mixed_counter_tokens_pause_commits_finite_counter_and_keeps_only_tokens_u
             CounterClass::Plus1Plus1,
             ObjectClass::Creature,
         )],
+        &[ResourceAxis::Counter(
+            CounterClass::Plus1Plus1,
+            ObjectClass::Creature,
+        )],
     );
     state.register_pending_materialization(
         P0,
@@ -4143,5 +4166,62 @@ fn the_confirmer_rebinds_a_recorded_convoke_to_the_replayed_board() {
     assert!(
         verdicts.iter().any(|(_, verdict)| verdict.is_ok()),
         "a span confirms with its convoke rebound: {verdicts:?}"
+    );
+}
+
+/// Decoction Module: "Whenever a creature you control enters, you get {E} (an energy counter)."
+/// Each Sprout Swarm cycle's Saproling gives P0 one {E}, and a take of five performs the five
+/// cycles (CR 107.14 + CR 732.2c), so the energy lands at the take and no ∞ mark outlives it.
+#[test]
+fn an_energy_growing_loop_is_performed_at_the_take() {
+    use engine::analysis::resource::ResourceAxis;
+
+    let db = shared_card_db().expect("card db");
+    let mut state: GameState =
+        serde_json::from_str(&OFFER_STATE).expect("the real 4p offer dump deserializes");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "{:?}",
+        state.waiting_for
+    );
+    place_card(&mut state, P0, "Decoction Module", Zone::Battlefield, db);
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
+    let mut state = recast_to_offer(state);
+    let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+        unreachable!("recast_to_offer asserts the offer")
+    };
+    assert!(
+        certificate.unbounded.contains(&ResourceAxis::Energy(P0))
+            && certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+        "{:?}",
+        certificate.unbounded
+    );
+    assert_eq!(state.players[0].energy, 1);
+    assert_eq!(p0_saproling_ids(&state).len(), 9);
+
+    drive_all_accept_n(&mut state, 5);
+    assert_eq!(state.players[0].energy, 6);
+    assert_eq!(p0_saproling_ids(&state).len(), 14);
+
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.waiting_for
+    );
+    assert!(
+        !state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.contains(&ResourceAxis::Energy(P0))),
+        "{:?}",
+        state.unbounded_resources.get(&P0)
     );
 }

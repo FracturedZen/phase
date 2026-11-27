@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, GameRestriction, ProhibitedActivity, ResolvedAbility,
-    RestrictionExpiry,
+    Effect, EffectError, EffectKind, FilterProp, GameRestriction, PossessionAxis,
+    ProhibitedActivity, ResolvedAbility, RestrictionExpiry, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -106,6 +106,35 @@ fn fill_runtime_fields(
         }
     }
 
+    // CR 201.2a + CR 608.2h: capture the target's names while the resolving
+    // ability still carries its last known information.
+    if let GameRestriction::ProhibitActivity {
+        activity:
+            ProhibitedActivity::CastSpells {
+                spell_filter: Some(TargetFilter::Typed(filter)),
+            },
+        ..
+    } = restriction
+    {
+        for prop in &mut filter.properties {
+            if matches!(prop, FilterProp::SameNameAsParentTarget) {
+                if let Some(mut names) = crate::game::filter::parent_target_names(state, ability) {
+                    *prop = match names.as_mut_slice() {
+                        [name] => FilterProp::Named {
+                            name: std::mem::take(name),
+                        },
+                        _ => FilterProp::AnyOf {
+                            props: names
+                                .into_iter()
+                                .map(|name| FilterProp::Named { name })
+                                .collect(),
+                        },
+                    };
+                }
+            }
+        }
+    }
+
     let resolved_target_player = ability.target_player();
 
     match restriction {
@@ -147,18 +176,19 @@ fn fill_runtime_fields(
                         ability.scoped_player.unwrap_or(ability.controller),
                     );
                 }
-                // CR 109.4 + CR 608.2c + CR 608.2h: "its controller" — capture the
-                // controller of the parent object target (the countered spell) as
-                // the restriction is created. By now the spell has left the stack
-                // (countered), so parent_target_controller reads it from
-                // last-known information. If the referent can't be resolved (no
-                // parent object target), leave the scope unresolved — enforcement
-                // then restricts no one (fail-closed).
-                RestrictionPlayerScope::ParentObjectTargetController => {
-                    if let Some(controller) =
-                        crate::game::ability_utils::parent_target_controller(ability, state)
-                    {
-                        *affected_players = RestrictionPlayerScope::SpecificPlayer(controller);
+                // CR 108.3 + CR 109.4 + CR 608.2h: resolve the possessor even
+                // after the preceding instruction moved the object to another zone.
+                RestrictionPlayerScope::ParentObjectTarget { possession } => {
+                    let player = match possession {
+                        PossessionAxis::Controller => {
+                            crate::game::ability_utils::parent_target_controller(ability, state)
+                        }
+                        PossessionAxis::Owner => {
+                            crate::game::ability_utils::parent_target_owner(ability, state)
+                        }
+                    };
+                    if let Some(player) = player {
+                        *affected_players = RestrictionPlayerScope::SpecificPlayer(player);
                     }
                 }
                 // CR 109.5 + CR 611.2a: `SourceController` (the "you" in "you
@@ -186,15 +216,76 @@ fn fill_runtime_fields(
     }
 
     if let GameRestriction::ProhibitActivity {
-        activity: ProhibitedActivity::Attack {
-            protected_player, ..
-        },
+        activity:
+            ProhibitedActivity::Attack {
+                protected_player,
+                protected_scope,
+                ..
+            },
         ..
     } = restriction
     {
-        // CR 109.5: snapshot the resolving ability's controller for the
-        // controller-relative "you" in the attack restriction.
-        *protected_player = Some(original_controller);
+        // CR 109.5 + CR 608.2c: scope-SELECTION for the protected player. The
+        // legacy contract (`protected_scope: None` — every shipped user)
+        // snapshots the resolving ability's controller for the
+        // controller-relative "you" in the attack restriction. A targeted
+        // scope instead snapshots the spell/ability's already-chosen player
+        // target (Call for Aid's "that player" anaphor reuses the declared
+        // target slot without declaring a second one).
+        use crate::types::ability::RestrictionPlayerScope;
+        match protected_scope {
+            Some(
+                RestrictionPlayerScope::ParentTargetedPlayer
+                | RestrictionPlayerScope::TargetedPlayer,
+            ) => {
+                *protected_player = Some(resolved_target_player);
+            }
+            // CR 508.5: same capture as the affected-player lowering
+            // above; an unresolvable defender falls back to the
+            // installer (fail-closed toward "you").
+            Some(RestrictionPlayerScope::DefendingPlayer) => {
+                *protected_player = Some(
+                    crate::game::combat::resolve_defending_player(state, ability.source_id)
+                        .or_else(|| {
+                            super::myriad::defending_player_from_attack_event(
+                                state.current_trigger_event.as_ref(),
+                                ability.source_id,
+                            )
+                        })
+                        .unwrap_or(original_controller),
+                );
+            }
+            // CR 109.5 + CR 118.12: the per-iteration scoped player, as
+            // in the affected-player lowering above.
+            Some(RestrictionPlayerScope::ScopedPlayer) => {
+                *protected_player = Some(ability.scoped_player.unwrap_or(original_controller));
+            }
+            Some(RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Owner,
+            }) => {
+                *protected_player = crate::game::ability_utils::parent_target_owner(ability, state);
+            }
+            // No producer emits an explicit protected player today; an
+            // explicit id wins if one ever does.
+            Some(RestrictionPlayerScope::SpecificPlayer(player)) => {
+                *protected_player = Some(*player);
+            }
+            // Controller-relative "you" (None, SourceController) and the
+            // multi-player scopes no producer emits as a protected
+            // player (AllPlayers, OpponentsOfSourceController,
+            // ParentObjectTarget with Controller): the installer. A protected
+            // player must resolve to a single id, so unlisted scopes
+            // collapse here rather than leaving the field empty.
+            None
+            | Some(RestrictionPlayerScope::SourceController)
+            | Some(RestrictionPlayerScope::ParentObjectTarget {
+                possession: PossessionAxis::Controller,
+            })
+            | Some(RestrictionPlayerScope::AllPlayers)
+            | Some(RestrictionPlayerScope::OpponentsOfSourceController) => {
+                *protected_player = Some(original_controller);
+            }
+        }
     }
 
     match restriction {
@@ -445,7 +536,9 @@ mod tests {
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller,
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                 },
@@ -486,7 +579,9 @@ mod tests {
             Effect::AddRestriction {
                 restriction: GameRestriction::ProhibitActivity {
                     source: ObjectId(0),
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller,
+                    },
                     expiry: RestrictionExpiry::EndOfTurn,
                     activity: ProhibitedActivity::CastSpells { spell_filter: None },
                 },
@@ -503,7 +598,9 @@ mod tests {
             matches!(
                 &state.restrictions[0],
                 GameRestriction::ProhibitActivity {
-                    affected_players: RestrictionPlayerScope::ParentObjectTargetController,
+                    affected_players: RestrictionPlayerScope::ParentObjectTarget {
+                        possession: PossessionAxis::Controller
+                    },
                     ..
                 }
             ),
@@ -530,6 +627,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPermanents,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -559,6 +657,7 @@ mod tests {
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPermanents,
                     protected_player: Some(PlayerId(0)),
+                    protected_scope: None,
                 },
             }
         ));
@@ -581,6 +680,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::Player,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -618,6 +718,7 @@ mod tests {
                     activity: ProhibitedActivity::Attack {
                         defended: AttackTargetFilter::PlayerOrPlaneswalker,
                         protected_player: None,
+                        protected_scope: None,
                     },
                 },
             },
@@ -645,6 +746,7 @@ mod tests {
                 activity: ProhibitedActivity::Attack {
                     defended: AttackTargetFilter::PlayerOrPlaneswalker,
                     protected_player: Some(PlayerId(0)),
+                    protected_scope: None,
                 },
             }
         ));

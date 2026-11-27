@@ -35,7 +35,7 @@ use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
 use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
-use crate::types::proposed_event::CopyTokenSpec;
+use crate::types::proposed_event::{CopyTokenSpec, TokenAttackRequest};
 use rand::Rng;
 use std::collections::VecDeque;
 
@@ -147,6 +147,7 @@ pub fn resolve(
         owner: token_owner,
         count,
         copy: Box::new(CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Card,
@@ -158,11 +159,15 @@ pub fn resolve(
             additional_modifications: Vec::new(),
             tapped,
             enters_attacking,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
             // Pool-drawn values name no donor object; empty mods are stamp-proof.
             donor: None,
+            // CR 707.8a: a format-pool copy is built from one card face, so it carries no
+            // other face; a double-faced pool card (Momir) is not modeled as double-faced.
+            double_faced: None,
         }),
     });
 

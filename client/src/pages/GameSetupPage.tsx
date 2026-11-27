@@ -2,10 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
+import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
   formatSuppliesDeck,
+  isArchenemyFamilyFormat,
+  isPlanechaseFamilyFormat,
   isSetupFormat,
   SETUP_FORMATS,
 } from "../data/formatRegistry";
@@ -13,6 +16,9 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import { HordeDeckSelector } from "../components/setup/HordeDeckSelector";
+import { hordeMinimumPlayers } from "../data/challengeDeckRegistry";
+import type { ChallengeDeck } from "../adapter/types";
 import {
   catalogRequestKey,
   useAiDeckCatalog,
@@ -76,7 +82,7 @@ function setupDefaults(format: GameFormat): FormatConfig | null {
 // --- Component ---
 
 export function GameSetupPage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -105,7 +111,8 @@ export function GameSetupPage() {
   const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
-  const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
+  const loopDetection = usePreferencesStore((s) => s.lastLoopDetection);
+  const setLoopDetection = usePreferencesStore((s) => s.setLastLoopDetection);
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   // We only ever read the active deck's compat (see `selectedCompat` below),
   // so MyDecks pushes up just that one entry instead of the entire map. Holding
@@ -149,6 +156,8 @@ export function GameSetupPage() {
   const setLastFormat = usePreferencesStore((s) => s.setLastFormat);
   const setLastMatchType = usePreferencesStore((s) => s.setLastMatchType);
   const setLastPlayerCount = usePreferencesStore((s) => s.setLastPlayerCount);
+  const hordeChallengeDeck = usePreferencesStore((s) => s.hordeChallengeDeck);
+  const setHordeChallengeDeck = usePreferencesStore((s) => s.setHordeChallengeDeck);
 
   // Restore last session on mount
   useEffect(() => {
@@ -167,23 +176,63 @@ export function GameSetupPage() {
     const defaults = setupDefaults(fmt) ?? FORMAT_DEFAULTS.Commander;
     setSelectedFormat(fmt);
     setFormatConfig(defaults);
-    setPlayerCount(restoredLastFormat ? lastPlayerCount : defaults.min_players);
+    // A co-Horde pick (e.g. Two Towers) stored from a prior session needs its
+    // extra seats even if the saved count predates the pick.
+    const restoredCount = restoredLastFormat ? lastPlayerCount : defaults.min_players;
+    const restoreFloor =
+      fmt === "Horde" ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck) : 0;
+    setPlayerCount(Math.max(restoredCount, restoreFloor));
     setMatchType(restoredLastFormat ? lastMatchType : "Bo1");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A picked archenemy seat strands when the table shrinks below it. Clamp to
+  // the last seat (an AI seat in solo play), preserving the "someone else is
+  // the archenemy" intent rather than silently handing the role to the player.
+  // Guarded on the comparison so it settles after one correction.
+  useEffect(() => {
+    if (!formatConfig || !isArchenemyFamilyFormat(formatConfig.format)) return;
+    const seat = formatConfig.archenemy_player ?? 0;
+    if (seat >= playerCount) {
+      setFormatConfig({ ...formatConfig, archenemy_player: playerCount - 1 });
+    }
+  }, [formatConfig, playerCount]);
 
   function applyFormat(format: GameFormat) {
     const defaults = setupDefaults(format);
     if (!defaults) return;
     setSelectedFormat(format);
     setFormatConfig(defaults);
-    setPlayerCount(defaults.min_players);
+    // The picked challenge deck may need co-Horde seats above the format's
+    // own range — the engine rejects undersized tables, so fold the deck's
+    // minimum into the fresh count rather than starting stranded.
+    const deckFloor =
+      format === "Horde"
+        ? hordeMinimumPlayers(usePreferencesStore.getState().hordeChallengeDeck)
+        : defaults.min_players;
+    const count = Math.max(defaults.min_players, deckFloor);
+    setPlayerCount(count);
     setLastFormat(format);
-    setLastPlayerCount(defaults.min_players);
-    if (defaults.min_players !== 2) {
+    setLastPlayerCount(count);
+    if (count !== 2) {
       setMatchType("Bo1");
       setLastMatchType("Bo1");
     }
     setSetupError(null);
+  }
+
+  function handleHordeDeckChange(deck: ChallengeDeck) {
+    setHordeChallengeDeck(deck);
+    // Same stranded-table guard when the pick changes mid-setup: a co-Horde
+    // deck needs extra seats the spinner would otherwise leave short.
+    const minimum = hordeMinimumPlayers(deck);
+    if (playerCount < minimum) {
+      setPlayerCount(minimum);
+      setLastPlayerCount(minimum);
+      if (minimum !== 2) {
+        setMatchType("Bo1");
+        setLastMatchType("Bo1");
+      }
+    }
   }
 
   // useCallback so the prop identity passed to MyDecks/SavedDeckTile2 stays
@@ -210,7 +259,7 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
-    if (formatConfig.format === "Planechase") return;
+    if (isPlanechaseFamilyFormat(formatConfig.format)) return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
@@ -237,10 +286,18 @@ export function GameSetupPage() {
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+    // Clamp a stranded archenemy seat at the submit boundary too: the
+    // effect above normally corrects it live, but a click that beats the
+    // effect to the commit boundary must not submit a past-the-edge seat.
+    const submitConfig =
+      isArchenemyFamilyFormat(formatConfig.format) &&
+      (formatConfig.archenemy_player ?? 0) >= playerCount
+        ? { ...formatConfig, archenemy_player: playerCount - 1 }
+        : formatConfig;
     // The native server owns a fresh AI session and v1 deliberately has no
     // resume contract. Preserve the existing pointer only for the WASM route.
     if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
-      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig });
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats, formatConfig: submitConfig });
     }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
@@ -249,6 +306,12 @@ export function GameSetupPage() {
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
     const pileName = pileSourceParam(pile.source);
+    // Horde: carry the picked challenge deck in the URL so it survives reload and
+    // lands in the saved game record. GamePage applies it to the FormatConfig via
+    // `withChallengeDeck` (which applies that deck's whole engine-resolved
+    // configuration: HordeRuleset plus survivor deck-shape axes).
+    const hordeDeckParam =
+      formatConfig.format === "Horde" ? `&hordeDeck=${hordeChallengeDeck}` : "";
     const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
     // The URL carries the format NAME only, so the edited config (starting
     // life) has to ride along out-of-band or GamePage re-derives it from
@@ -256,8 +319,8 @@ export function GameSetupPage() {
     // same channel `useBroker` uses — rather than a URL param, because the
     // native-engine route above deliberately writes no resume pointer.
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}`,
-      { state: { formatConfig } },
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}${hordeDeckParam}`,
+      { state: { formatConfig: submitConfig } },
     );
   };
 
@@ -267,11 +330,18 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
-  const formatSupportsAi = selectedFormat !== "Planechase";
+  const formatSupportsAi = !isPlanechaseFamilyFormat(selectedFormat);
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;
-  const noLegalAiDecks = !suppliesDeck && legalAiDeckCount === 0;
+  // Horde: the AI seat plays the engine-supplied challenge deck (the Horde deck
+  // is injected at game load), so — like a fixed-deck format — the user is not
+  // required to provide a legal AI deck. Without this, the AI-deck catalog's
+  // known-format filter drops every deck (none is tagged "Horde") and Start is
+  // wrongly disabled.
+  const aiDeckSuppliedByEngine = selectedFormat === "Horde";
+  const noLegalAiDecks =
+    !suppliesDeck && !aiDeckSuppliedByEngine && legalAiDeckCount === 0;
   // Block start only while the card DB is actively loading — not on `error`/`idle`,
   // since initializeGame awaits ensureCardDb itself and an errored warm must not
   // trap the user on this screen.
@@ -539,6 +609,35 @@ export function GameSetupPage() {
                     />
                   </label>
 
+                  {formatConfig.commander_damage_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.commanderDamage")}</span>
+                      <IntegerField
+                        value={formatConfig.commander_damage_threshold}
+                        min={1}
+                        onCommit={(commander_damage_threshold) =>
+                          setFormatConfig({ ...formatConfig, commander_damage_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
+                  {formatConfig.poison_counter_threshold != null && (
+                    <label className="flex items-center justify-between">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.poisonCounters")}</span>
+                      <IntegerField
+                        value={formatConfig.poison_counter_threshold}
+                        min={1}
+                        max={U8_MAX}
+                        onCommit={(poison_counter_threshold) =>
+                          setFormatConfig({ ...formatConfig, poison_counter_threshold })
+                        }
+                        className="w-16 rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1 text-right text-sm text-white"
+                      />
+                    </label>
+                  )}
+
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">
@@ -547,7 +646,14 @@ export function GameSetupPage() {
                       </div>
                       <input
                         type="range"
-                        min={formatConfig.min_players}
+                        min={
+                          formatConfig.format === "Horde"
+                            ? Math.max(
+                                formatConfig.min_players,
+                                hordeMinimumPlayers(hordeChallengeDeck),
+                              )
+                            : formatConfig.min_players
+                        }
                         max={formatConfig.max_players}
                         value={playerCount}
                         onChange={(e) => {
@@ -562,6 +668,30 @@ export function GameSetupPage() {
                         className="w-full"
                       />
                     </label>
+                  )}
+
+                  {isArchenemyFamilyFormat(formatConfig.format) && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs text-slate-400">{t("gameSetup.config.archenemySeat")}</span>
+                      <div className="flex flex-wrap gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
+                        {Array.from({ length: playerCount }, (_, seat) => (
+                          <button
+                            key={seat}
+                            type="button"
+                            onClick={() => setFormatConfig({ ...formatConfig, archenemy_player: seat })}
+                            className={`min-w-0 flex-1 whitespace-nowrap rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
+                              (formatConfig.archenemy_player ?? 0) === seat
+                                ? "bg-indigo-600 text-white"
+                                : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                            }`}
+                          >
+                            {seat === 0
+                              ? t("gameSetup.config.archenemyYou")
+                              : t("gameSetup.config.archenemyOpponent", { number: seat })}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-gray-700 bg-gray-950/70 p-1">
@@ -655,6 +785,18 @@ export function GameSetupPage() {
               {/* Separator */}
               <div className="border-t border-white/8" />
 
+              {/* Horde: pick the self-piloting deck the survivors face. The AI
+                  seat's library is engine-supplied, so this replaces the usual
+                  AI deck selection for this format. */}
+              {selectedFormat === "Horde" && (
+                <>
+                  <HordeDeckSelector
+                    value={hordeChallengeDeck}
+                    onChange={handleHordeDeckChange}
+                  />
+                  <div className="border-t border-white/8" />
+                </>
+              )}
               <PileSourceChoice
                 format={selectedFormat}
                 value={pile.source}

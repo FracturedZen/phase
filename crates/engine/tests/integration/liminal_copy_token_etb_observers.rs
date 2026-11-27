@@ -215,6 +215,7 @@ fn enter_plain_creature(runner: &mut GameRunner) {
         .expect("the premise board is non-empty");
     let ability = ResolvedAbility::new(
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -226,6 +227,7 @@ fn enter_plain_creature(runner: &mut GameRunner) {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

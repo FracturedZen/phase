@@ -1,4 +1,3 @@
-import { isCardCommanderEligible } from "./engineRuntime";
 import { BASIC_LAND_NAMES } from "../constants/game";
 import type { SourcePrinting } from "../hooks/useCardImage";
 
@@ -246,10 +245,18 @@ function normalizeCardName(name: string): string {
   return trimmed;
 }
 
+function hasUsablePrinting(printing: SourcePrinting | undefined): printing is SourcePrinting {
+  const isFilled = (field: unknown) => typeof field === "string" && field.trim() !== "";
+  return isFilled(printing?.setCode) && isFilled(printing?.collectorNumber);
+}
+
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
-  return entries.map((entry) => ({
+  return entries.map(({ sourcePrinting, ...entry }) => ({
     ...entry,
     name: normalizeCardName(entry.name),
+    ...(hasUsablePrinting(sourcePrinting)
+      ? { sourcePrinting }
+      : {}),
   }));
 }
 
@@ -257,7 +264,7 @@ function normalizeNames(names: string[] | undefined): string[] | undefined {
   return names?.map(normalizeCardName);
 }
 
-function totalCards(entries: DeckEntry[]): number {
+export function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
@@ -313,29 +320,37 @@ export function deriveImportedDeckName(content: string, deck: ParsedDeck): strin
   return "Untitled Deck";
 }
 
-function looksCommanderSingleton(entries: DeckEntry[]): boolean {
-  return entries.every((entry) => entry.count === 1 || BASIC_LAND_NAMES.has(entry.name));
-}
-
-function removeOneCopy(entries: DeckEntry[], name: string): DeckEntry[] {
-  let removed = false;
-  const next: DeckEntry[] = [];
-
-  for (const entry of entries) {
-    if (!removed && entry.name.toLowerCase() === name.toLowerCase()) {
-      removed = true;
-      if (entry.count > 1) {
-        next.push({ ...entry, count: entry.count - 1 });
-      }
-      continue;
-    }
-    next.push(entry);
+export function countDeckEntriesByName(entries: DeckEntry[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const { name, count } of entries) {
+    counts.set(name, (counts.get(name) ?? 0) + count);
   }
-
-  return next;
+  return counts;
 }
 
-function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
+export function looksCommanderSingleton(entries: DeckEntry[]): boolean {
+  return [...countDeckEntriesByName(entries)].every(([name, count]) => count === 1 || BASIC_LAND_NAMES.has(name));
+}
+
+export function removeOneCopy(entries: DeckEntry[], card: string | DeckEntry): DeckEntry[] {
+  const key = typeof card === "string" ? undefined : deckEntryKey(card);
+  const name = typeof card === "string" ? card.toLowerCase() : undefined;
+  const index = entries.findIndex((entry) =>
+    entry.count > 0 && (key === undefined ? entry.name.toLowerCase() === name : deckEntryKey(entry) === key),
+  );
+  if (index === -1) return entries;
+  return entries.flatMap((entry, i) =>
+    i !== index ? [entry] : entry.count > 1 ? [{ ...entry, count: entry.count - 1 }] : [],
+  );
+}
+
+export function addOneCopy(entries: DeckEntry[], name: string): DeckEntry[] {
+  const index = entries.findIndex((entry) => entry.name === name);
+  if (index === -1) return [...entries, { count: 1, name }];
+  return entries.map((entry, i) => i === index ? { ...entry, count: entry.count + 1 } : entry);
+}
+
+export function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
   if (!deck.commander?.length) return deck;
 
   let main = deck.main;
@@ -400,7 +415,7 @@ function normalizeParsedDeck(
     && sideboardCount <= 2
     && mainCount + sideboardCount === 100
     && looksCommanderSingleton(canonical.main)
-    && canonical.sideboard.every((entry) => entry.count === 1)
+    && [...countDeckEntriesByName(canonical.sideboard).values()].every((count) => count === 1)
   ) {
     canonical.commander = canonical.sideboard.map((entry) => entry.name);
     canonical.sideboard = [];
@@ -416,14 +431,20 @@ export function repairParsedDeck(deck: ParsedDeck): ParsedDeck {
   });
 }
 
+export function deckEntryKey({ name, sourcePrinting }: DeckEntry): string {
+  const printing = hasUsablePrinting(sourcePrinting) ? sourcePrinting : undefined;
+  return JSON.stringify([name, printing?.setCode.toLowerCase(), printing?.collectorNumber]);
+}
+
 export function deduplicateEntries(entries: DeckEntry[]): DeckEntry[] {
   const map = new Map<string, DeckEntry>();
   for (const entry of entries) {
-    const existing = map.get(entry.name);
+    const key = deckEntryKey(entry);
+    const existing = map.get(key);
     if (existing) {
       existing.count += entry.count;
     } else {
-      map.set(entry.name, { ...entry });
+      map.set(key, { ...entry });
     }
   }
   return Array.from(map.values());
@@ -632,11 +653,33 @@ export function detectAndParseDeck(content: string): ParsedDeck {
   return parseDeckFile(content);
 }
 
+function formatPrintedEntry(
+  { count, name, sourcePrinting }: DeckEntry,
+  formatPrinting: (setCode: string, collectorNumber: string) => string,
+): string {
+  const card = `${count} ${name}`;
+  if (!hasUsablePrinting(sourcePrinting)) return card;
+  const { setCode, collectorNumber } = sourcePrinting;
+  if (!/^[A-Za-z0-9]+$/.test(setCode) || /[\r\n]/.test(collectorNumber)) return card;
+
+  const line = card + formatPrinting(setCode.toUpperCase(), collectorNumber);
+  // Use the import grammar, including its handling of trailing annotations.
+  const parsed = parseDeckEntryLine(line.trim());
+  return parsed?.annotation === null &&
+    parsed.entry.name === name &&
+    parsed.entry.sourcePrinting?.setCode === setCode.toLowerCase() &&
+    parsed.entry.sourcePrinting.collectorNumber === collectorNumber
+    ? line
+    : card;
+}
+
 /**
  * Export a ParsedDeck to .dck format string.
  */
 export function exportDeckFile(deck: ParsedDeck): string {
   const lines: string[] = [];
+  const formatEntry = (entry: DeckEntry) =>
+    formatPrintedEntry(entry, (setCode, collectorNumber) => `|${setCode}|[${collectorNumber}]`);
 
   if (deck.commander && deck.commander.length > 0) {
     lines.push("[Commander]");
@@ -660,14 +703,14 @@ export function exportDeckFile(deck: ParsedDeck): string {
   if (deck.main.length > 0) {
     lines.push("[Main]");
     for (const entry of deck.main) {
-      lines.push(`${entry.count} ${entry.name}`);
+      lines.push(formatEntry(entry));
     }
   }
 
   if (deck.sideboard.length > 0) {
     lines.push("[Sideboard]");
     for (const entry of deck.sideboard) {
-      lines.push(`${entry.count} ${entry.name}`);
+      lines.push(formatEntry(entry));
     }
   }
 
@@ -692,10 +735,11 @@ export type ExportFormat = "dck" | "mtga";
 
 /**
  * Export a ParsedDeck to MTGA text format.
- * Uses simplified format without set/collector number since we don't store that data.
  */
 export function exportMtgaDeck(deck: ParsedDeck): string {
   const lines: string[] = [];
+  const formatEntry = (entry: DeckEntry) =>
+    formatPrintedEntry(entry, (setCode, collectorNumber) => ` (${setCode}) ${collectorNumber}`);
 
   if (deck.commander && deck.commander.length > 0) {
     lines.push("Commander");
@@ -721,14 +765,14 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
 
   lines.push("Deck");
   for (const entry of deck.main) {
-    lines.push(`${entry.count} ${entry.name}`);
+    lines.push(formatEntry(entry));
   }
 
   if (deck.sideboard.length > 0) {
     lines.push("");
     lines.push("Sideboard");
     for (const entry of deck.sideboard) {
-      lines.push(`${entry.count} ${entry.name}`);
+      lines.push(formatEntry(entry));
     }
   }
 
@@ -756,41 +800,4 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
  */
 export function exportDeck(deck: ParsedDeck, format: ExportFormat): string {
   return format === "mtga" ? exportMtgaDeck(deck) : exportDeckFile(deck);
-}
-
-/**
- * Final step in the commander identification waterfall (semantic, async).
- *
- * Steps already applied during sync parsing:
- *   1. Explicit `[Commander]` / `Commander` section header
- *   2. Inline `[Commander]` / `*CMDR*` annotation on a card line
- *   3. 99 main + 1–2 sideboard singletons in a 100-card deck
- *
- * This step:
- *   4. 100-card singleton deck with no commander identified, where the first
- *      commander-eligible card per CR 903.3 (legendary creature, legendary
- *      background, or "can be your commander") is promoted.
- *
- * The eligibility check is delegated to the engine via WASM — the frontend
- * never replicates rules logic.
- */
-export async function resolveCommander(deck: ParsedDeck): Promise<ParsedDeck> {
-  const normalized = repairParsedDeck(deck);
-  if (normalized.commander?.length) return normalized;
-  if (normalized.sideboard.length > 0) return normalized;
-  if (normalized.main.length === 0) return normalized;
-  if (totalCards(normalized.main) !== 100) return normalized;
-  if (!looksCommanderSingleton(normalized.main)) return normalized;
-
-  for (const entry of normalized.main) {
-    if (entry.count !== 1) continue;
-    if (!(await isCardCommanderEligible(entry.name))) continue;
-
-    return removeCommandersFromMain({
-      ...normalized,
-      commander: [entry.name],
-    });
-  }
-
-  return normalized;
 }

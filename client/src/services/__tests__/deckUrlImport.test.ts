@@ -2,19 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BuiltInGameFormat } from "../../adapter/types";
 import { fetchDeckFromUrl, isSupportedDeckUrl, IMPORT_ERROR_KEYS } from "../deckUrlImport";
-import { detectAndParseDeck, resolveCommander, type ParsedDeck } from "../deckParser";
+import { resolveCommander } from "../commanderResolution";
+import { detectAndParseDeck, type ParsedDeck } from "../deckParser";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 
-// resolveCommander delegates commander eligibility to the WASM engine; every
-// fixture below carries an explicit commander/sideboard so resolveCommander
-// short-circuits before this is ever called, but mock it so the module graph
-// never touches WASM during the test run.
+import { inferCommander } from "../engineRuntime";
+
 vi.mock("../engineRuntime", () => ({
-  isCardCommanderEligible: vi.fn().mockResolvedValue(true),
+  inferCommander: vi.fn(),
 }));
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(inferCommander).mockReset().mockResolvedValue(null);
   useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
 });
 
@@ -243,7 +243,10 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   TwoHeadedGiant: "constructed",
   Archenemy: "constructed",
   Planechase: "constructed",
+  PlanechaseCommander: "commander",
   Commander: "commander",
+  TwoHeadedGiantCommander: "commander",
+  ArchenemyCommander: "commander",
   DuelCommander: "commander",
   PauperCommander: "commander",
   Brawl: "commander",
@@ -256,6 +259,7 @@ const FORMAT_SHAPES: Record<BuiltInGameFormat, DeckShape> = {
   Freeform: "constructed",
   FreeformCommander: "commander",
   Dandan: "mainOnly",
+  Horde: "constructed",
 };
 
 describe("fetchDeckFromUrl — format coverage", () => {
@@ -265,6 +269,17 @@ describe("fetchDeckFromUrl — format coverage", () => {
       detectAndParseDeck(await fetchDeckFromUrl("https://moxfield.com/decks/sample")),
     );
     assertShape(deck, shape);
+    if (shape === "mainOnly") {
+      const rows = [
+        { name: "Mountain", count: 17 },
+        { name: "Shock", count: 2 },
+        { name: "Goblin Tutor", count: 1 },
+      ];
+      expect(vi.mocked(inferCommander).mock.calls).toEqual([[rows]]);
+      expect(deck.main).toEqual(rows);
+    } else {
+      expect(inferCommander).not.toHaveBeenCalled();
+    }
   });
 
   it("preserves a companion alongside main + sideboard", async () => {

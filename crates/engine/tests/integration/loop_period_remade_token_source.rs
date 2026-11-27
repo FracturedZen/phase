@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use engine::analysis::decision_template::{IterationCount, ShortcutDecisionSchema};
-use engine::analysis::loop_check::{LoopCertificate, OfferRoad, ShortcutResponse};
+use engine::analysis::loop_check::{LoopCertificate, ShortcutResponse};
 use engine::analysis::resource::{
     history_covers_for_tests, loop_states_equal_modulo_resources, CounterClass, FodderCoverRefusal,
     ObjectClass, ObjectGrowthVerdict, RecurrenceCover, ResourceAxis,
@@ -18,16 +18,18 @@ use engine::database::card_db::CardDatabase;
 use engine::game::engine::{apply, certify_object_growth_frames_for_tests};
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::period_confirm::PeriodPerformance;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::{play_trace_view, NamingCause};
 use engine::types::ability::{AbilityKind, TargetFilter, TargetRef};
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::counter::CounterType;
+use engine::types::events::{GameEvent, LossReason};
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, WaitingFor,
+    ActionResult, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::log::{LogCategory, LogImportance, LogSegment};
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -37,8 +39,6 @@ use crate::support::shared_card_db;
 
 /// Bounds a runaway drive; no assertion reads it.
 const BEAT_CAP: usize = 400;
-
-const MODES: [LoopDetectionMode; 2] = [LoopDetectionMode::On, LoopDetectionMode::Interactive];
 
 /// The cycles a fixed-count take is declared for.
 const TAKEN: u32 = 5;
@@ -54,14 +54,14 @@ const POOL: [ManaType; 6] = [
 
 /// How a drive answers the prompts a board's loop asks.
 #[derive(Clone)]
-struct Answers {
-    color: ManaType,
+pub(crate) struct Answers {
+    pub(crate) color: ManaType,
     /// What every target prompt names, and every source choice and cost `cost` leaves unnamed.
-    aim: Option<TargetRef>,
+    pub(crate) aim: Option<TargetRef>,
     /// The permanent a sacrifice or tap cost names when it is not `aim`.
-    cost: Option<ObjectId>,
+    pub(crate) cost: Option<ObjectId>,
     /// The answer to a "you may".
-    accept: bool,
+    pub(crate) accept: bool,
 }
 
 impl Answers {
@@ -125,7 +125,7 @@ fn answer_prompts(state: &mut GameState, answers: &Answers) {
 }
 
 /// [`answer_prompts`], with every player passing priority until the stack is empty.
-fn settle(state: &mut GameState, answers: &Answers) {
+pub(crate) fn settle(state: &mut GameState, answers: &Answers) {
     for _ in 0..BEAT_CAP {
         answer_prompts(state, answers);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) || state.stack.is_empty() {
@@ -136,7 +136,7 @@ fn settle(state: &mut GameState, answers: &Answers) {
     panic!("the stack did not empty");
 }
 
-fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
+pub(crate) fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
     act(
         state,
         GameAction::ActivateAbility {
@@ -223,13 +223,11 @@ fn offer(state: &GameState) -> (&LoopCertificate, &ShortcutDecisionSchema) {
     let WaitingFor::LoopShortcut {
         certificate,
         schema,
-        road,
         ..
     } = &state.waiting_for
     else {
         panic!("no offer at {:?}", state.waiting_for);
     };
-    assert_eq!(*road, OfferRoad::RecordedPeriod);
     (certificate, schema)
 }
 
@@ -250,6 +248,118 @@ fn take(state: &mut GameState, count: u32) {
             },
         );
     }
+}
+
+/// Declares the standing offer at `count` and every seat asked accepts it; the last accept's
+/// result, which carries the whole take.
+pub(crate) fn take_recorded(state: &mut GameState, count: u32) -> ActionResult {
+    act(
+        state,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count),
+            template: None,
+        },
+    );
+    let mut last = None;
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        let accepted = apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        );
+        last = Some(accepted.unwrap_or_else(|error| panic!("accept rejected: {error:?}")));
+    }
+    last.expect("a seat accepts")
+}
+
+/// The take's repetition markers in order, as `(proposer, repetition)`.
+pub(crate) fn markers(events: &[GameEvent]) -> Vec<(PlayerId, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ShortcutRepetition {
+                controller,
+                repetition,
+            } => Some((*controller, *repetition)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The events after each marker, up to the next one.
+pub(crate) fn repetitions(events: &[GameEvent]) -> Vec<&[GameEvent]> {
+    let starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, GameEvent::ShortcutRepetition { .. }))
+        .map(|(index, _)| index + 1)
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(at, start)| {
+            let end = starts.get(at + 1).map_or(events.len(), |next| next - 1);
+            &events[*start..end]
+        })
+        .collect()
+}
+
+/// The entries the game log's default view lists (`Essential` and `Context`), each as its
+/// importance and segments, a player named by seat only.
+fn timeline(result: &ActionResult) -> Vec<(LogImportance, Vec<LogSegment>)> {
+    result
+        .log_entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.presentation.importance,
+                LogImportance::Essential | LogImportance::Context
+            )
+        })
+        .map(|entry| {
+            let segments = entry
+                .segments
+                .iter()
+                .map(|segment| match segment {
+                    LogSegment::PlayerName { player_id, .. } => seat(*player_id),
+                    other => other.clone(),
+                })
+                .collect();
+            (entry.presentation.importance, segments)
+        })
+        .collect()
+}
+
+fn seat(player_id: PlayerId) -> LogSegment {
+    LogSegment::PlayerName {
+        name: String::new(),
+        player_id,
+    }
+}
+
+fn said(text: &str) -> LogSegment {
+    LogSegment::Text(text.to_string())
+}
+
+fn card(name: &str, object_id: ObjectId) -> LogSegment {
+    LogSegment::CardName {
+        name: name.to_string(),
+        object_id,
+    }
+}
+
+/// The timeline entry a marker reads as.
+fn marker_line(proposer: PlayerId, repetition: i32) -> (LogImportance, Vec<LogSegment>) {
+    (
+        LogImportance::Context,
+        vec![
+            seat(proposer),
+            said(" repeats the loop — repetition "),
+            LogSegment::Number(repetition),
+        ],
+    )
 }
 
 /// Whether P0 has priority.
@@ -287,10 +397,19 @@ fn pass_to_the_next_step(state: &mut GameState, answers: &Answers) {
 
 /// The top-level fields in which `taken`, read with detection off, and `reference` differ once
 /// each is serialized whole.
+///
+/// CR 732.1b: a take retires its repetitions' action-scoped journal entries, which the hand game
+/// keeps, so both journals are read with every action-scoped entry retired. Everything else in
+/// them (node slots and metadata, mana provenance, the turn-retained commands and both
+/// allocators) is still compared exactly.
 pub(crate) fn differing_fields(taken: &GameState, reference: &GameState) -> BTreeSet<String> {
-    let fields = |state: &GameState| match serde_json::to_value(state) {
-        Ok(serde_json::Value::Object(fields)) => fields,
-        other => panic!("a state serialized to {other:?}"),
+    let fields = |state: &GameState| {
+        let mut state = state.clone();
+        state.resolved_rules_journal.retire_action_scoped_since(0);
+        match serde_json::to_value(&state) {
+            Ok(serde_json::Value::Object(fields)) => fields,
+            other => panic!("a state serialized to {other:?}"),
+        }
     };
     let (taken, reference) = (
         fields(&in_mode(taken, LoopDetectionMode::Off)),
@@ -517,30 +636,170 @@ fn a_treasure_remade_by_damage_on_smaug_is_offered_and_taken() {
             counters: 0,
         }
     );
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    treasure_cycle(&mut live, &answers);
+    let (certificate, _) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Mana(ManaType::Red)],
+        "{mode:?}"
+    );
+    // CR 603.3: the Treasure the next repetition sacrifices is made by a resolving trigger.
+    let WaitingFor::LoopShortcut { period, .. } = &live.waiting_for else {
+        unreachable!("offer")
+    };
+    assert_eq!(
+        period.performance(),
+        Some(PeriodPerformance::UsesTheStack),
+        "{mode:?}"
+    );
+    take(&mut live, TAKEN);
+    assert_eq!(
+        reading(&live, smaug),
+        reading(&reference, smaug),
+        "{mode:?}"
+    );
+}
+
+/// CR 732.1b + CR 732.2c: a take of the Smaug loop keeps its first and last repetition, each opened
+/// by a marker the game log's default view lists. One repetition: P0 sacrifices a Treasure for
+/// mana (CR 111.10a); Mayhem Devil ("Whenever a player sacrifices a permanent, this creature deals
+/// 1 damage to any target.") targets Smaug (CR 115.4 + CR 115.1d) and deals it 1 damage (CR
+/// 120.3e); Smaug ("Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.")
+/// makes one Treasure.
+#[test]
+fn a_take_of_the_smaug_loop_keeps_its_first_and_last_repetition() {
+    let db = shared_card_db().expect("the card fixture");
+    let (scenario, smaug) = smaug_scenario(db);
+    let board = built(scenario, 1);
+    let devil = board
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| board.objects[id].name == "Mayhem Devil")
+        .expect("Mayhem Devil");
+    let answers = Answers {
+        color: ManaType::Red,
+        aim: Some(TargetRef::Object(smaug)),
+        cost: None,
+        accept: true,
+    };
+    for (count, kept) in [(1, vec![1]), (2, vec![1, 2]), (TAKEN, vec![1, TAKEN])] {
+        let mut live = in_mode(&board, LoopDetectionMode::Interactive);
         treasure_cycle(&mut live, &answers);
-        let (certificate, _) = offer(&live);
+        offer(&live);
+        let before = reading(&live, smaug);
         assert_eq!(
-            certificate.unbounded,
-            [ResourceAxis::Mana(ManaType::Red)],
-            "{mode:?}"
+            (before.damage, before.tokens),
+            (1, 1),
+            "reach: one cycle to the offer"
         );
-        // CR 603.3: the Treasure the next repetition sacrifices is made by a resolving trigger.
-        let WaitingFor::LoopShortcut { period, .. } = &live.waiting_for else {
-            unreachable!("offer")
-        };
+
+        let result = take_recorded(&mut live, count);
+
         assert_eq!(
-            period.performance(),
-            Some(PeriodPerformance::UsesTheStack),
-            "{mode:?}"
+            markers(&result.events),
+            kept.iter()
+                .map(|repetition| (P0, *repetition))
+                .collect::<Vec<_>>(),
+            "Fixed({count})"
         );
-        take(&mut live, TAKEN);
+        let mut expected = Vec::new();
+        for (repetition, events) in kept.iter().zip(repetitions(&result.events)) {
+            let sacrificed: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PermanentSacrificed {
+                        object_id,
+                        player_id: P0,
+                    } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            let created: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated {
+                        object_id, name, ..
+                    } if name == "Treasure" => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            let hits = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        GameEvent::DamageDealt {
+                            source_id,
+                            target: TargetRef::Object(target),
+                            amount: 1,
+                            ..
+                        } if *source_id == devil && *target == smaug
+                    )
+                })
+                .count();
+            assert_eq!(
+                (sacrificed.len(), hits, created.len()),
+                (1, 1, 1),
+                "Fixed({count}), repetition {repetition}"
+            );
+            expected.extend([
+                marker_line(P0, *repetition as i32),
+                (
+                    LogImportance::Essential,
+                    vec![
+                        seat(P0),
+                        said(" sacrifices "),
+                        card("Treasure", sacrificed[0]),
+                    ],
+                ),
+                (
+                    LogImportance::Context,
+                    vec![
+                        card("Smaug the Impenetrable", smaug),
+                        said(" is targeted by "),
+                        card("Mayhem Devil", devil),
+                    ],
+                ),
+                (
+                    LogImportance::Essential,
+                    vec![
+                        card("Mayhem Devil", devil),
+                        said(" deals "),
+                        LogSegment::Number(1),
+                        said(" damage to "),
+                        card("Smaug the Impenetrable", smaug),
+                    ],
+                ),
+                (
+                    LogImportance::Essential,
+                    vec![card("Treasure", created[0]), said(" token is created")],
+                ),
+            ]);
+        }
+        assert_eq!(timeline(&result), expected, "Fixed({count})");
+        assert!(
+            result
+                .log_entries
+                .iter()
+                .filter(|entry| entry
+                    .segments
+                    .contains(&said(" repeats the loop — repetition ")))
+                .all(|entry| entry.category == LogCategory::Game),
+            "Fixed({count})"
+        );
         assert_eq!(
             reading(&live, smaug),
-            reading(&reference, smaug),
-            "{mode:?}"
+            Reading {
+                mana: mana_of(ManaType::Red, 1 + count as usize),
+                damage: 1 + count,
+                ..before
+            },
+            "Fixed({count})"
         );
+        assert_eq!(live.waiting_for, WaitingFor::Priority { player: P0 });
     }
 }
 
@@ -558,18 +817,17 @@ fn a_land_tapped_earlier_in_the_step_does_not_delay_the_offer() {
         cost: None,
         accept: true,
     };
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        tap_for_mana(&mut live, land);
-        settle(&mut live, &answers);
-        assert!(live.objects[&land].tapped, "{mode:?}");
-        treasure_cycle(&mut live, &answers);
-        offer(&live);
-        let offered = play_trace_view(&live)
-            .and_then(|view| view.offered)
-            .expect("the offered span");
-        assert_eq!(offered.cause, NamingCause::Restored, "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    tap_for_mana(&mut live, land);
+    settle(&mut live, &answers);
+    assert!(live.objects[&land].tapped, "{mode:?}");
+    treasure_cycle(&mut live, &answers);
+    offer(&live);
+    let offered = play_trace_view(&live)
+        .and_then(|view| view.offered)
+        .expect("the offered span");
+    assert_eq!(offered.cause, NamingCause::Restored, "{mode:?}");
 }
 
 /// CR 111.7: a Treasure spent and never made again ceases to exist, and Phyrexian Altar
@@ -592,22 +850,21 @@ fn a_treasure_spent_earlier_in_the_step_does_not_delay_another_plays_offer() {
         cost: None,
         accept: true,
     };
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        let treasure = tokens(&live, "Treasure")[0];
-        treasure_cycle(&mut live, &answers);
-        assert!(!live.objects.contains_key(&treasure), "{mode:?}");
-        assert_eq!(live.players[0].mana_pool.total(), 1, "{mode:?}");
-        let life = live.players[0].life;
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    let treasure = tokens(&live, "Treasure")[0];
+    treasure_cycle(&mut live, &answers);
+    assert!(!live.objects.contains_key(&treasure), "{mode:?}");
+    assert_eq!(live.players[0].mana_pool.total(), 1, "{mode:?}");
+    let life = live.players[0].life;
 
-        tap_for_mana(&mut live, altar);
-        settle(&mut live, &answers);
-        assert!(is_offer(&live), "{mode:?}: {:?}", live.waiting_for);
-        assert_eq!(live.players[0].life, life + 2, "{mode:?}");
-        let returned = &live.objects[&finks];
-        assert_eq!(returned.zone, Zone::Battlefield, "{mode:?}");
-        assert!(returned.counters.is_empty(), "{mode:?}");
-    }
+    tap_for_mana(&mut live, altar);
+    settle(&mut live, &answers);
+    assert!(is_offer(&live), "{mode:?}: {:?}", live.waiting_for);
+    assert_eq!(live.players[0].life, life + 2, "{mode:?}");
+    let returned = &live.objects[&finks];
+    assert_eq!(returned.zone, Zone::Battlefield, "{mode:?}");
+    assert!(returned.counters.is_empty(), "{mode:?}");
 }
 
 /// The captured four-player game, one seat already eliminated, with Mirkwood Bats ("Whenever
@@ -662,31 +919,37 @@ fn bats_capture_offered_and_taken(pick: fn(&[ObjectId]) -> Option<&ObjectId>) {
             references.push((count, reference.clone()));
         }
     }
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        assert!(tokens(&live, "Treasure").len() > 1, "{mode:?}");
-        cycle(&mut live);
-        let (_, schema) = offer(&live);
-        assert_eq!(schema.measured_repetition_bound, Some(bound), "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    assert!(tokens(&live, "Treasure").len() > 1, "{mode:?}");
+    cycle(&mut live);
+    let (_, schema) = offer(&live);
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            bound
+        ),
+        "{mode:?}"
+    );
 
-        for (count, reference) in &references {
-            let mut taken = live.clone();
-            take(&mut taken, *count);
-            assert_eq!(
-                reading(&taken, smaug),
-                reading(reference, smaug),
-                "{mode:?}, {count} cycles"
-            );
-            assert_eq!(
-                taken.waiting_for, reference.waiting_for,
-                "{mode:?}, {count} cycles"
-            );
-            assert_eq!(
-                matches!(taken.waiting_for, WaitingFor::GameOver { .. }),
-                *count == bound,
-                "{mode:?}, {count} cycles"
-            );
-        }
+    for (count, reference) in &references {
+        let mut taken = live.clone();
+        take(&mut taken, *count);
+        assert_eq!(
+            reading(&taken, smaug),
+            reading(reference, smaug),
+            "{mode:?}, {count} cycles"
+        );
+        assert_eq!(
+            taken.waiting_for, reference.waiting_for,
+            "{mode:?}, {count} cycles"
+        );
+        assert_eq!(
+            matches!(taken.waiting_for, WaitingFor::GameOver { .. }),
+            *count == bound,
+            "{mode:?}, {count} cycles"
+        );
     }
 }
 
@@ -700,6 +963,105 @@ fn the_bats_capture_sacrificing_its_oldest_treasure_is_offered_a_bounded_shortcu
 #[test]
 fn the_bats_capture_sacrificing_its_newest_treasure_is_offered_a_bounded_shortcut_and_taken() {
     bats_capture_offered_and_taken(<[ObjectId]>::last);
+}
+
+/// CR 704.5a + CR 800.4a: a take of the Bats capture keeps the seat that loses and leaves in an
+/// elided repetition. Each repetition's Treasure sacrifice triggers Mirkwood Bats ("Whenever you
+/// create or sacrifice a token, each opponent loses 1 life.") and Mayhem Devil; the Devil's 1
+/// damage makes Smaug create a Treasure, which triggers the Bats again (CR 119.3), so each living
+/// opponent loses 2 life a repetition. From 23 at the offer P2 is at 1 after repetition 11 and
+/// reaches 0 in repetition 12; P3 reaches 0 from 32 in repetition 16, leaving P0 the last player.
+#[test]
+fn a_take_of_the_bats_capture_keeps_each_seat_that_leaves_in_an_elided_repetition() {
+    const P2: PlayerId = PlayerId(2);
+    const P3: PlayerId = PlayerId(3);
+    const BOUND: u32 = 16;
+    let (board, smaug) = bats_capture();
+    let answers = Answers {
+        color: ManaType::Red,
+        aim: Some(TargetRef::Object(smaug)),
+        cost: None,
+        accept: true,
+    };
+    let mut offered = in_mode(&board, LoopDetectionMode::Interactive);
+    treasure_cycle(&mut offered, &answers);
+    let (_, schema) = offer(&offered);
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            BOUND
+        )
+    );
+    let life = |state: &GameState, seat: PlayerId| state.players[seat.0 as usize].life;
+    assert_eq!((life(&offered, P2), life(&offered, P3)), (23, 32));
+
+    let mut live = offered.clone();
+    let result = take_recorded(&mut live, TAKEN);
+    assert_eq!(markers(&result.events), [(P0, 1), (P0, TAKEN)]);
+    for events in repetitions(&result.events) {
+        let count = |hit: &dyn Fn(&GameEvent) -> bool| events.iter().filter(|e| hit(e)).count();
+        let losses = |seat: PlayerId| {
+            count(
+                &|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -1, .. } if *player_id == seat),
+            )
+        };
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(
+                event,
+                GameEvent::DamageDealt { target: TargetRef::Object(target), amount: 1, .. }
+                    if *target == smaug
+            )),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::TokenCreated { .. })),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::LifeChanged { .. })),
+            4
+        );
+        assert_eq!((losses(P2), losses(P3)), (2, 2));
+    }
+    assert_eq!((life(&live, P2), life(&live, P3)), (13, 22));
+    assert_eq!(live.waiting_for, WaitingFor::Priority { player: P0 });
+
+    let mut live = offered;
+    let result = take_recorded(&mut live, BOUND);
+    assert_eq!(live.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(markers(&result.events), [(P0, 1), (P0, BOUND)]);
+    let at = |wanted: &GameEvent| {
+        result
+            .events
+            .iter()
+            .position(|event| event == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} in the record"))
+    };
+    let first = at(&GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition: 1,
+    });
+    let last = at(&GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition: BOUND,
+    });
+    let lost = |player_id| GameEvent::PlayerLost {
+        player_id,
+        reasons: BTreeSet::from([LossReason::LifeTotal]),
+    };
+    let p2_lost = at(&lost(P2));
+    let p2_left = at(&GameEvent::PlayerEliminated { player_id: P2 });
+    let p3_lost = at(&lost(P3));
+    let p3_left = at(&GameEvent::PlayerEliminated { player_id: P3 });
+    let over = at(&GameEvent::GameOver { winner: Some(P0) });
+    assert!(first < p2_lost && p2_lost < p2_left && p2_left < last);
+    assert!(last < p3_lost && p3_lost < p3_left && p3_left < over);
+    assert_eq!((life(&live, P2), life(&live, P3)), (0, 0));
 }
 
 /// CR 111.7: with the Devil's damage aimed at an opponent nothing makes a Treasure, so each
@@ -721,20 +1083,19 @@ fn a_treasure_stock_spent_without_remaking_is_not_offered() {
             .map(|seat| state.players[seat.0 as usize].life)
             .collect()
     };
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        for cycle in 0..6 {
-            let (stock, before) = (tokens(&live, "Treasure").len(), lives(&live));
-            treasure_cycle(&mut live, &answers);
-            assert!(!is_offer(&live), "{mode:?}, cycle {cycle}");
-            assert_eq!(tokens(&live, "Treasure").len(), stock - 1, "{mode:?}");
-            let after = lives(&live);
-            assert_eq!(after.len(), before.len(), "{mode:?}");
-            assert!(
-                after.iter().zip(&before).all(|(now, then)| now < then),
-                "{mode:?}: {before:?} -> {after:?}"
-            );
-        }
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    for cycle in 0..6 {
+        let (stock, before) = (tokens(&live, "Treasure").len(), lives(&live));
+        treasure_cycle(&mut live, &answers);
+        assert!(!is_offer(&live), "{mode:?}, cycle {cycle}");
+        assert_eq!(tokens(&live, "Treasure").len(), stock - 1, "{mode:?}");
+        let after = lives(&live);
+        assert_eq!(after.len(), before.len(), "{mode:?}");
+        assert!(
+            after.iter().zip(&before).all(|(now, then)| now < then),
+            "{mode:?}: {before:?} -> {after:?}"
+        );
     }
 }
 
@@ -866,82 +1227,81 @@ fn a_spawn_remade_by_broodscale_is_offered_and_taken() {
         start_spawn_engine(&mut state, &answers, forests, blade, broodscale);
         state
     };
-    for mode in MODES {
-        let mut live = set_up(mode);
-        spawn_cycle(&mut live, &answers);
-        let (certificate, schema) = offer(&live);
-        assert_eq!(
-            certificate.unbounded,
-            [
-                ResourceAxis::Mana(ManaType::Colorless),
-                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
-            ],
-            "{mode:?}"
-        );
-        assert_eq!(schema.points.len(), 1, "{mode:?}");
-        assert_eq!(live.stack.len(), 1, "{mode:?}");
-        assert!(tokens(&live, "Eldrazi Spawn").is_empty(), "{mode:?}");
-        let offered = play_trace_view(&live)
-            .and_then(|view| view.offered)
-            .expect("the offered span");
-        assert_eq!(offered.cause, NamingCause::TriggerTop, "{mode:?}");
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = set_up(mode);
+    spawn_cycle(&mut live, &answers);
+    let (certificate, schema) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [
+            ResourceAxis::Mana(ManaType::Colorless),
+            ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
+        ],
+        "{mode:?}"
+    );
+    assert_eq!(schema.points.len(), 1, "{mode:?}");
+    assert_eq!(live.stack.len(), 1, "{mode:?}");
+    assert!(tokens(&live, "Eldrazi Spawn").is_empty(), "{mode:?}");
+    let offered = play_trace_view(&live)
+        .and_then(|view| view.offered)
+        .expect("the offered span");
+    assert_eq!(offered.cause, NamingCause::TriggerTop, "{mode:?}");
 
-        let hand_period = |state: &mut GameState| {
-            spawn_period_under_the_may(state, &answers, broodscale, None);
-        };
-        let takes = taken_and_hand_driven(&live, &[1, 2, TAKEN], hand_period, &format!("{mode:?}"));
-        for (count, taken, reference) in takes {
-            assert_eq!(taken.stack.len(), 1, "{mode:?}, {count} cycles");
-            assert_eq!(
-                reading(&taken, broodscale),
-                Reading {
-                    life: vec![20; 4],
-                    eliminated: vec![false; 4],
-                    mana: mana_of(ManaType::Colorless, 1 + count as usize),
-                    tokens: 0,
-                    damage: 0,
-                    counters: 2 + count,
-                },
-                "{mode:?}, {count} cycles"
-            );
-            for may in [&answers, &decline] {
-                let (mut taken, mut reference) = (taken.clone(), reference.clone());
-                taken.loop_detection = LoopDetectionMode::Off;
-                settle(&mut taken, may);
-                settle(&mut reference, may);
-                assert_eq!(
-                    tokens(&taken, "Eldrazi Spawn").len(),
-                    usize::from(may.accept),
-                    "{mode:?}, {count} cycles"
-                );
-                let differing = differing_fields(&taken, &reference);
-                assert!(
-                    differing.is_empty(),
-                    "{mode:?}, {count} cycles, the \"may\" answered {}: {differing:?}",
-                    may.accept
-                );
-            }
-        }
-
-        let mut declined = set_up(mode);
-        spawn_cycle(&mut declined, &decline);
-        assert!(is_offer(&declined), "{mode:?}");
-        act(&mut declined, GameAction::DeclineShortcut);
-        settle(&mut declined, &decline);
-        assert!(!is_offer(&declined), "{mode:?}");
+    let hand_period = |state: &mut GameState| {
+        spawn_period_under_the_may(state, &answers, broodscale, None);
+    };
+    let takes = taken_and_hand_driven(&live, &[1, 2, TAKEN], hand_period, &format!("{mode:?}"));
+    for (count, taken, reference) in takes {
+        assert_eq!(taken.stack.len(), 1, "{mode:?}, {count} cycles");
         assert_eq!(
-            reading(&declined, broodscale),
+            reading(&taken, broodscale),
             Reading {
                 life: vec![20; 4],
                 eliminated: vec![false; 4],
-                mana: mana_of(ManaType::Colorless, 1),
+                mana: mana_of(ManaType::Colorless, 1 + count as usize),
                 tokens: 0,
                 damage: 0,
-                counters: 2,
+                counters: 2 + count,
             },
-            "{mode:?}"
+            "{mode:?}, {count} cycles"
         );
+        for may in [&answers, &decline] {
+            let (mut taken, mut reference) = (taken.clone(), reference.clone());
+            taken.loop_detection = LoopDetectionMode::Off;
+            settle(&mut taken, may);
+            settle(&mut reference, may);
+            assert_eq!(
+                tokens(&taken, "Eldrazi Spawn").len(),
+                usize::from(may.accept),
+                "{mode:?}, {count} cycles"
+            );
+            let differing = differing_fields(&taken, &reference);
+            assert!(
+                differing.is_empty(),
+                "{mode:?}, {count} cycles, the \"may\" answered {}: {differing:?}",
+                may.accept
+            );
+        }
     }
+
+    let mut declined = set_up(mode);
+    spawn_cycle(&mut declined, &decline);
+    assert!(is_offer(&declined), "{mode:?}");
+    act(&mut declined, GameAction::DeclineShortcut);
+    settle(&mut declined, &decline);
+    assert!(!is_offer(&declined), "{mode:?}");
+    assert_eq!(
+        reading(&declined, broodscale),
+        Reading {
+            life: vec![20; 4],
+            eliminated: vec![false; 4],
+            mana: mana_of(ManaType::Colorless, 1),
+            tokens: 0,
+            damage: 0,
+            counters: 2,
+        },
+        "{mode:?}"
+    );
 }
 
 /// CR 111.7 + CR 111.1: two Treasures sacrificed while the first's triggers are on the stack
@@ -975,36 +1335,38 @@ fn two_treasures_sacrificed_before_the_stack_empties_are_offered_and_taken() {
         board.objects[&broodscale].counters[&CounterType::Plus1Plus1],
         1
     );
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        let mut reference = in_mode(&board, LoopDetectionMode::Off);
-        cycle(&mut live);
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    let mut reference = in_mode(&board, LoopDetectionMode::Off);
+    cycle(&mut live);
+    cycle(&mut reference);
+    let (_, schema) = offer(&live);
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 4)
+        ),
+        "{mode:?}"
+    );
+    let before = reading(&reference, smaug);
+    take(&mut live, TAKEN);
+    for _ in 0..TAKEN {
         cycle(&mut reference);
-        let (_, schema) = offer(&live);
-        assert_eq!(
-            schema.measured_repetition_bound,
-            Some(cycles_to_the_last_loss(&live, 4)),
-            "{mode:?}"
-        );
-        let before = reading(&reference, smaug);
-        take(&mut live, TAKEN);
-        for _ in 0..TAKEN {
-            cycle(&mut reference);
-        }
-        let after = reading(&reference, smaug);
-        assert_eq!(reading(&live, smaug), after, "{mode:?}");
-        assert_eq!(
-            (after.mana, after.tokens, after.damage),
-            (before.mana, before.tokens, before.damage + 10)
-        );
-        assert_eq!(
-            after.life[1..],
-            before.life[1..]
-                .iter()
-                .map(|life| life - 20)
-                .collect::<Vec<_>>()
-        );
     }
+    let after = reading(&reference, smaug);
+    assert_eq!(reading(&live, smaug), after, "{mode:?}");
+    assert_eq!(
+        (after.mana, after.tokens, after.damage),
+        (before.mana, before.tokens, before.damage + 10)
+    );
+    assert_eq!(
+        after.life[1..],
+        before.life[1..]
+            .iter()
+            .map(|life| life - 20)
+            .collect::<Vec<_>>()
+    );
 }
 
 /// CR 601.2g + CR 605.3a: Warren Soultrader ("Pay 1 life, Sacrifice another creature: Create a
@@ -1084,25 +1446,31 @@ fn a_treasure_remade_after_paying_for_a_cast_is_offered_and_taken(payment: CastP
         }
     );
     assert_eq!(reference.objects[&crawler].zone, Zone::Graveyard);
-    for mode in MODES {
-        let mut live = in_mode(&board, mode);
-        cycle(&mut live);
-        let (certificate, schema) = offer(&live);
-        assert_eq!(
-            certificate.unbounded,
-            [ResourceAxis::Life(PlayerId(1))],
-            "{mode:?}"
-        );
-        assert_eq!(schema.measured_repetition_bound, Some(19), "{mode:?}");
-        take(&mut live, 3);
-        assert_eq!(
-            reading(&live, trader),
-            reading(&reference, trader),
-            "{mode:?}"
-        );
-        assert_eq!(live.objects[&crawler].zone, Zone::Graveyard, "{mode:?}");
-        assert_eq!(live.waiting_for, reference.waiting_for, "{mode:?}");
-    }
+    let mode = LoopDetectionMode::Interactive;
+    let mut live = in_mode(&board, mode);
+    cycle(&mut live);
+    let (certificate, schema) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Life(PlayerId(1))],
+        "{mode:?}"
+    );
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            19
+        ),
+        "{mode:?}"
+    );
+    take(&mut live, 3);
+    assert_eq!(
+        reading(&live, trader),
+        reading(&reference, trader),
+        "{mode:?}"
+    );
+    assert_eq!(live.objects[&crawler].zone, Zone::Graveyard, "{mode:?}");
+    assert_eq!(live.waiting_for, reference.waiting_for, "{mode:?}");
 }
 
 /// The engine spends the Treasure, and no play records it.
@@ -1191,78 +1559,79 @@ fn the_chained_smaug_play_is_offered_under_its_triggers_and_taken() {
             .expect("the offered span")
             .cause
     };
-    for mode in MODES {
-        let context = format!("{mode:?}");
-        let mut live = in_mode(&board, mode);
-        sacrifice_treasure(&mut live, &answers);
-        pass_until(&mut live, &answers, |state| {
-            has_priority(state) && treasured(state)
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    sacrifice_treasure(&mut live, &answers);
+    pass_until(&mut live, &answers, |state| {
+        has_priority(state) && treasured(state)
+    });
+    assert!(!live.stack.is_empty(), "{context}");
+    sacrifice_treasure(&mut live, &answers);
+    pass_until(&mut live, &answers, |state| {
+        is_offer(state) || state.stack.is_empty()
+    });
+
+    let (certificate, schema) = offer(&live);
+    let mut triggers: Vec<&str> = live
+        .stack
+        .iter()
+        .map(|entry| live.objects[&entry.source_id].name.as_str())
+        .collect();
+    triggers.sort_unstable();
+    assert_eq!(
+        triggers,
+        ["Mirkwood Bats", "Smaug the Impenetrable"],
+        "{context}"
+    );
+    assert!(!treasured(&live), "{context}");
+    assert_eq!(
+        certificate.unbounded,
+        [
+            ResourceAxis::Mana(ManaType::Red),
+            ResourceAxis::Life(PlayerId(1)),
+        ],
+        "{context}"
+    );
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 2)
+        ),
+        "{context}"
+    );
+    assert_eq!(cause(&live), NamingCause::Repeat, "{context}");
+
+    let depth = live.stack.len();
+    let hand_period = |state: &mut GameState| {
+        let damage = state.objects[&smaug].damage_marked;
+        pass_until(state, &answers, |state| {
+            has_priority(state) && treasured(state) && state.stack.len() + 1 == depth
         });
-        assert!(!live.stack.is_empty(), "{context}");
-        sacrifice_treasure(&mut live, &answers);
-        pass_until(&mut live, &answers, |state| {
-            is_offer(state) || state.stack.is_empty()
+        sacrifice_treasure(state, &answers);
+        pass_until(state, &answers, |state| {
+            has_priority(state)
+                && !treasured(state)
+                && state.stack.len() == depth
+                && state.objects[&smaug].damage_marked == damage + 1
         });
-
-        let (certificate, schema) = offer(&live);
-        let mut triggers: Vec<&str> = live
-            .stack
-            .iter()
-            .map(|entry| live.objects[&entry.source_id].name.as_str())
-            .collect();
-        triggers.sort_unstable();
+    };
+    let (mana, damage, life) = moved(&live);
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3, TAKEN], hand_period, &context) {
+        let cycles = count as i32;
         assert_eq!(
-            triggers,
-            ["Mirkwood Bats", "Smaug the Impenetrable"],
-            "{context}"
+            moved(&taken),
+            (mana + cycles, damage + cycles, life - 2 * cycles),
+            "{context}, {count} cycles"
         );
-        assert!(!treasured(&live), "{context}");
-        assert_eq!(
-            certificate.unbounded,
-            [
-                ResourceAxis::Mana(ManaType::Red),
-                ResourceAxis::Life(PlayerId(1)),
-            ],
-            "{context}"
-        );
-        assert_eq!(
-            schema.measured_repetition_bound,
-            Some(cycles_to_the_last_loss(&live, 2)),
-            "{context}"
-        );
-        assert_eq!(cause(&live), NamingCause::Repeat, "{context}");
-
-        let depth = live.stack.len();
-        let hand_period = |state: &mut GameState| {
-            let damage = state.objects[&smaug].damage_marked;
-            pass_until(state, &answers, |state| {
-                has_priority(state) && treasured(state) && state.stack.len() + 1 == depth
-            });
-            sacrifice_treasure(state, &answers);
-            pass_until(state, &answers, |state| {
-                has_priority(state)
-                    && !treasured(state)
-                    && state.stack.len() == depth
-                    && state.objects[&smaug].damage_marked == damage + 1
-            });
-        };
-        let (mana, damage, life) = moved(&live);
-        for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3, TAKEN], hand_period, &context)
-        {
-            let cycles = count as i32;
-            assert_eq!(
-                moved(&taken),
-                (mana + cycles, damage + cycles, life - 2 * cycles),
-                "{context}, {count} cycles"
-            );
-        }
-
-        let mut unchained = in_mode(&board, mode);
-        treasure_cycle(&mut unchained, &answers);
-        offer(&unchained);
-        assert!(unchained.stack.is_empty(), "{context}");
-        assert_eq!(cause(&unchained), NamingCause::LegalNow, "{context}");
     }
+
+    let mut unchained = in_mode(&board, mode);
+    treasure_cycle(&mut unchained, &answers);
+    offer(&unchained);
+    assert!(unchained.stack.is_empty(), "{context}");
+    assert_eq!(cause(&unchained), NamingCause::LegalNow, "{context}");
 }
 
 /// Mystic Reflection cast on a Spawn that is then sacrificed waits to copy a creature only
@@ -1500,37 +1869,35 @@ fn slivers_netted_while_one_is_sacrificed_are_offered_and_taken() {
     let sacrifice = |state: &mut GameState| sacrifice_newest_sliver(state, altar, &answers);
     let steps: [Step; 2] = [&make, &sacrifice];
     let hand_period = |state: &mut GameState| steps.iter().for_each(|step| step(state));
-    for mode in MODES {
-        let context = format!("{mode:?}");
-        let mut live = in_mode(&board, mode);
-        for forest in forests {
-            tap_for_mana(&mut live, forest);
-            settle(&mut live, &answers);
-        }
-        offered_after_one_period(&mut live, &steps, &context);
-        let (certificate, _) = offer(&live);
-        assert_eq!(
-            certificate.unbounded,
-            [ResourceAxis::TokensCreated],
-            "{context}"
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    for forest in forests {
+        tap_for_mana(&mut live, forest);
+        settle(&mut live, &answers);
+    }
+    offered_after_one_period(&mut live, &steps, &context);
+    let (certificate, _) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::TokensCreated],
+        "{context}"
+    );
+    assert_eq!(tokens(&live, "Sliver").len(), 1, "{context}");
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3, TAKEN], hand_period, &context) {
+        assert!(
+            taken.unbounded_resources.is_empty(),
+            "{context}, {count} cycles: {:?}",
+            taken.unbounded_resources
         );
-        assert_eq!(tokens(&live, "Sliver").len(), 1, "{context}");
-        for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3, TAKEN], hand_period, &context)
-        {
-            assert!(
-                taken.unbounded_resources.is_empty(),
-                "{context}, {count} cycles: {:?}",
-                taken.unbounded_resources
-            );
-            assert_eq!(
-                (
-                    tokens(&taken, "Sliver").len(),
-                    taken.players[0].mana_pool.total()
-                ),
-                (1 + count as usize, 2),
-                "{context}, {count} cycles"
-            );
-        }
+        assert_eq!(
+            (
+                tokens(&taken, "Sliver").len(),
+                taken.players[0].mana_pool.total()
+            ),
+            (1 + count as usize, 2),
+            "{context}, {count} cycles"
+        );
     }
 }
 
@@ -1554,34 +1921,33 @@ fn a_sliver_made_and_sacrificed_for_more_mana_than_it_costs_is_offered_and_taken
     let sacrifice = |state: &mut GameState| sacrifice_newest_sliver(state, altar, &answers);
     let steps: [Step; 2] = [&make, &sacrifice];
     let hand_period = |state: &mut GameState| steps.iter().for_each(|step| step(state));
-    for mode in MODES {
-        let context = format!("{mode:?}");
-        let mut live = in_mode(&board, mode);
-        tap_for_mana(&mut live, forest);
-        settle(&mut live, &answers);
-        offered_after_one_period(&mut live, &steps, &context);
-        let (certificate, _) = offer(&live);
-        assert_eq!(
-            certificate.unbounded,
-            [ResourceAxis::Mana(ManaType::Colorless)],
-            "{context}"
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    tap_for_mana(&mut live, forest);
+    settle(&mut live, &answers);
+    offered_after_one_period(&mut live, &steps, &context);
+    let (certificate, _) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Mana(ManaType::Colorless)],
+        "{context}"
+    );
+    assert!(tokens(&live, "Sliver").is_empty(), "{context}");
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
+        assert!(
+            taken.unbounded_resources.is_empty(),
+            "{context}, {count} cycles: {:?}",
+            taken.unbounded_resources
         );
-        assert!(tokens(&live, "Sliver").is_empty(), "{context}");
-        for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
-            assert!(
-                taken.unbounded_resources.is_empty(),
-                "{context}, {count} cycles: {:?}",
-                taken.unbounded_resources
-            );
-            assert_eq!(
-                (
-                    tokens(&taken, "Sliver").len(),
-                    taken.players[0].mana_pool.total()
-                ),
-                (0, 2 + count as usize),
-                "{context}, {count} cycles"
-            );
-        }
+        assert_eq!(
+            (
+                tokens(&taken, "Sliver").len(),
+                taken.players[0].mana_pool.total()
+            ),
+            (0, 2 + count as usize),
+            "{context}, {count} cycles"
+        );
     }
 }
 
@@ -1635,6 +2001,76 @@ fn a_copy_effect_naming_a_departed_sliver_keeps_the_period_refused() {
         certified(&periods(false), &[reflection]),
         ObjectGrowthVerdict::FodderGrowth([vec![], vec![]])
     );
+}
+
+/// Ulvenwald Tracker ("{1}{G}, {T}: Target creature you control fights another target creature.")
+/// makes P0's newest Sliver fight `other`, paid by `elves`, then the stack.
+fn newest_sliver_fights(
+    state: &mut GameState,
+    tracker: ObjectId,
+    elves: ObjectId,
+    other: ObjectId,
+) {
+    tap_for_mana(state, elves);
+    activate_ability(state, tracker);
+    let sliver = *tokens(state, "Sliver").last().expect("a Sliver");
+    for target in [sliver, other] {
+        act(
+            state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+        );
+    }
+    settle(state, &untargeted());
+}
+
+/// CR 701.14a + CR 111.7 + CR 732.2a: a Sliver that Ulvenwald Tracker makes fight before Ashnod's
+/// Altar sacrifices it leaves only a spent fight entry, so the loop Intruder Alarm ("Whenever a
+/// creature enters, untap all creatures.") untaps is offered and taken like hand-driven play.
+#[test]
+fn a_sliver_that_fought_before_it_was_sacrificed_is_offered_and_taken() {
+    let db = shared_card_db().expect("the card fixture");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let queen = scenario.add_real_card(P0, "Sliver Queen", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Training Grounds", Zone::Battlefield, db);
+    let altar = scenario.add_real_card(P0, "Ashnod's Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Intruder Alarm", Zone::Battlefield, db);
+    let tracker = scenario.add_real_card(P0, "Ulvenwald Tracker", Zone::Battlefield, db);
+    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let myr = scenario.add_real_card(P1, "Darksteel Myr", Zone::Battlefield, db);
+    let board = scenario.build().state().clone();
+    let answers = untargeted();
+    let make = |state: &mut GameState| make_sliver(state, queen, &answers);
+    let fight = |state: &mut GameState| newest_sliver_fights(state, tracker, elves, myr);
+    let sacrifice = |state: &mut GameState| sacrifice_newest_sliver(state, altar, &answers);
+    let period: [Step; 3] = [&fight, &sacrifice, &make];
+    let hand_period = |state: &mut GameState| period.iter().for_each(|step| step(state));
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    tap_for_mana(&mut live, forest);
+    settle(&mut live, &answers);
+    offered_after_one_period(&mut live, &[&make, &fight, &sacrifice, &make], &context);
+    let (certificate, _) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Mana(ManaType::Colorless)]
+    );
+    assert_eq!(tokens(&live, "Sliver").len(), 1);
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
+        assert!(taken.unbounded_resources.is_empty(), "{count}");
+        assert_eq!(
+            (
+                tokens(&taken, "Sliver").len(),
+                taken.players[0].mana_pool.total()
+            ),
+            (1, 1 + count as usize),
+            "{count} cycles"
+        );
+    }
 }
 
 /// Kitchen Finks returns under the id it died with, so dying untapped and then tapped by
@@ -1822,40 +2258,42 @@ fn a_shield_left_unused_each_period_keeps_its_offer_and_take() {
             state.players[1].life,
         )
     };
-    for mode in MODES {
-        let context = format!("{mode:?}");
-        let mut live = in_mode(&board, mode);
-        offered_after_one_period(&mut live, &steps, &context);
-        let (certificate, schema) = offer(&live);
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = in_mode(&board, mode);
+    offered_after_one_period(&mut live, &steps, &context);
+    let (certificate, schema) = offer(&live);
+    assert_eq!(
+        certificate.unbounded,
+        [
+            ResourceAxis::Mana(ManaType::Green),
+            ResourceAxis::Life(P0),
+            ResourceAxis::Life(PlayerId(1)),
+        ],
+        "{context}"
+    );
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, 1)
+        ),
+        "{context}"
+    );
+    assert_eq!(floating(&live), [SHIELD], "{context}");
+    let (mana, life, opposing) = moved(&live);
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
+        let cycles = count as i32;
         assert_eq!(
-            certificate.unbounded,
-            [
-                ResourceAxis::Mana(ManaType::Green),
-                ResourceAxis::Life(P0),
-                ResourceAxis::Life(PlayerId(1)),
-            ],
-            "{context}"
+            floating(&taken),
+            vec![SHIELD; 1 + count as usize],
+            "{context}, {count} cycles"
         );
         assert_eq!(
-            schema.measured_repetition_bound,
-            Some(cycles_to_the_last_loss(&live, 1)),
-            "{context}"
+            moved(&taken),
+            (mana + cycles, life + 2 * cycles, opposing - cycles),
+            "{context}, {count} cycles"
         );
-        assert_eq!(floating(&live), [SHIELD], "{context}");
-        let (mana, life, opposing) = moved(&live);
-        for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
-            let cycles = count as i32;
-            assert_eq!(
-                floating(&taken),
-                vec![SHIELD; 1 + count as usize],
-                "{context}, {count} cycles"
-            );
-            assert_eq!(
-                moved(&taken),
-                (mana + cycles, life + 2 * cycles, opposing - cycles),
-                "{context}, {count} cycles"
-            );
-        }
     }
 }
 
@@ -1996,36 +2434,38 @@ fn a_sliver_period_beside_floating_effects_is_offered_and_taken(
             state.players[1].life,
         )
     };
-    for mode in MODES {
-        let context = format!("{mode:?}");
-        let mut live = board.started(mode);
-        offered_after_one_period(&mut live, &steps, &context);
-        let (certificate, schema) = offer(&live);
-        assert!(tokens(&live, "Sliver").is_empty(), "{context}");
+    let mode = LoopDetectionMode::Interactive;
+    let context = format!("{mode:?}");
+    let mut live = board.started(mode);
+    offered_after_one_period(&mut live, &steps, &context);
+    let (certificate, schema) = offer(&live);
+    assert!(tokens(&live, "Sliver").is_empty(), "{context}");
+    assert_eq!(
+        certificate.unbounded,
+        [ResourceAxis::Life(PlayerId(1))],
+        "{context}"
+    );
+    assert_eq!(
+        (schema.repetition_bound, schema.deliverable_capacity),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            cycles_to_the_last_loss(&live, per_cycle)
+        ),
+        "{context}"
+    );
+    assert_eq!(floating(&live), stored(0), "{context}");
+    let (mana, life, opposing) = moved(&live);
+    for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
         assert_eq!(
-            certificate.unbounded,
-            [ResourceAxis::Life(PlayerId(1))],
-            "{context}"
+            floating(&taken),
+            stored(count as usize),
+            "{context}, {count} cycles"
         );
         assert_eq!(
-            schema.measured_repetition_bound,
-            Some(cycles_to_the_last_loss(&live, per_cycle)),
-            "{context}"
+            moved(&taken),
+            (mana, life, opposing - per_cycle * count as i32),
+            "{context}, {count} cycles"
         );
-        assert_eq!(floating(&live), stored(0), "{context}");
-        let (mana, life, opposing) = moved(&live);
-        for (count, taken, _) in taken_and_hand_driven(&live, &[1, 3], hand_period, &context) {
-            assert_eq!(
-                floating(&taken),
-                stored(count as usize),
-                "{context}, {count} cycles"
-            );
-            assert_eq!(
-                moved(&taken),
-                (mana, life, opposing - per_cycle * count as i32),
-                "{context}, {count} cycles"
-            );
-        }
     }
 }
 

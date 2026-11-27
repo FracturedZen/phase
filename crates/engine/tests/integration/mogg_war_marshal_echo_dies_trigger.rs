@@ -54,6 +54,7 @@ fn dies_create_goblin_trigger() -> TriggerDefinition {
     let create_goblin = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Token {
+            enters_blocking: None,
             name: "Goblin".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -65,6 +66,7 @@ fn dies_create_goblin_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

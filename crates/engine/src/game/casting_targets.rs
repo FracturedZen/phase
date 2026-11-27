@@ -1,11 +1,12 @@
 use crate::types::ability::{
-    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
-    TargetRef, TargetSelectionMode,
+    AbilityCost, AbilityTag, Effect, ModalChoice, QuantityExpr, ResolvedAbility, TargetRef,
+    TargetSelectionMode,
 };
 use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActivationTargetSelection, GameState, PendingCast, TargetSelectionSlot, WaitingFor,
+    ActivationTargetSelection, GameState, PendingCast, StackEntryKind, TargetSelectionSlot,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -21,9 +22,10 @@ use super::ability_utils::{
     selected_mode_labels, validate_modal_indices, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
+use super::announcement_triggers::stage_announcement_trigger_events;
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
-    finish_pending_cast_cost_or_pay,
+    finish_pending_cast_cost_or_pay, split_declared_mana_addition_and_residual,
     target_first_activation_defers_interactive_costs_to_payment_boundary,
     TargetFirstPaymentHandoff,
 };
@@ -136,10 +138,6 @@ pub(crate) fn handle_select_modes(
             );
         }
     }
-    if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
-    {
-        pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
-    }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state
@@ -174,6 +172,7 @@ pub(crate) fn handle_select_modes(
         pending_x.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_x.target_constraints = pending.target_constraints;
         pending_x.casting_variant = pending.casting_variant;
+        pending_x.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
         pending_x.casting_permission_index = pending.casting_permission_index;
         pending_x.cast_timing_permission = pending.cast_timing_permission;
         pending_x.distribute = pending.distribute;
@@ -221,14 +220,28 @@ pub(crate) fn handle_select_modes(
             )?;
             let mut resolved = resolved;
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            super::casting::emit_targeting_events(
-                state,
-                &super::ability_utils::declared_targets_in_chain(&resolved),
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -242,14 +255,28 @@ pub(crate) fn handle_select_modes(
         )? {
             let mut resolved = resolved;
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            super::casting::emit_targeting_events(
-                state,
-                &super::ability_utils::declared_targets_in_chain(&resolved),
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -267,6 +294,7 @@ pub(crate) fn handle_select_modes(
         pending_sel.declared_mana_additions = pending.declared_mana_additions.clone();
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
+        pending_sel.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
         pending_sel.casting_permission_index = pending.casting_permission_index;
         pending_sel.origin_zone = pending.origin_zone;
         pending_sel.additional_cost_flow = pending.additional_cost_flow;
@@ -334,6 +362,7 @@ fn maybe_pause_for_cast_distribution(
         total,
         targets: assigned_targets,
         unit: unit.clone(),
+        scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
     }))
 }
 
@@ -386,14 +415,28 @@ pub(crate) fn handle_select_targets(
 
     // CR 601.2c / CR 602.2b: targets become targets at declaration, before
     // any later distribution or cost-payment continuation.
-    super::casting::emit_targeting_events(
-        state,
-        &announced_targets,
-        pending.object_id,
-        pending.ability.controller,
-        super::casting::pending_cast_targeter(state, &pending),
-        events,
-    );
+    // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+    if pending.activation_ability_index.is_none() {
+        let event_start = events.len();
+        super::casting::emit_targeting_events(
+            state,
+            &announced_targets,
+            pending.object_id,
+            pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
+            events,
+        );
+        stage_announcement_trigger_events(state, events, event_start);
+    } else {
+        super::casting::emit_targeting_events(
+            state,
+            &announced_targets,
+            pending.object_id,
+            pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
+            events,
+        );
+    }
 
     if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
     {
@@ -491,14 +534,28 @@ pub(crate) fn handle_choose_target(
 
             // CR 601.2c / CR 602.2b: complete target declaration before later
             // distribution or cost-payment continuations.
-            super::casting::emit_targeting_events(
-                state,
-                &announced_targets,
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &announced_targets,
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &announced_targets,
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
 
             if let Some(waiting_for) =
                 maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?
@@ -591,18 +648,42 @@ pub(crate) fn compute_modal_total_cost(
 
     // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
     if indices.len() == modal.mode_count {
-        if let Some(ref entwine_cost) = modal.entwine_cost {
-            total = restrictions::add_mana_cost(&total, entwine_cost);
+        if let Some(entwine_cost) = modal.entwine_cost.as_deref() {
+            if let Ok(split) =
+                split_declared_mana_addition_and_residual(None, None, entwine_cost.clone())
+            {
+                for declared_mana in split.declared {
+                    total = restrictions::add_mana_cost(&total, &declared_mana);
+                }
+            }
         }
     }
 
     total
 }
 
-fn escalate_cost_for_selected_modes(
+/// CR 702.42a: Returns the non-mana portion of the entwine cost if present.
+pub(crate) fn extract_entwine_additional_cost(
+    modal: &ModalChoice,
+    indices: &[usize],
+) -> Option<AbilityCost> {
+    if indices.len() == modal.mode_count {
+        let entwine_cost = modal.entwine_cost.as_deref()?;
+        match split_declared_mana_addition_and_residual(None, None, entwine_cost.clone()) {
+            Ok(split) => split.residual,
+            // CR 601.2h: If the entwine cost cannot be split (e.g. an unresolved choice cost),
+            // preserve the full cost as the additional cost rather than letting it become free.
+            Err(_) => Some(entwine_cost.clone()),
+        }
+    } else {
+        None
+    }
+}
+
+pub(crate) fn escalate_cost_for_selected_modes_count(
     state: &GameState,
     player: PlayerId,
-    pending: &PendingCast,
+    object_id: ObjectId,
     selected_mode_count: usize,
 ) -> Option<AbilityCost> {
     let additional_modes = selected_mode_count.checked_sub(1)?;
@@ -616,7 +697,7 @@ fn escalate_cost_for_selected_modes(
     // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
     // — a class that does not arise for Escalate. If a fused split spell were ever
     // granted Escalate by a value-keyed static, this would need the `_for` variant.
-    let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
+    let cost = super::casting::effective_spell_keywords(state, player, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
             Keyword::Escalate(cost) => Some(cost),
@@ -703,6 +784,25 @@ pub(crate) fn emit_ability_activated(
     announced_zone: crate::types::zones::Zone,
     events: &mut Vec<GameEvent>,
 ) -> usize {
+    let loyalty_counters_removed = if kind == crate::types::events::ActivatedAbilityKind::Loyalty {
+        stack_entry
+            .and_then(|placed| {
+                state.stack.iter().find_map(|entry| {
+                    (entry.id == placed).then_some(match &entry.kind {
+                        StackEntryKind::ActivatedAbility { ability, .. } => {
+                            ability.context.loyalty_counters_removed
+                        }
+                        StackEntryKind::Spell { .. }
+                        | StackEntryKind::TriggeredAbility { .. }
+                        | StackEntryKind::KeywordAction { .. }
+                        | StackEntryKind::CombatDamage { .. } => None,
+                    })
+                })
+            })
+            .flatten()
+    } else {
+        None
+    };
     let departed = announced_zone == Zone::Battlefield
         && state
             .objects
@@ -719,6 +819,7 @@ pub(crate) fn emit_ability_activated(
         trigger_state: crate::types::events::ActivationTriggerState::Pending,
         stack_entry,
         activation_cost,
+        loyalty_counters_removed,
     });
     events.len() - 1
 }
@@ -726,6 +827,9 @@ pub(crate) fn emit_ability_activated(
 /// CR 702.142b + CR 702.177a: If the activated ability at `ability_index` on
 /// the source object has a keyword ability tag, emit the matching activation
 /// event so "whenever you activate a [keyword] ability" triggers can see it.
+/// CR 702.29c + CR 702.29f: Stack placement publishes `Cycled` from the
+/// announced activation. CR 702.29d: The discard cost's `Discarded` event
+/// supplies the single occurrence for "cycle or discard" triggers.
 pub(crate) fn emit_keyword_ability_event_if_tagged(
     state: &GameState,
     source_id: ObjectId,
@@ -741,20 +845,12 @@ pub(crate) fn emit_keyword_ability_event_if_tagged(
         return;
     };
     if let Some(ability_tag) = def.ability_tag {
-        // CR 702.29c: Cycling does not use the generic `KeywordAbilityActivated`
-        // path — activating it emits a dedicated `GameEvent::Cycled` so "When you
-        // cycle this card" triggers fire. The card has already been discarded to
-        // the graveyard as the cycling cost (the zone the trigger fires from).
-        // The cost also emitted a `Discarded` event, so "whenever you discard"
-        // and "cycle or discard" (CR 702.29d, matched on `Discarded`) still fire
-        // exactly once.
+        // CR 702.29c + CR 702.29f: Cycling uses the dedicated placement event.
         if ability_tag == AbilityTag::Cycling {
-            events.push(GameEvent::Cycled {
-                player_id: player,
-                object_id: source_id,
-            });
             return;
         }
+        // CR 702.177a + CR 605.1a + CR 605.3b: Keep the mana route's Exhaust
+        // event distinguishable from activation of an Exhaust stack ability.
         let is_mana_ability =
             ability_tag == AbilityTag::Exhaust && super::mana_abilities::is_mana_ability(def);
         events.push(GameEvent::KeywordAbilityActivated {
@@ -828,7 +924,9 @@ mod tests {
             min_choices: 1,
             max_choices: 2,
             mode_count: 2,
-            entwine_cost: Some(ManaCost::generic(2)),
+            entwine_cost: Some(Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(2),
+            })),
             ..ModalChoice::default()
         };
         let base = ManaCost::zero();

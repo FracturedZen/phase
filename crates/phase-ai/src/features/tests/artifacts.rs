@@ -52,6 +52,7 @@ fn draw_for_each_artifact() -> Effect {
 /// `Effect::Token` producing an artifact-typed token (Treasure).
 fn treasure_token_effect() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Treasure".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -63,6 +64,7 @@ fn treasure_token_effect() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),

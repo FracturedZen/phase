@@ -175,6 +175,12 @@ function dataFileDefines(mode: string, buildHash: string): Record<string, string
     // preview" link on the preview site itself. dev + staging → false (hidden);
     // tagged release → true (shown).
     __IS_RELEASE_BUILD__: JSON.stringify(process.env.RELEASE_BUILD === "true"),
+    // True only for the preview deploy (deploy.yml stamps ENGINE_FINGERPRINT;
+    // PREVIEW_BUILD is also accepted as an explicit override). Gates showing
+    // the commit hash next to the version in the UI.
+    __IS_PREVIEW_BUILD__: JSON.stringify(
+      process.env.PREVIEW_BUILD === "true" || Boolean(process.env.ENGINE_FINGERPRINT),
+    ),
     // Supabase cloud-sync config. Anon key is public by design (RLS is the
     // access control), so it ships in the bundle. Empty when unset → cloud sync
     // is disabled, leaving file backup as the only data-portability path. This
@@ -314,12 +320,26 @@ export default defineConfig(({ mode }) => {
           // over the placeholder shipped in the bundle. `.js` is in
           // globPatterns, so precaching it would pin the BUILD-TIME copy for
           // every client that already has a service worker, and the deployed
-          // one would never be read. Same mechanism as the wasm entries above,
-          // different motive: those are fetched by a runtime rule, this one
-          // must always come from the network.
+          // one would never be read. Same mechanism as the wasm entries above:
+          // the runtime rule below fetches it from the network instead.
           "**/config.js",
         ],
         runtimeCaching: [
+          {
+            // The deployment's /config.js (see the globIgnores entry above).
+            // NetworkFirst reads the deployed copy whenever the network
+            // answers, and falls back to the last copy seen only when it does
+            // not. Without that fallback an offline start loses the
+            // deployment's settings for the whole page — including the
+            // Supabase project cloud sync signs in to once connectivity
+            // returns — and runs on the build-time defaults instead.
+            urlPattern: ({ sameOrigin, url }) => sameOrigin && url.pathname === "/config.js",
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "deployment-config",
+              expiration: { maxEntries: 1 },
+            },
+          },
           {
             // Tiny constant-size "what's new" pointer fetched on every app load
             // to drive the unread dot. StaleWhileRevalidate serves the cached

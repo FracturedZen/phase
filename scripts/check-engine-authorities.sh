@@ -4,7 +4,9 @@
 #
 # Existing offenders are frozen in amber — this check only flags *newly
 # added* offending lines in the diff (same mechanism as
-# check-parser-combinators.sh).
+# check-parser-combinators.sh). A line moved within the gate's view (its scope
+# minus SCOPE_EXCLUDES) is not added; the added-line set comes from
+# scripts/lib/added-lines.py.
 #
 # Pattern families:
 #   (A) Raw keyword queries: `.keywords.contains(` / `.keywords.iter(`.
@@ -28,19 +30,58 @@
 # Exempt: lines (or the line immediately above) with
 #     // allow-raw-authority: <reason>      (A)
 #     // allow-raw-zone: <reason>           (B)
+#     // allow-raw-event-referent: <reason> (E)
+#   (E) Raw event-context referent reads: resolve_event_context_target(s) /
+#       resolve_event_context_target_for_event_or_state outside game/targeting.rs.
+#       An instruction that affects an event referent binds it through
+#       targeting::affected_event_context_target / resolve_event_referent (CR 400.7).
+#       A diff ratchet on these named APIs, not a proof of complete routing.
+#       Its view is SCOPE minus EVENT_REFERENT_EXCLUDES (only the authority
+#       itself), not the keyword exemptions.
+#
 # Allowed files (the authorities themselves and the layer/copy machinery that
-# must read raw keyword state): see ALLOWED_KEYWORD_FILES below.
+# must read raw keyword state): see SCOPE_EXCLUDES below.
 #
 # Usage:
 #   scripts/check-engine-authorities.sh [base-ref]
 #
 # Default base-ref is the merge-base with origin/main. In CI, pass the PR
 # target branch's SHA explicitly.
+#
+# Exit status:
+#   0  no violation found.
+#   1  a violation found, in any section.
+#   1  the added-line helper's own test suite (scripts/lib/added_lines_tests.py)
+#      failed; no verdict.
+#   2  the added-line helper (scripts/lib/added-lines.py) could not read the
+#      diff; no verdict.
+#   2  the base ref does not resolve to a commit; no verdict.
 
 set -euo pipefail
+# shellcheck source=scripts/lib/added-lines.sh
+. "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
-SCOPE='crates/engine/src'
+added_lines_require_base "$BASE"
+SCOPE=(crates/engine/src crates/phase-ast/src crates/phase-parser/src)
+# Files allowed to touch raw keyword state: the authority module, the layer
+# engine that computes `obj.keywords`, and copy machinery that snapshots
+# characteristics wholesale. These files are outside the gate's view, so a line
+# moved out of one into a checked file is checked.
+SCOPE_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/src/game/keywords.rs'
+    ':(exclude)crates/engine/src/game/layers.rs'
+    ':(exclude)crates/engine/src/game/game_object.rs'
+    ':(exclude)crates/engine/src/game/effects/become_copy.rs'
+    ':(exclude)crates/engine/src/game/effects/token_copy.rs'
+)
+# (E) has its own view: only the referent authority is outside it, so the
+# keyword exemptions above never hide a raw referent read.
+EVENT_REFERENT_EXCLUDES=(
+    ':(exclude)**/*.md'
+    ':(exclude)crates/engine/src/game/targeting.rs'
+)
 
 # Pre-commit hook mode: only check staged changes (mirrors
 # check-parser-combinators.sh) so another agent's unstaged work isn't flagged.
@@ -51,32 +92,23 @@ fi
 
 # (A) Raw keyword queries.
 FORBIDDEN_KEYWORD_QUERY='\.keywords\.(contains|iter)\('
-# Files allowed to touch raw keyword state: the authority module, the layer
-# engine that computes `obj.keywords`, and copy machinery that snapshots
-# characteristics wholesale.
-ALLOWED_KEYWORD_FILES='game/keywords\.rs|game/layers\.rs|game/game_object\.rs|effects/become_copy\.rs|effects/token_copy\.rs'
+
+# (E) Raw event-context referent reads, outside the referent authority.
+FORBIDDEN_EVENT_REFERENT='resolve_event_context_target(s|_for_event_or_state)?\('
 
 FAIL=0
 report_keyword=""
+report_event_referent=""
 
 filter_allow_annotation() {
-    local file="$1"
-    local candidates="$2"
-    local added=""
-    while IFS= read -r diff_line; do
-        [ -z "$diff_line" ] && continue
-        local text="${diff_line#*+}"
-        local ln
-        ln=$(grep -nFx "$text" "$file" 2>/dev/null | head -1 | cut -d: -f1)
-        if [ -n "$ln" ] && [ "$ln" -gt 1 ]; then
-            local prev
-            prev=$(sed -n "$((ln-1))p" "$file")
-            if echo "$prev" | grep -q 'allow-raw-authority'; then
-                continue
-            fi
-        fi
-        if echo "$text" | grep -q 'allow-raw-authority'; then
-            continue
+    local file="$1" candidates="$2" marker="${3:-allow-raw-authority}" added="" rec ln text prev
+    while IFS= read -r rec; do
+        [ -z "$rec" ] && continue
+        ln="${rec%%$'\t'*}"; text="${rec#*$'\t'}"
+        case "$text" in *"$marker"*) continue ;; esac
+        if [ "$ln" -gt 1 ]; then
+            prev=$(added_lines_text_at "$file" "$((ln - 1))")
+            case "$prev" in *"$marker"*) continue ;; esac
         fi
         added="${added}${text}
 "
@@ -86,20 +118,20 @@ filter_allow_annotation() {
 
 # NB: no early exit on an empty diff — section (B) is full-tree and must run
 # even when this change touched no engine source.
-files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}" 2>/dev/null || true)
+if [ -n "$files" ]; then
+    added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${SCOPE_EXCLUDES[@]}"
+fi
 
 while IFS= read -r file; do
     [ -f "$file" ] || continue
-    if echo "$file" | grep -qE "$ALLOWED_KEYWORD_FILES"; then
+
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
         continue
     fi
 
-    diff_added=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
-    if [ -z "$diff_added" ]; then
-        continue
-    fi
-
-    keyword_hits=$(echo "$diff_added" | grep -Ev 'allow-raw-authority' | grep -E "$FORBIDDEN_KEYWORD_QUERY" || true)
+    keyword_hits=$(added_lines_grep "$kept" "$FORBIDDEN_KEYWORD_QUERY") || exit 2
     keyword_clean=$(filter_allow_annotation "$file" "$keyword_hits")
     if [ -n "$keyword_clean" ]; then
         report_keyword="${report_keyword}
@@ -112,7 +144,52 @@ while IFS= read -r file; do
     fi
 done <<< "$files"
 
-if [ "$FAIL" -eq 1 ]; then
+referent_files=$(git diff $DIFF_MODE --name-only "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}" 2>/dev/null || true)
+if [ -n "$referent_files" ]; then
+    added_lines_load $DIFF_MODE "$BASE" -- "${SCOPE[@]}" "${EVENT_REFERENT_EXCLUDES[@]}"
+fi
+
+while IFS= read -r file; do
+    [ -f "$file" ] || continue
+
+    kept=$(added_lines_for "$file" | grep -E $'^[0-9]+\t[^+]' || true)
+    if [ -z "$kept" ]; then
+        continue
+    fi
+
+    referent_hits=$(added_lines_grep "$kept" "$FORBIDDEN_EVENT_REFERENT") || exit 2
+    referent_clean=$(filter_allow_annotation "$file" "$referent_hits" allow-raw-event-referent)
+    if [ -n "$referent_clean" ]; then
+        report_event_referent="${report_event_referent}
+  ${file}:"
+        while IFS= read -r line; do
+            report_event_referent="${report_event_referent}
+    ${line}"
+        done <<< "$referent_clean"
+        FAIL=1
+    fi
+done <<< "$referent_files"
+
+if [ -n "$report_event_referent" ]; then
+    cat >&2 <<EOF
+ERROR: New engine code reads an event-context referent raw.
+
+(E) An instruction that affects "it" / "that creature" from a trigger event
+binds it through targeting::affected_event_context_target (singular),
+targeting::bound_event_referent_objects (batch) or targeting::resolve_event_referent,
+so a referent that became a new object (CR 400.7) is not affected.
+
+Forbidden in added lines (diff vs ${BASE}):
+${report_event_referent}
+
+An information read (CR 608.2h) or a player referent may annotate the line with:
+
+    // allow-raw-event-referent: <one-line reason>
+
+EOF
+fi
+
+if [ -n "$report_keyword" ]; then
     cat >&2 <<EOF
 ERROR: New engine code bypasses a single-authority helper.
 

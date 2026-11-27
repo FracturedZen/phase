@@ -14,9 +14,11 @@
 //! held six casts, four land plays and a pass.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ManaContribution,
-    ManaProduction, ReplacementDefinition, TargetFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
+    ControllerRef, Duration, Effect, ManaContribution, ManaProduction, ReplacementDefinition,
+    TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{
@@ -28,6 +30,7 @@ use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::statics::StaticMode;
 use engine::types::zones::{EtbTapState, Zone};
 
 fn morph_cost() -> ManaCost {
@@ -52,7 +55,7 @@ fn face_down_morph_board(controller: PlayerId, mana: &[ManaType]) -> (GameRunner
     scenario.at_phase(Phase::PreCombatMain);
     let id = scenario
         .add_creature_to_hand(controller, "Coral Trickster", 2, 1)
-        .with_keyword(Keyword::Morph(morph_cost()))
+        .with_keyword(Keyword::morph(morph_cost()))
         .id();
     if !mana.is_empty() {
         scenario.with_mana_pool(controller, pool(mana));
@@ -142,6 +145,8 @@ fn redirect_exile_to_graveyard() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Graveyard,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -281,10 +286,10 @@ fn check_warbreak_morph_x() {
 /// A mana source whose own cost exiles it, plus two exile→graveyard
 /// replacements, forces a CR 616.1 ordering choice while the turn-face-up cost
 /// is being auto-tapped. `casting.rs` deliberately reports such a source as
-/// payable, so the offer above is right to include it — but the compatibility
-/// wrapper `pay_special_action_mana_cost` converts the resulting `Paused` into
-/// an error. That is why #4538 was asked to build a typed resume before the
-/// action could be offered.
+/// payable, so the offer above is right to include it; the action pays through
+/// `pay_special_action_mana_cost_with_resume`, whose typed continuation turns
+/// that pause into a resumable prompt instead of an error. That is the typed
+/// resume #4538 required before the action could be offered.
 ///
 /// The permanent must still be face down while the choice is open, and must flip
 /// exactly once the choice is answered.
@@ -329,11 +334,32 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
             .as_enchantment()
             .with_replacement_definition(redirect_exile_to_graveyard());
     }
+    let foreign_top = scenario.add_land_to_library_top(P1, "Island").id();
     let mut runner = scenario.build();
 
     let mut events = Vec::new();
     engine::game::morph::play_face_down(runner.state_mut(), P0, id, &mut events)
         .expect("the card is played face down");
+
+    runner
+        .state_mut()
+        .add_transient_continuous_effect(
+            id,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: P0 },
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::MayLookAtTopOfLibrary {
+                    library: ControllerRef::SpecificPlayer { id: P1 },
+                },
+            }],
+            None,
+        )
+        .expect("grant a foreign library look");
+    assert_ne!(
+        filter_state_for_viewer(runner.state(), P0).objects[&foreign_top].name,
+        HIDDEN_CARD_NAME
+    );
 
     let paused = runner
         .act(GameAction::TurnFaceUp {
@@ -354,10 +380,10 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
                     &pending.resume,
                     ManaAbilityResume::TurnFaceUp {
                         player,
-                        object_id,
+                        source,
                         announced_x: Some(0),
                         ..
-                    } if *player == P0 && *object_id == id
+                    } if *player == P0 && source.object_id == id
                 )
         ),
         "the typed continuation names the action to finish"
@@ -367,9 +393,20 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
         "nothing is committed while the payment is open"
     );
 
+    // CR 401.5: the outer turn-up owns the snapshot even while the mana
+    // source's replacement choice owns the prompt.
+    let state = serde_json::to_value(runner.state()).expect("serialize the paused authority");
+    assert_eq!(
+        state["foreign_library_look_snapshot"]["tops"],
+        serde_json::json!([[P1, foreign_top]])
+    );
+
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("the replacement choice is answered");
+
+    let state = serde_json::to_value(runner.state()).expect("serialize the completed authority");
+    assert!(state.get("foreign_library_look_snapshot").is_none());
 
     let obj = &runner.state().objects[&id];
     assert!(

@@ -120,6 +120,8 @@ fn add_counter_count_replacement(
 
 fn squirrel_spec() -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
         characteristics: TokenCharacteristics {
             display_name: "Squirrel".to_string(),
             power: Some(1),
@@ -136,6 +138,7 @@ fn squirrel_spec() -> TokenSpec {
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller: P0,
@@ -210,6 +213,9 @@ fn mauhur_does_not_add_counters_to_unlisted_creature_types() {
         bear,
         CounterType::Plus1Plus1,
         1,
+        // The harness drives the authority as the effect placement the
+        // replacement under test modifies.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
         &mut events,
     ));
 

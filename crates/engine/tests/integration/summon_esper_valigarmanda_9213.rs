@@ -748,7 +748,9 @@ fn warped_space_reaches_the_opponents_linked_card() {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: pay_zero })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay_zero { 0 } else { 1 },
+            })
             .expect("decide the alternative");
         for _ in 0..8 {
             if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
@@ -816,7 +818,9 @@ fn warped_space_keeps_casualty_for_a_card_with_no_mana_cost() {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: sacrifice })
+            .act(GameAction::DecideOptionalCost {
+                index: if sacrifice { 0 } else { 1 },
+            })
             .expect("decide casualty");
         if sacrifice && runner.state().objects[&fodder].zone == Zone::Battlefield {
             runner
@@ -904,7 +908,7 @@ fn warped_space_follows_a_casualty_decision_for_a_card_with_no_mana_cost() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline casualty");
     runner
         .act(GameAction::SelectTargets {
@@ -974,7 +978,7 @@ fn warped_space_keeps_casualty_for_a_card_with_a_printed_cost() {
                     });
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: !alternative || pay_zero,
+                            index: if !alternative || pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1056,7 +1060,7 @@ fn warped_space_keeps_replicate_for_a_card_with_a_printed_cost() {
                     prompts.push((alternative, origin));
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: alternative && pay_zero,
+                            index: if alternative && pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1153,7 +1157,9 @@ fn cast_linked_fling(
                 });
                 let pay = if alternative { pay_zero } else { casualty };
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("decide a cost");
             }
             WaitingFor::PayCost { choices, .. } => {
@@ -1371,7 +1377,7 @@ fn warped_space_is_elected_before_casualty_and_targets_for_a_targeted_card() {
                     });
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: !alternative || pay_zero,
+                            index: if !alternative || pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1480,7 +1486,7 @@ fn a_linked_card_with_no_mana_cost_retains_the_alternative_when_its_source_is_sa
             let result = match runner.state().waiting_for.clone() {
                 WaitingFor::OptionalCostChoice { origin, .. } => {
                     assert_eq!(origin, AdditionalCostOrigin::Casualty);
-                    runner.act(GameAction::DecideOptionalCost { pay: true })
+                    runner.act(GameAction::DecideOptionalCost { index: 0 })
                 }
                 WaitingFor::PayCost { .. } => {
                     let result = runner.act(GameAction::SelectCards {
@@ -1637,7 +1643,7 @@ fn an_illegal_linked_cast_reverses_its_declaration_and_resumes_its_parent() {
             })
             .expect("pick Fling");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .inspect(|result| {
                 events.extend(result.events.clone());
             })
@@ -1736,6 +1742,8 @@ fn legacy_pending_save(state: &engine::types::game_state::GameState) -> serde_js
 /// is canceled, including after save/restore. Deferred casualty stays unpaid.
 #[test]
 fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapter() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    engine::game::perf_counters::reset();
     for discard in [false, true] {
         for (reload, library_operation) in [(false, 0u8), (true, 0), (false, 2), (false, 1)] {
             let library_disclosure = library_operation != 0;
@@ -1808,13 +1816,13 @@ fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapte
                 ));
             }
             runner
-                .act(GameAction::DecideOptionalCost { pay: true })
+                .act(GameAction::DecideOptionalCost { index: 0 })
                 .inspect(|result| {
                     events.extend(result.events.clone());
                 })
                 .expect("elect zero");
             runner
-                .act(GameAction::DecideOptionalCost { pay: true })
+                .act(GameAction::DecideOptionalCost { index: 0 })
                 .inspect(|result| {
                     events.extend(result.events.clone());
                 })
@@ -1836,7 +1844,9 @@ fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapte
                 })
                 .expect("target creature");
             runner
-                .act(GameAction::DecideOptionalCost { pay: discard })
+                .act(GameAction::DecideOptionalCost {
+                    index: if discard { 0 } else { 1 },
+                })
                 .inspect(|result| {
                     events.extend(result.events.clone());
                 })
@@ -2057,6 +2067,10 @@ fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapte
             assert_eq!(cast_completions(&events, saga), 1);
         }
     }
+    assert!(
+        engine::game::perf_counters::cast_undo_record_snapshot().reference_checks > 0,
+        "reach: the linked casts recorded and compared changed-member reversals"
+    );
 }
 
 /// CR 118.9d + CR 601.2b/f: the alternative declaration and the printed
@@ -2096,7 +2110,9 @@ fn linked_alternative_costs_preserve_printed_choice_and_kicker() {
                     }
                 ));
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_zero })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_zero { 0 } else { 1 },
+                    })
                     .expect("elect alternative");
                 assert!(
                     matches!(
@@ -2106,7 +2122,9 @@ fn linked_alternative_costs_preserve_printed_choice_and_kicker() {
                     "reach guard: printed additional obligation still offered"
                 );
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_extra })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_extra { 0 } else { 1 },
+                    })
                     .expect("elect printed extra");
                 if !kicker && pay_extra {
                     runner
@@ -2265,10 +2283,10 @@ fn a_linked_kicker_cast_locks_its_floor_before_replacement_ordering_sacrifices()
             })
             .expect("pick Vines");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("elect Room zero");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("elect casualty");
         runner
             .act(GameAction::SelectCards {
@@ -2286,7 +2304,7 @@ fn a_linked_kicker_cast_locks_its_floor_before_replacement_ordering_sacrifices()
             })
             .expect("target the other creature");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("elect kicker");
         assert!(matches!(
             runner.state().waiting_for,
@@ -2414,7 +2432,7 @@ fn canceling_a_paid_cast_preserves_another_players_concession() {
             vec![TargetRef::Object(target)]
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("pay three life");
         assert_eq!(
             runner.life(P0),
@@ -2487,15 +2505,15 @@ fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
             GameAction::SelectCards {
                 cards: vec![linked],
             },
-            GameAction::DecideOptionalCost { pay: true },
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
+            GameAction::DecideOptionalCost { index: 0 },
             GameAction::SelectCards {
                 cards: vec![reserved],
             },
             GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(target)],
             },
-            GameAction::DecideOptionalCost { pay: false },
+            GameAction::DecideOptionalCost { index: 1 },
         ] {
             events.extend(
                 runner
@@ -2610,6 +2628,8 @@ fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
 /// a mana increase, so the selecting input pays life and leaves payment open.
 #[test]
 fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    engine::game::perf_counters::reset();
     for (cancel, reload) in [(true, false), (true, true), (false, false)] {
         let Board {
             mut runner,
@@ -2716,6 +2736,10 @@ fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life()
             );
         }
     }
+    assert!(
+        engine::game::perf_counters::cast_undo_record_snapshot().cast_start_reference_checks > 0,
+        "reach: the selecting input folded its cast-start boundary"
+    );
 }
 
 /// Verbatim Oracle text (MTGJSON `text`): U+2014 row separators, U+2212 minus signs.
@@ -2845,7 +2869,7 @@ fn canceling_a_paid_cast_keeps_an_independent_loyalty_activation() {
             })
             .expect("select the creature through the announcement prompt");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("pay three life");
         assert_eq!(runner.life(P0), 17);
         assert!(matches!(
@@ -2938,9 +2962,15 @@ fn check_linked_paid_cast_mana_boundary(route: &str) {
                 let text = format!(
                     "{{0}}: Exile target instant or sorcery card from a graveyard.\n{body}"
                 );
+                let keywords: &[&str] = if route == "station" {
+                    &["Station"]
+                } else {
+                    &[]
+                };
                 let source = scenario
-                    .add_artifact_from_oracle(P0, "Linked cast boundary", &text)
+                    .add_artifact_from_oracle(P0, "Linked cast boundary", "")
                     .with_subtypes(vec!["Spacecraft"])
+                    .from_oracle_text_with_keywords(keywords, &text)
                     .id();
                 let child = scenario
                     .add_spell_to_graveyard(P0, "Linked child", true)

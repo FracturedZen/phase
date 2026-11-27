@@ -1,7 +1,8 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::GameObject;
-use crate::game::targeting::{TriggeringActivation, TriggeringSpell};
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::targeting::{TriggeringActivation, TriggeringObservedAbility, TriggeringSpell};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -145,6 +146,9 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.12: if this copy is later cast ("you may cast the copy"), it is
+        // cast from the zone the copied object is in.
+        copy_obj.copied_from_zone = Some(crate::game::game_object::CastOrigin::of(source_obj));
         copy_obj.cast_controller = None;
         // CR 707.10: no mana was spent to cast a spell copy — reset the
         // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
@@ -296,6 +300,14 @@ pub fn resolve(
             crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+            // CR 603.2c: collected once, here. Claim the occurrence so no later collector of
+            // this action (the priority pass, the CopyRetarget walk) collects it again.
+            crate::game::announcement_triggers::claim_ordinary_collected_span(
+                state,
+                events,
+                copied_at,
+                copied_at + 1,
+            );
         }
     }
 
@@ -398,11 +410,13 @@ fn drain_spell_copied_observer_triggers(
     spell_copied_collected: bool,
 ) -> Result<(), EffectError> {
     if spell_copied_collected {
-        if let Some(wf) =
-            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(
-                state, events,
-            )
-        {
+        // CR 603.2c: the resolving effect's buffer is the reducer action's, so
+        // the drain's window ranges are claimed for the post-action pipeline.
+        if let Some(wf) = crate::game::triggers::drain_on_action_buffer(
+            state,
+            events,
+            crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement,
+        ) {
             state.waiting_for = wf;
         }
     }
@@ -574,8 +588,9 @@ struct CopySource {
     /// (`crate::types::game_state::DepartedStackSpell`) rather than a live
     /// stack object — `resolve` must read this object, not
     /// `state.objects.get(&entry.id)`, which could now name an unrelated
-    /// later object at the same storage id. A departed activated ability
-    /// (`targeting::TriggeringActivation::Departed`) has none: this engine
+    /// later object at the same storage id. A departed ability
+    /// (`targeting::TriggeringActivation::Departed` or
+    /// `targeting::TriggeringObservedAbility::Departed`) has none: this engine
     /// stores no `GameObject` for an ability entry, so `resolve`'s
     /// `state.objects.get(&entry.id)` fallback finds nothing for it either.
     departed_object: Option<Box<GameObject>>,
@@ -628,6 +643,30 @@ fn copy_source_from_triggering_activation(source: TriggeringActivation<'_>) -> C
             departed_object: None,
         })),
         TriggeringActivation::Gone => CopySourceLookup::Gone,
+    }
+}
+
+/// CR 608.2h + CR 707.10: Adapt `targeting::triggering_observed_ability`'s
+/// answer to a [`CopySourceLookup`]. `Departed` is the countered observed
+/// trigger's last-known entry; `Gone` means the named stack object has neither
+/// a live entry nor a departed record; it differs from no source.
+fn copy_source_from_triggering_observed_ability(
+    source: TriggeringObservedAbility<'_>,
+) -> CopySourceLookup {
+    match source {
+        TriggeringObservedAbility::OnStack(entry) => {
+            CopySourceLookup::Source(Box::new(CopySource::on_stack(entry.clone())))
+        }
+        // CR 707.10 + CR 113.1c: a countered observed trigger is copied as it
+        // last existed. An ability on the stack has no `GameObject` here, so
+        // there is no departed object.
+        TriggeringObservedAbility::Departed(entry) => {
+            CopySourceLookup::Source(Box::new(CopySource {
+                entry: entry.clone(),
+                departed_object: None,
+            }))
+        }
+        TriggeringObservedAbility::Gone => CopySourceLookup::Gone,
     }
 }
 
@@ -771,6 +810,23 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
             }
         }
         return CopySourceLookup::Absent;
+    }
+    // CR 608.2k + CR 707.10: an ability-triggering observer ("that ability"
+    // — Firebender Ascension, Aboleth Spawn) copies the observed stack entry
+    // by its entry id, through the same on-stack/departed/gone authority as
+    // the `TriggeringSource` arm above. Never `source_id`: sibling firings
+    // share it (see the CR 608.2h comment above for the same trap). `None`
+    // (the observed occurrence was removed during placement, CR 603.3d) and
+    // an entry with no departed record both resolve to `Gone`, the clean
+    // no-op; a countered observed trigger copies from its record (CR 608.2h).
+    if let Some(source) = crate::game::targeting::triggering_observed_ability(state) {
+        return copy_source_from_triggering_observed_ability(source);
+    }
+    if matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityTriggered { .. })
+    ) {
+        return CopySourceLookup::Gone;
     }
     // CR 608.2h: final untargeted fallback. With a spell-cast event in scope,
     // use its on-stack/departed/gone answer — never `triggering_spell_stack_entry`'s
@@ -1007,11 +1063,8 @@ fn set_copied_kind_controller(kind: &mut StackEntryKind, controller: PlayerId) {
 
 fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: PlayerId) {
     ability.controller = controller;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_controller_recursive(sub_ability, controller);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_controller_recursive(else_ability, controller);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_controller_recursive(child, controller);
     }
 }
 
@@ -1023,11 +1076,8 @@ fn set_resolved_controller_recursive(ability: &mut ResolvedAbility, controller: 
 /// `source_id` and a second-generation copy could not find its source.
 pub(crate) fn set_resolved_source_recursive(ability: &mut ResolvedAbility, source_id: ObjectId) {
     ability.source_id = source_id;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        set_resolved_source_recursive(sub_ability, source_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        set_resolved_source_recursive(else_ability, source_id);
+    for (_, child) in ability.child_links_mut() {
+        set_resolved_source_recursive(child, source_id);
     }
 }
 
@@ -1064,11 +1114,8 @@ fn rewrite_copy_spell_object_targets(
         })
         .collect();
     ability.replace_target_occurrences(occurrences);
-    if let Some(sub) = ability.sub_ability.as_mut() {
-        rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
-    }
-    if let Some(else_ab) = ability.else_ability.as_mut() {
-        rewrite_copy_spell_object_targets(else_ab, new_target, new_target_pin);
+    for (_, child) in ability.child_links_mut() {
+        rewrite_copy_spell_object_targets(child, new_target, new_target_pin);
     }
 }
 
@@ -1086,11 +1133,8 @@ fn stack_entry_source_id_for_copy(kind: &StackEntryKind, copy_id: ObjectId) -> O
 /// the copied ability chain before the copy resolves.
 fn clear_cast_from_zone_recursive(ability: &mut ResolvedAbility) {
     ability.context.cast_from_zone = None;
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        clear_cast_from_zone_recursive(sub_ability);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        clear_cast_from_zone_recursive(else_ability);
+    for (_, child) in ability.child_links_mut() {
+        clear_cast_from_zone_recursive(child);
     }
 }
 
@@ -1263,6 +1307,8 @@ mod tests {
                 object_id: spell_id,
                 card_id: CardId(1),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             });
             // A hostile sibling stack entry whose `source_id` equals the
             // departed spell's id — must not be mistaken for it.
@@ -1375,6 +1421,8 @@ mod tests {
             object_id: other_spell_id,
             card_id: CardId(2),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let ability = ResolvedAbility::new(
@@ -1429,6 +1477,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let ability = ResolvedAbility::new(
             Effect::CopySpell {
@@ -1509,6 +1559,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut resolving_ability =
             ResolvedAbility::new(Effect::NoOp, vec![], krark_id, PlayerId(0));
@@ -1586,6 +1638,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut resolving_ability =
             ResolvedAbility::new(Effect::NoOp, vec![], krark_id, PlayerId(0));
@@ -1684,6 +1738,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         // No `resolving_stack_entry` at all — no pin available.
 
@@ -1880,7 +1936,7 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Sacrifice {
                     target: TargetFilter::SelfRef,
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             ));
@@ -2269,6 +2325,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::AdditionalCostPaymentCount,
@@ -2580,6 +2638,8 @@ mod tests {
         // Push original targeted spell (Anguished Unmaking-style)
         let original_ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: crate::types::zones::Zone::Exile,
                 target: TargetFilter::Any,
@@ -2611,6 +2671,7 @@ mod tests {
         // Push an intermediate triggered ability (e.g. Monastery Mentor token trigger)
         let mentor_ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Monk".to_string(),
                 power: crate::types::ability::PtValue::Fixed(1),
                 toughness: crate::types::ability::PtValue::Fixed(1),
@@ -2622,6 +2683,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2726,6 +2789,8 @@ mod tests {
             object_id: cast_spell_id,
             controller: PlayerId(0),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let copy_ability = ResolvedAbility::new(
@@ -2828,6 +2893,8 @@ mod tests {
                 object_id: cast_spell_id,
                 controller: PlayerId(0),
                 cast_mana_value: None,
+                cast_mana_spent: None,
+                cast_incarnation: None,
             }),
         );
 
@@ -3009,6 +3076,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3165,6 +3233,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3242,6 +3311,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry: Some(ObjectId(100)),
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3322,6 +3392,7 @@ mod tests {
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
             stack_entry,
             activation_cost: crate::types::events::BoundActivationCost::Unknown,
+            loyalty_counters_removed: None,
         };
         let copy_that_ability = ResolvedAbility::new(
             Effect::CopySpell {
@@ -3380,6 +3451,8 @@ mod tests {
             object_id: ObjectId(100),
             card_id: CardId(1),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         assert!(
             crate::game::targeting::triggering_activation(&state).is_none(),
@@ -3681,6 +3754,7 @@ mod tests {
                         .controller(crate::types::ability::ControllerRef::Opponent),
                 ),
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
             vec![],
             hope_id,
@@ -4077,6 +4151,8 @@ mod tests {
         ) {
             let ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(origin),
                     destination,
                     target: TargetFilter::Any,
@@ -4175,6 +4251,8 @@ mod tests {
             object_id: ObjectId(10),
             controller: PlayerId(0),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
         let mut events = Vec::new();
         resolve(&mut state, &copy, &mut events).expect("automatic copy must resolve");
@@ -4498,6 +4576,8 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                produceable_mana_types: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });

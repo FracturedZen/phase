@@ -77,6 +77,8 @@ fn craft_ability(cost: ManaCost) -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::SelfRef,
@@ -436,7 +438,7 @@ fn craft_returns_blade_transformed_and_front_etb_does_not_refire() {
                     target: TargetFilter::Typed(
                         TypedFilter::permanent().with_type(TypeFilter::Creature),
                     ),
-                    count: QuantityExpr::Fixed { value: 1 },
+                    count: QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
             )

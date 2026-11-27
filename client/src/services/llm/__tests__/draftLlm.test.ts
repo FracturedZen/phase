@@ -26,15 +26,16 @@ const debugMocks = vi.hoisted(() => ({ debugLog: vi.fn() }));
 vi.mock("../../../game/debugLog", () => ({ debugLog: debugMocks.debugLog }));
 
 import {
+  buildLocalFifoLlmRequests,
+  callLlmDrafter,
   cancelLlmDraftRun,
   collectLlmDraftResponses,
-  isLlmDraftDisabled,
-  recordLlmDraftSubmission,
+  LLM_DRAFT_TIMEOUT_MS,
   reportLlmDraftOutcomes,
-  resetLlmDraftBreaker,
   startLlmDraftRound,
   type LlmDrafterStatus,
 } from "../draftLlm";
+import type { LocalFifoOwner } from "../../../adapter/draft-adapter";
 import type { LlmProfile } from "../types";
 
 const PROFILE: LlmProfile = {
@@ -46,7 +47,9 @@ const PROFILE: LlmProfile = {
   model: "claude-sonnet-5",
   maxOutputTokens: null,
   temperature: null,
+  decisionContext: "selfContained",
   enabled: true,
+  rememberApiKey: false,
 };
 
 const REQUEST = {
@@ -67,13 +70,23 @@ function pickRequest(seat: number, fingerprint: string) {
   };
 }
 
+/** A fake engine lease answering both request builders with `requests`. */
+function fakeLease(requests: unknown) {
+  return {
+    buildLlmDraftPickRequests: vi.fn((..._args: unknown[]) => requests),
+    localFifoBuildLlmRequests: vi.fn((..._args: unknown[]) => requests),
+  };
+}
+
+/** Every fake lease handed out, in order. */
+const leases: ReturnType<typeof fakeLease>[] = [];
+
 /** Drives the mocked lease, recording whether it was held during network I/O. */
 function leaseReturning(requests: unknown, onEnter?: () => void) {
   leaseMocks.withDraftEngineOperation.mockImplementation(async (work: (l: unknown) => unknown) => {
     onEnter?.();
-    const lease = {
-      buildLlmDraftPickRequests: vi.fn(() => requests),
-    };
+    const lease = fakeLease(requests);
+    leases.push(lease);
     const result = await work(lease);
     leaseHeld = false;
     return result;
@@ -86,9 +99,9 @@ beforeEach(() => {
   llmMocks.executeLlmRequest.mockReset();
   leaseMocks.withDraftEngineOperation.mockReset();
   debugMocks.debugLog.mockReset();
-  resetLlmDraftBreaker();
   cancelLlmDraftRun();
   leaseHeld = false;
+  leases.length = 0;
 });
 
 describe("LLM drafters", () => {
@@ -302,156 +315,30 @@ describe("LLM drafters", () => {
     await expect(collectLlmDraftResponses(PROFILE, stillCurrent)).resolves.toEqual([]);
   });
 
-  // ── Per-profile failure breaker ──────────────────────────────────────────
+  // ── No session breaker ───────────────────────────────────────────────────
 
-  it("gives up on a profile after consecutive failed rounds and stops calling it", async () => {
+  /// A configured LLM drafter is asked on every pick it can make. Failed rounds
+  /// cost that pick its flavour (the engine bot drafts the seat), never the
+  /// provider's place in the rest of the draft.
+  it("keeps calling a provider after repeated failed rounds", async () => {
     leaseReturning([pickRequest(1, "fp-1")]);
     llmMocks.executeLlmRequest.mockRejectedValue(new Error("provider down"));
 
-    for (let round = 0; round < 3; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-
-    const callsBefore = llmMocks.executeLlmRequest.mock.calls.length;
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    // No further latency is spent on a provider the session has given up on.
-    expect(llmMocks.executeLlmRequest.mock.calls.length).toBe(callsBefore);
-  });
-
-  it("resets the breaker when the engine actually uses a pick", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockRejectedValueOnce(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":0}' });
-    await collectLlmDraftResponses(PROFILE, () => true);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: true }]);
-
-    llmMocks.executeLlmRequest.mockRejectedValue(new Error("blip"));
-    await collectLlmDraftResponses(PROFILE, () => true);
-    await collectLlmDraftResponses(PROFILE, () => true);
-
-    // Two failures after a success is below the ceiling.
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// The finding: the transport returns HTTP error bodies so a vendor's
-  /// diagnostic survives, so "bytes arrived" said nothing about usability. A
-  /// round of 401s would have reset the breaker forever.
-  it("counts a round the engine refused as a failure, not a success", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockResolvedValue({
-      status: 401,
-      body: '{"error":{"message":"Incorrect API key provided"}}',
-    });
-
-    for (let round = 0; round < 3; round += 1) {
-      const responses = await collectLlmDraftResponses(PROFILE, () => true);
-      // Bytes came back, so the round reaches submit...
-      expect(responses).toHaveLength(1);
-      // ...and the engine refuses every seat, which is what counts.
-      recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-  });
-
-  it("counts a round as a success when any seat's pick was used", async () => {
-    resetLlmDraftBreaker();
-    recordLlmDraftSubmission(PROFILE.id, [
-      { seat: 1, used: false },
-      { seat: 2, used: true },
-    ]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-    recordLlmDraftSubmission(PROFILE.id, [{ seat: 1, used: false }]);
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// A cancelled or superseded round is not the provider's fault and must be
-  /// recorded neither way — charging it to the breaker would disable a healthy
-  /// profile for clicking quickly.
-  it("does not record a round that went stale mid-flight", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    let fresh = true;
-    llmMocks.executeLlmRequest.mockImplementation(async () => {
-      fresh = false;
-      return { status: 200, body: '{"choice":0}' };
-    });
-
-    for (let round = 0; round < 5; round += 1) {
-      fresh = true;
-      await collectLlmDraftResponses(PROFILE, () => fresh);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  it("does not record a round abandoned by an explicit cancel", async () => {
-    leaseReturning([pickRequest(1, "fp-1")]);
-    llmMocks.executeLlmRequest.mockImplementation(async () => {
-      cancelLlmDraftRun();
-      return { status: 200, body: '{"choice":0}' };
-    });
-
-    for (let round = 0; round < 5; round += 1) {
+    for (let round = 0; round < 6; round += 1) {
       await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(llmMocks.executeLlmRequest).toHaveBeenCalledTimes(6);
   });
 
-  /// A pod with no eligible seat is not a provider failure and must not count
-  /// toward giving up on the profile.
-  it("does not blame the profile when the engine offers no seats", async () => {
-    leaseReturning([]);
-
-    for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// The finding: a run the draft lifecycle cancelled rejects in the
-  /// request-building phase too, and charging that to the provider would let
-  /// abandoning three drafts disable a healthy profile.
-  it("does not charge the breaker for a preflight that failed after cancellation", async () => {
-    leaseMocks.withDraftEngineOperation.mockImplementation(async () => {
-      // Exactly what `beginLifecycle` does while a round is building.
-      cancelLlmDraftRun();
-      throw new Error("draft session replaced");
-    });
-
-    for (let round = 0; round < 5; round += 1) {
-      await expect(collectLlmDraftResponses(PROFILE, () => true)).resolves.toEqual([]);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
-  });
-
-  /// A genuine build failure with the run still live IS the provider's problem
-  /// and still counts, so the guard above cannot mask a real fault.
-  it("still charges the breaker for a preflight failure on a live run", async () => {
-    leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
-
-    for (let round = 0; round < 3; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => true);
-    }
-
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(true);
-  });
-
-  it("does not charge the breaker for a preflight failure on a stale pick", async () => {
+  it("keeps building requests after repeated preflight failures on a live run", async () => {
     leaseMocks.withDraftEngineOperation.mockRejectedValue(new Error("engine unavailable"));
 
     for (let round = 0; round < 5; round += 1) {
-      await collectLlmDraftResponses(PROFILE, () => false);
+      await collectLlmDraftResponses(PROFILE, () => true);
     }
 
-    expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
+    expect(leaseMocks.withDraftEngineOperation).toHaveBeenCalledTimes(5);
   });
 
   describe("a pick round started when the pack opens", () => {
@@ -519,7 +406,70 @@ describe("LLM drafters", () => {
       await expect(round.responses).resolves.toEqual([]);
       expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
       expect(onStatus).not.toHaveBeenCalled();
-      expect(isLlmDraftDisabled(PROFILE.id)).toBe(false);
     });
+  });
+
+  describe("one drafter's call", () => {
+    it("calls_one_drafter_with_the_draft_timeout_and_the_callers_signal", async () => {
+      const controller = new AbortController();
+      llmMocks.executeLlmRequest.mockResolvedValue({ status: 200, body: '{"choice":2}' });
+
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, controller.signal))
+        .resolves.toEqual({ status: 200, body: '{"choice":2}' });
+
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledExactlyOnceWith(REQUEST, {
+        timeoutMs: 20_000,
+        signal: controller.signal,
+      });
+      expect(LLM_DRAFT_TIMEOUT_MS).toBe(20_000);
+    });
+
+    it("returns_no_reply_for_a_failed_call_and_reports_it_unless_cancelled", async () => {
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      llmMocks.executeLlmRequest.mockRejectedValue(new Error("network down"));
+
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, new AbortController().signal))
+        .resolves.toBeNull();
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
+      const logged = debugMocks.debugLog.mock.calls.map((call) => String(call[0]));
+      expect(logged).toEqual(["LLM drafter (seat 1) failed"]);
+
+      // A call the draft cut loose is not the provider failing.
+      llmMocks.executeLlmRequest.mockClear();
+      debugMocks.debugLog.mockClear();
+      const cancelled = new AbortController();
+      cancelled.abort();
+      await expect(callLlmDrafter({ seat: 1, request: REQUEST }, cancelled.signal))
+        .resolves.toBeNull();
+      expect(llmMocks.executeLlmRequest).toHaveBeenCalledOnce();
+      expect(debugMocks.debugLog).not.toHaveBeenCalled();
+      consoleWarn.mockRestore();
+    });
+  });
+
+  it("builds_fifo_requests_for_the_owner_under_one_lease", async () => {
+    const built = [{
+      kind: "request",
+      seat: 1,
+      promptId: { session_id: "local-0123456789abcdef", seat: 1, generation: 3 },
+      fingerprint: "fp-1",
+      optionCount: 15,
+      requiredPickCount: 1,
+      promptChars: 1001,
+      request: REQUEST,
+    }];
+    leaseReturning(built);
+
+    await expect(buildLocalFifoLlmRequests(7 as LocalFifoOwner, PROFILE)).resolves.toBe(built);
+
+    expect(leaseMocks.withDraftEngineOperation).toHaveBeenCalledOnce();
+    expect(leases).toHaveLength(1);
+    const lease = leases[0]!;
+    expect(lease.buildLlmDraftPickRequests).not.toHaveBeenCalled();
+    expect(lease.localFifoBuildLlmRequests).toHaveBeenCalledOnce();
+    const [owner, endpointJson, setNames] = lease.localFifoBuildLlmRequests.mock.calls[0]!;
+    expect(owner).toBe(7);
+    expect(JSON.parse(endpointJson as string)).toMatchObject({ provider: "Anthropic" });
+    expect(setNames).toEqual({ MRD: "Mirrodin" });
   });
 });

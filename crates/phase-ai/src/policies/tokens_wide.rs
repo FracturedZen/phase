@@ -237,6 +237,7 @@ mod tests {
         let card_id = CardId(id);
         let oid = create_object(state, card_id, AI, format!("Token Gen {id}"), Zone::Hand);
         let token_effect = Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -248,6 +249,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

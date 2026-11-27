@@ -328,6 +328,7 @@ mod tests {
                 abilities: vec![AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::Token {
+                        enters_blocking: None,
                         name: "Goblin".to_string(),
                         count: QuantityExpr::Fixed { value: 2 },
                         power: PtValue::Fixed(1),
@@ -339,6 +340,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            engine::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],

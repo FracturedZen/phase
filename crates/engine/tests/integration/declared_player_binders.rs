@@ -155,7 +155,7 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
                     .expect("t");
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                r.act(GameAction::DecideOptionalCost { pay: true })
+                r.act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kick");
             }
             WaitingFor::ManaPayment { .. } => {
@@ -349,6 +349,8 @@ fn illegal_declared_payer_is_not_prompted() {
 
 fn exile_head() -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::Typed(TypedFilter::creature()),
@@ -465,6 +467,7 @@ fn paid_instead_delegator_does_not_shift_the_declared_slot() {
 
 fn curse_token(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Curse".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -480,8 +483,16 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         attach_to: Some(attach_to),
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
-        static_abilities: vec![],
+        // CR 111.3 + CR 702.5a: "The token has enchant player", as the export
+        // carries it — without an enchant restriction the Aura cannot legally
+        // enchant a player.
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Player),
+            }])],
         enter_with_counters: vec![],
     }
 }
@@ -500,6 +511,7 @@ fn aura_token_attaches_to_the_declared_player() {
 
 fn soldier_token(owner: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Soldier".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -511,6 +523,7 @@ fn soldier_token(owner: TargetFilter) -> Effect {
         owner,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
