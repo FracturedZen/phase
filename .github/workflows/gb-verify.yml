@@ -1,0 +1,98 @@
+name: GB verify (fork fix branches)
+
+on:
+  push:
+    branches: ['ci/**']
+  workflow_dispatch:
+
+concurrency:
+  group: gb-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: 0
+  RUST_MIN_STACK: 67108864
+  CARGO_TERM_COLOR: never
+
+jobs:
+  prep:
+    name: export + fmt + check
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gb-prep
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - name: Fetch MTGJSON AtomicCards
+        run: |
+          set -euo pipefail
+          mkdir -p data/mtgjson
+          source scripts/lib/mtgjson-fetch.sh
+          mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
+      - name: export
+        run: cargo export-cards data --output data/card-data.json
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: check
+        run: cargo check --workspace --all-targets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: card-data
+          path: |
+            data/card-data.json
+            data/card-names.json
+          if-no-files-found: warn
+          retention-days: 3
+
+  test:
+    name: ${{ matrix.stage }}
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - stage: integration
+            cmd: cargo test -p phase-engine --test integration
+          - stage: integration_2
+            cmd: cargo test -p phase-engine --test integration_2
+          - stage: integration_3
+            cmd: cargo test -p phase-engine --test integration_3
+          - stage: integration_4
+            cmd: cargo test -p phase-engine --test integration_4
+          - stage: integration_5
+            cmd: cargo test -p phase-engine --test integration_5
+          - stage: parser
+            cmd: cargo test -p phase-parser --lib
+          - stage: enginelib
+            cmd: cargo test -p phase-engine --lib
+          - stage: ast
+            cmd: cargo test -p phase-ast
+          - stage: ai
+            cmd: cargo test -p phase-ai --lib
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gb-${{ matrix.stage }}
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: data
+      - name: ${{ matrix.stage }}
+        run: ${{ matrix.cmd }}
