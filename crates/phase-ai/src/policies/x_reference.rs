@@ -221,6 +221,8 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AssignDamageAsThoughUnblocked
         | ContinuousModification::AssignNoCombatDamage
         | ContinuousModification::ChangeController
+        // Designation-anchored control (Fealty): binds no X.
+        | ContinuousModification::ChangeControllerToDesignation { .. }
         | ContinuousModification::SetBasicLandType { .. }
         | ContinuousModification::SetChosenBasicLandType
         | ContinuousModification::SetChosenName
@@ -272,7 +274,6 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
         | Effect::Discard { count, .. }
         | Effect::Scry { count, .. }
         | Effect::Surveil { count, .. }
-        | Effect::Sacrifice { count, .. }
         | Effect::Dig { count, .. }
         | Effect::ExileTop { count, .. }
         | Effect::PutAtLibraryPosition { count, .. }
@@ -280,6 +281,7 @@ pub(crate) fn effect_references_x(effect: &Effect) -> bool {
         | Effect::PutCounterAll { count, .. }
         | Effect::CopyTokenOf { count, .. }
         | Effect::SearchLibrary { count, .. } => count.contains_x(),
+        Effect::Sacrifice { count, .. } => count.count_expr().is_some_and(QuantityExpr::contains_x),
         Effect::Token {
             count,
             enter_with_counters,
@@ -371,7 +373,6 @@ pub(crate) fn effect_references_previous_amount(effect: &Effect) -> bool {
         | Effect::Discard { count, .. }
         | Effect::Scry { count, .. }
         | Effect::Surveil { count, .. }
-        | Effect::Sacrifice { count, .. }
         | Effect::Dig { count, .. }
         | Effect::ExileTop { count, .. }
         | Effect::PutAtLibraryPosition { count, .. }
@@ -379,6 +380,9 @@ pub(crate) fn effect_references_previous_amount(effect: &Effect) -> bool {
         | Effect::PutCounterAll { count, .. }
         | Effect::CopyTokenOf { count, .. }
         | Effect::SearchLibrary { count, .. } => expr_contains_previous_amount(count),
+        Effect::Sacrifice { count, .. } => count
+            .count_expr()
+            .is_some_and(expr_contains_previous_amount),
         Effect::Token {
             count,
             enter_with_counters,

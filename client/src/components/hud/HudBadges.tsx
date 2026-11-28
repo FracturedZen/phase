@@ -6,7 +6,7 @@ import { HordeRulesPopover } from "./HordeRulesPopover.tsx";
 import { DungeonMapPopover } from "./DungeonMapPopover.tsx";
 import { RingBenefitsPopover } from "./RingBenefitsPopover.tsx";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
-import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
+import { GameplayTooltip, type TooltipTouch } from "../ui/GameplayTooltip.tsx";
 import type {
   DungeonRoomView,
   FamilyCollapseState,
@@ -14,7 +14,9 @@ import type {
   PendingNextSpellModifier,
   PendingSpellCostReduction,
   PlayerConditionKind,
+  PlayerId,
   PlayerStatusView,
+  PoisonLossScope,
   ResourceAxis,
   ResourceAxisTag,
   RuleSummaryLine,
@@ -29,6 +31,17 @@ import {
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { getKeywordDisplayText } from "../../viewmodel/keywordProps.ts";
+
+/**
+ * Every badge whose explanation shows in a `BadgeTip` takes this. The host
+ * decides: a badge that sits in a control whose tap acts at that moment (a HUD
+ * plate while its player is a target, an opponent tab unless it is focused and
+ * not a target) keeps the default, and every other host passes `"toggle"` so a
+ * tap shows the explanation (see `GameplayTooltip`).
+ */
+export interface BadgeTouchProps {
+  touch?: TooltipTouch;
+}
 
 interface StatusBadgeProps {
   label: string;
@@ -96,10 +109,10 @@ export function DesignationArt({
   );
 }
 
-export function MonarchBadge() {
+export function MonarchBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.monarchTooltip")}>
+    <BadgeTip text={t("badges.monarchTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.monarch")}
@@ -124,10 +137,10 @@ export function MonarchBadge() {
   );
 }
 
-export function InitiativeBadge() {
+export function InitiativeBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.initiativeTooltip")}>
+    <BadgeTip text={t("badges.initiativeTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.initiative")}
@@ -152,10 +165,10 @@ export function InitiativeBadge() {
   );
 }
 
-export function CityBlessingBadge() {
+export function CityBlessingBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.cityBlessingTooltip")}>
+    <BadgeTip text={t("badges.cityBlessingTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.cityBlessing")}
@@ -189,7 +202,7 @@ export function DayNightBadge() {
   if (dayNight == null) return null;
   const isDay = dayNight === "Day";
   return (
-    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")}>
+    <BadgeTip text={isDay ? t("badges.dayTooltip") : t("badges.nightTooltip")} touch="toggle">
       <span
         role="img"
         aria-label={isDay ? t("badges.day") : t("badges.night")}
@@ -222,10 +235,10 @@ export function DayNightBadge() {
   );
 }
 
-export function EnduringStoryBadge() {
+export function EnduringStoryBadge({ touch }: BadgeTouchProps) {
   const { t } = useTranslation("game");
   return (
-    <BadgeTip text={t("badges.enduringStoryTooltip")}>
+    <BadgeTip text={t("badges.enduringStoryTooltip")} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.enduringStory")}
@@ -341,48 +354,70 @@ export function DungeonBadge({ room }: DungeonBadgeProps) {
   );
 }
 
-type CounterBadgeKind = "poison" | "speed" | "rad" | "energy" | "ring" | "experience";
+const POISON_LOSS_KEY = {
+  Player: "badges.poisonLossPlayer",
+  Team: "badges.poisonLossTeam",
+} as const satisfies Record<PoisonLossScope, ParseKeys<"game">>;
 
-interface CounterBadgeProps {
+interface PoisonCounterBadgeProps extends BadgeTouchProps {
+  playerId: PlayerId;
+  value: number;
+}
+
+/**
+ * Poison counters plus the loss rule the engine measures this player against
+ * (`derived.poison_loss`): the house-rule individual threshold, or the
+ * Two-Headed Giant team's shared fifteen. The threshold, scope and near-lethal
+ * glow all come from the engine — never a client literal. The loss rule is part
+ * of the accessible name as well as the hover tooltip, so it is not mouse-only.
+ */
+export function PoisonCounterBadge({ playerId, value, touch }: PoisonCounterBadgeProps) {
+  const { t } = useTranslation("game");
+  const lossRule = useGameStore((s) => s.gameState?.derived?.poison_loss?.[String(playerId)]);
+  const lossLine = lossRule && t(POISON_LOSS_KEY[lossRule.scope], { threshold: lossRule.threshold });
+  const tooltip = [t("badges.poisonTooltip", { count: value }), lossLine].filter(Boolean).join("\n");
+  const ariaLabel = [t("badges.poisonAriaLabel", { count: value }), lossLine].filter(Boolean).join(". ");
+  return (
+    <BadgeTip text={tooltip} touch={touch}>
+      <span
+        role="img"
+        aria-label={ariaLabel}
+        className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-lime-950 ring-1 ${
+          lossRule?.proximity === "NearLethal"
+            ? "bg-lime-300 ring-lime-100 shadow-[0_0_16px_rgba(217,249,157,0.55)]"
+            : "bg-lime-400 ring-lime-200/70 shadow-[0_0_12px_rgba(190,242,100,0.34)]"
+        }`}
+      >
+        <span
+          aria-hidden
+          className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.9)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(254,240,138,0.95)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(132,204,22,0.72)_0_11%,transparent_13%),linear-gradient(135deg,#f7fee7_0%,#bef264_36%,#65a30d_72%,#1a2e05_100%)]"
+        />
+        <span
+          aria-hidden
+          className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-lime-950/28 blur-[1px]"
+        />
+        <span className="relative inline-flex items-center gap-px">
+          <span aria-hidden>☠</span>
+          {value}
+        </span>
+      </span>
+    </BadgeTip>
+  );
+}
+
+type CounterBadgeKind = "speed" | "rad" | "energy" | "ring" | "experience";
+
+interface CounterBadgeProps extends BadgeTouchProps {
   kind: CounterBadgeKind;
   value: number;
   ringBearerName?: string | null;
 }
 
-export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps) {
+export function CounterBadge({ kind, value, ringBearerName, touch }: CounterBadgeProps) {
   const { t } = useTranslation("game");
-  if (kind === "poison") {
-    return (
-      <BadgeTip text={t("badges.poisonTooltip", { count: value })}>
-        <span
-          role="img"
-          aria-label={t("badges.poisonAriaLabel", { count: value })}
-          className={`relative inline-flex h-6 min-w-6 shrink-0 items-center justify-center overflow-hidden rounded-full px-1 text-[11px] font-black leading-none tabular-nums text-lime-950 ring-1 ${
-            value >= 8
-              ? "bg-lime-300 ring-lime-100 shadow-[0_0_16px_rgba(217,249,157,0.55)]"
-              : "bg-lime-400 ring-lime-200/70 shadow-[0_0_12px_rgba(190,242,100,0.34)]"
-          }`}
-        >
-          <span
-            aria-hidden
-            className="absolute inset-0 rounded-full bg-[radial-gradient(circle_at_30%_24%,rgba(255,255,255,0.9)_0_9%,transparent_11%),radial-gradient(circle_at_68%_30%,rgba(254,240,138,0.95)_0_7%,transparent_9%),radial-gradient(circle_at_38%_74%,rgba(132,204,22,0.72)_0_11%,transparent_13%),linear-gradient(135deg,#f7fee7_0%,#bef264_36%,#65a30d_72%,#1a2e05_100%)]"
-          />
-          <span
-            aria-hidden
-            className="absolute -bottom-1 left-1/2 h-3 w-5 -translate-x-1/2 rounded-[45%] bg-lime-950/28 blur-[1px]"
-          />
-          <span className="relative inline-flex items-center gap-px">
-            <span aria-hidden>☠</span>
-            {value}
-          </span>
-        </span>
-      </BadgeTip>
-    );
-  }
-
   if (kind === "energy") {
     return (
-      <BadgeTip text={t("badges.energyTooltip", { count: value })}>
+      <BadgeTip text={t("badges.energyTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.energyAriaLabel", { count: value })}
@@ -423,13 +458,14 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
           bearer: ringBearerName ?? t("badges.noRingBearer"),
         })}
         title={ringTitle}
+        touch={touch}
       />
     );
   }
 
   if (kind === "rad") {
     return (
-      <BadgeTip text={t("badges.radTooltip", { count: value })}>
+      <BadgeTip text={t("badges.radTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.radAriaLabel", { count: value })}
@@ -464,7 +500,7 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
     // CR 122.1: Experience counters are player counters; surfaced so the player can
     // see their total without activating an ability that consumes them.
     return (
-      <BadgeTip text={t("badges.experienceTooltip", { count: value })}>
+      <BadgeTip text={t("badges.experienceTooltip", { count: value })} touch={touch}>
         <span
           role="img"
           aria-label={t("badges.experienceAriaLabel", { count: value })}
@@ -481,7 +517,7 @@ export function CounterBadge({ kind, value, ringBearerName }: CounterBadgeProps)
   }
 
   return (
-    <BadgeTip text={t("badges.speedTooltip", { value })}>
+    <BadgeTip text={t("badges.speedTooltip", { value })} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.speedAriaLabel", { value })}
@@ -528,12 +564,12 @@ const CONDITION_LABEL_KEY = {
  * escapes the badge's own rounded `overflow-hidden` clip. Newline-separated text
  * becomes stacked rows (native `title` line breaks have no inline-HTML analog).
  */
-function BadgeTip({ text, children }: { text: string; children: ReactNode }) {
+function BadgeTip({ text, touch, children }: { text: string; children: ReactNode } & BadgeTouchProps) {
   const lines = text.split("\n");
   return (
     <span className="group relative inline-flex">
       {children}
-      <GameplayTooltip>
+      <GameplayTooltip touch={touch}>
         {lines.length === 1
           ? lines[0]
           : lines.map((line, i) => (
@@ -552,7 +588,7 @@ function BadgeTip({ text, children }: { text: string; children: ReactNode }) {
  * name (when the engine surfaced one) for the tooltip; never re-derives the
  * condition itself — `condition` comes straight from `DerivedViews.player_status`.
  */
-export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
+export function ConditionBadge({ condition, touch }: { condition: PlayerStatusView } & BadgeTouchProps) {
   const { t } = useTranslation("game");
   const sourceName = useGameStore((s) =>
     condition.source != null
@@ -563,7 +599,7 @@ export function ConditionBadge({ condition }: { condition: PlayerStatusView }) {
   const label = t(CONDITION_LABEL_KEY[kind]);
   const title = sourceName ? t("badges.condFromSource", { condition: label, name: sourceName }) : label;
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={title}
@@ -605,6 +641,7 @@ export const UNBOUNDED_FAMILY_FOR_TEST: Record<ResourceAxisTag, UnboundedFamily>
   LtbTriggers: "triggers",
   SacTriggers: "triggers",
   Poison: "counters",
+  Energy: "counters",
 };
 
 /** Map an engine-provided `ResourceAxis` to its display family. No STATE surface uses this — the
@@ -652,7 +689,8 @@ export const UNBOUNDED_FAMILY_LABEL_KEY = {
 export function UnboundedBadge({
   family,
   state,
-}: {
+  touch,
+}: BadgeTouchProps & {
   family: UnboundedFamily;
   /** The engine's published `unbounded_families` row behind this badge. ABSENT means this badge
    *  is not backed by a published `∞` row. */
@@ -711,7 +749,7 @@ export function UnboundedBadge({
     }
   })();
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={title}
@@ -773,7 +811,8 @@ function describeNextSpellModifier(
 export function PendingSpellBadge({
   modifiers,
   reductions,
-}: {
+  touch,
+}: BadgeTouchProps & {
   modifiers: PendingNextSpellModifier[];
   reductions: PendingSpellCostReduction[];
 }) {
@@ -784,7 +823,7 @@ export function PendingSpellBadge({
   ];
   const title = [t("badges.pendingSpell"), ...lines].join("\n");
   return (
-    <BadgeTip text={title}>
+    <BadgeTip text={title} touch={touch}>
       <span
         role="img"
         aria-label={t("badges.pendingSpell")}
@@ -807,6 +846,7 @@ function RingChip({
   value,
   ariaLabel,
   title,
+  touch,
   chipRef,
   onMouseEnter,
   onMouseLeave,
@@ -814,6 +854,7 @@ function RingChip({
   value: number;
   ariaLabel: string;
   title?: string;
+  touch?: TooltipTouch;
   chipRef?: React.Ref<HTMLSpanElement>;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -836,7 +877,7 @@ function RingChip({
   );
   // Opponent ring badge: static multi-line tooltip. The player's own ring omits
   // `title` and gets the richer hover popover via <RingBenefitsBadge> instead.
-  return title ? <BadgeTip text={title}>{chip}</BadgeTip> : chip;
+  return title ? <BadgeTip text={title} touch={touch}>{chip}</BadgeTip> : chip;
 }
 
 // Brief dismiss delay smoothing cursor jitter on the chip edge (mirrors

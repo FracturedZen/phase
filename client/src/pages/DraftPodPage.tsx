@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { MenuSelect } from "../components/ui/MenuSelect";
 import type { CardHoverInfo } from "../components/card/CardPreview";
 import { HoverCardPreview } from "../components/card/HoverCardPreview";
@@ -69,8 +70,13 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
 import {
   COMMANDER_P2P_SEAT_CEILING,
+  currentDraftOwnerGeneration,
   draftPodScreen,
   DRAFT_OFFLINE_ERROR,
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  DRAFT_RECOVERY_SAVE_ERROR,
+  DRAFT_RECOVERY_UNREADABLE_ERROR,
   intergamePromptKey,
   isDraftPodWorkspacePhase,
   isMultiplayerDraftPodLive,
@@ -86,9 +92,12 @@ import {
   LOBBY_HOST_NAME_MAX_CHARS,
   LOBBY_LABEL_MAX_CHARS,
   LOBBY_LISTING_MAX_SEATS,
+  nativeDraftSetupRouteGeneration,
   podListingEligible,
   useDraftPodStore,
   type HostedPodRecoveryFailure,
+  type NativeDraftSetup,
+  type NativeRecoveryFailure,
 } from "../stores/draftPodStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 
@@ -100,6 +109,7 @@ function readPickInteraction(): DraftPickInteractionSnapshot {
   const state = useMultiplayerDraftStore.getState();
   return {
     interactionGeneration: state.interactionGeneration,
+    interactionGenerationCause: state.interactionGenerationCause,
     pickInteractionLocked: state.pickInteractionLocked,
     pendingPickIntent: state.pendingPickIntent,
   };
@@ -118,21 +128,62 @@ function subscribePickInteraction(listener: () => void): () => void {
 /** Any entry of this length fits the lobby's byte bound for a password. */
 const POD_PASSWORD_MAX_LENGTH = 32;
 
-/** The offline sentinel and the host recovery keys podError.incompatible and
- *  podError.connection are translation keys and are translated; any other
- *  message is shown as written. */
+/** The offline key `DRAFT_OFFLINE_ERROR` and the recovery keys
+ *  `DRAFT_RECOVERY_INCOMPATIBLE_ERROR`, `DRAFT_RECOVERY_CONNECTION_ERROR`,
+ *  `DRAFT_RECOVERY_UNREADABLE_ERROR` and `DRAFT_RECOVERY_SAVE_ERROR` are
+ *  translation keys and are translated; any other message is shown as written. */
 function usePodErrorMessage(error: string | null): string | null {
   const { t } = useTranslation("draft");
   return error === DRAFT_OFFLINE_ERROR
     ? t("offline.startUnavailable")
-    : error === "podError.incompatible"
+    : error === DRAFT_RECOVERY_INCOMPATIBLE_ERROR
       ? t("podError.incompatible")
-      : error === "podError.connection"
+      : error === DRAFT_RECOVERY_CONNECTION_ERROR
         ? t("podError.connection")
-        : error;
+        : error === DRAFT_RECOVERY_UNREADABLE_ERROR
+          ? t("podError.unreadable")
+          : error === DRAFT_RECOVERY_SAVE_ERROR
+            ? t("podError.recoverySave")
+            : error;
 }
 
-function PodSetup() {
+/** Awaits the leave an exit has just called; true when no owner was installed, left or reset while it waited. */
+async function exitLeaveIsCurrent(leaving: Promise<void>): Promise<boolean> {
+  const generation = currentDraftOwnerGeneration();
+  await leaving;
+  return generation === currentDraftOwnerGeneration();
+}
+
+/** What a failed host recovery shows: its message, and whether it offers a retry. */
+function hostRecoveryFailurePresentation(kind: HostedPodRecoveryFailure["kind"]): {
+  messageKey: "podError.incompatible" | "podError.unreadable" | "podError.connection";
+  offersRetry: boolean;
+} {
+  switch (kind) {
+    case "incompatible":
+      return { messageKey: "podError.incompatible", offersRetry: true };
+    // A retry reads the same saved draft, which the engine still cannot read.
+    case "unreadable":
+      return { messageKey: "podError.unreadable", offersRetry: false };
+    case "readFailure":
+    case "initializationFailure":
+      return { messageKey: "podError.connection", offersRetry: true };
+  }
+}
+
+/**
+ * The pod setup forms. With `nativeSetup`, the server this navigation admitted,
+ * they create and join on that server: sets only, no password and no room
+ * name. `nativeRecoveryFailure` is the native route entry's own seat recovery
+ * failure, shown on the choice screen only.
+ */
+function PodSetup({
+  nativeSetup,
+  nativeRecoveryFailure,
+}: {
+  nativeSetup: NativeDraftSetup | null;
+  nativeRecoveryFailure: NativeRecoveryFailure | null;
+}) {
   const { t } = useTranslation("draft");
   const effectiveOffline = useEffectiveOffline();
   const [mode, setMode] = useState<SetupMode>("choose");
@@ -167,6 +218,9 @@ function PodSetup() {
   );
   const packDistribution = useDraftPodStore((s) => s.packDistribution);
   const allowedSetLayouts = useDraftPodStore((s) => s.allowedSetLayouts);
+  const postDraftPlay = useDraftPodStore((s) => s.postDraftPlay);
+  // Only an engine-published TournamentPairings procedure plays rounds; unpublished is not offered.
+  const playsRounds = postDraftPlay === "TournamentPairings";
   const packsPerPlayer = useDraftPodStore((s) => s.packsPerPlayer);
   const cubeMinDeckSize = useDraftPodStore((s) =>
     s.procedureCacheKey?.kind === s.config.kind
@@ -215,8 +269,8 @@ function PodSetup() {
     ? t("podSetup.tournamentSwissDesc")
     : t("podSetup.tournamentEliminationDesc");
   const policyDescription = config.podPolicy === "Competitive"
-    ? t("podSetup.policyCompetitiveDesc")
-    : t("podSetup.policyCasualDesc");
+    ? (playsRounds ? t("podSetup.policyCompetitiveDesc") : t("podSetup.policyCompetitiveNoRoundsDesc"))
+    : (playsRounds ? t("podSetup.policyCasualDesc") : t("podSetup.policyCasualNoRoundsDesc"));
   const podSizeDescription = t("podSetup.podSizeDesc", { count: config.podSize });
   const podSizeItems = useMemo(
     () => (allowedPodSizes ?? []).map((podSize) => ({
@@ -229,7 +283,9 @@ function PodSetup() {
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
   const configErrorMessage = usePodErrorMessage(configError);
-  const listingEligible = podListingEligible(config.podSize);
+  const nativeRecoveryMessage = usePodErrorMessage(nativeRecoveryFailure?.error ?? null);
+  // The seat ceiling is the lobby broker's; a server lists any pod it admits.
+  const listingEligible = nativeSetup !== null || podListingEligible(config.podSize);
   const listed = listing.isPublic && listingEligible;
   const hostName = hostDisplayName.trim();
 
@@ -301,6 +357,12 @@ function PodSetup() {
             <li>{t("podSetup.howItWorks4")}</li>
           </ul>
         </div>
+
+        {nativeRecoveryMessage && (
+          <div className="rounded-lg border border-red-400/20 bg-red-400/5 px-4 py-3 text-sm text-red-300">
+            {nativeRecoveryMessage}
+          </div>
+        )}
       </div>
     );
   }
@@ -394,36 +456,38 @@ function PodSetup() {
         </div>
 
         {/* Tournament Format (D-04) */}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-white/60">
-            {t("podSetup.tournamentFormat")}
-          </label>
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "Swiss"}
-                onChange={() => setConfig({ tournamentFormat: "Swiss" })}
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentSwiss")}
+        {playsRounds && (
+          <div className="flex flex-col gap-1">
+            <label className="text-sm font-medium text-white/60">
+              {t("podSetup.tournamentFormat")}
             </label>
-            <label className="flex items-center gap-2 text-sm text-white/70">
-              <input
-                type="radio"
-                name="tournamentFormat"
-                checked={config.tournamentFormat === "SingleElimination"}
-                onChange={() =>
-                  setConfig({ tournamentFormat: "SingleElimination" })
-                }
-                className="accent-emerald-400"
-              />
-              {t("podSetup.tournamentElimination")}
-            </label>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "Swiss"}
+                  onChange={() => setConfig({ tournamentFormat: "Swiss" })}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentSwiss")}
+              </label>
+              <label className="flex items-center gap-2 text-sm text-white/70">
+                <input
+                  type="radio"
+                  name="tournamentFormat"
+                  checked={config.tournamentFormat === "SingleElimination"}
+                  onChange={() =>
+                    setConfig({ tournamentFormat: "SingleElimination" })
+                  }
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.tournamentElimination")}
+              </label>
+            </div>
+            <p className="text-xs text-white/40">{tournamentDescription}</p>
           </div>
-          <p className="text-xs text-white/40">{tournamentDescription}</p>
-        </div>
+        )}
 
         {/* Pod Policy (D-07) */}
         <div className="flex flex-col gap-1">
@@ -494,7 +558,7 @@ function PodSetup() {
               {t("podSetup.listingSeatLimit", { max: LOBBY_LISTING_MAX_SEATS })}
             </p>
           )}
-          {listed && (
+          {listed && nativeSetup === null && (
             <>
               <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
                 <input
@@ -544,34 +608,36 @@ function PodSetup() {
           )}
         </div>
 
-        {/* Pool source: Set vs Cube tab switch */}
-        <div className="flex gap-2 border-b border-white/10">
-          <button
-            type="button"
-            onClick={() => setPoolMode("set")}
-            className={
-              poolMode === "set"
-                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
-                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
-            }
-          >
-            {t("podSetup.tabs.set")}
-          </button>
-          <button
-            type="button"
-            onClick={() => setPoolMode("cube")}
-            disabled={packDistribution === "AllAtOnce"}
-            className={
-              poolMode === "cube"
-                ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
-                : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
-            }
-          >
-            {t("podSetup.tabs.cube")}
-          </button>
-        </div>
+        {/* Pool source: Set vs Cube tab switch. A native setup offers sets only. */}
+        {nativeSetup === null && (
+          <div className="flex gap-2 border-b border-white/10">
+            <button
+              type="button"
+              onClick={() => setPoolMode("set")}
+              className={
+                poolMode === "set"
+                  ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                  : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+              }
+            >
+              {t("podSetup.tabs.set")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPoolMode("cube")}
+              disabled={packDistribution === "AllAtOnce"}
+              className={
+                poolMode === "cube"
+                  ? "border-b-2 border-emerald-400 px-4 py-2 text-sm font-medium text-white"
+                  : "border-b-2 border-transparent px-4 py-2 text-sm text-white/50 hover:text-white/75"
+              }
+            >
+              {t("podSetup.tabs.cube")}
+            </button>
+          </div>
+        )}
 
-        {poolMode === "set" || packDistribution === "AllAtOnce" ? (
+        {nativeSetup !== null || poolMode === "set" || packDistribution === "AllAtOnce" ? (
           <>
             {/* A Chaos pod draws each (seat, round) booster from its own
                 privately-assigned set. A shared stack shuffles every booster
@@ -653,7 +719,7 @@ function PodSetup() {
                     setCode: distinctJoined(packs.map((pack) => pack.code), "+"),
                     setName: distinctJoined(packs.map((pack) => pack.name), " · "),
                   });
-                  void createPod();
+                  void createPod(nativeSetup);
                 }}
               />
             )}
@@ -731,7 +797,7 @@ function PodSetup() {
       )}
 
       <button
-        onClick={() => void joinPod()}
+        onClick={() => void joinPod(nativeSetup)}
         disabled={!joinCode.trim() || !guestDisplayName.trim()}
         className={menuButtonClass({
           tone: "blue",
@@ -848,9 +914,33 @@ function MatchInProgressView() {
   );
 }
 
-function RoundCompleteView() {
+function RoundCompleteView({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
   const { t } = useTranslation("draft");
   const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
+  // Engine-published (MTR 7.3): true only where this pod may revise a deck
+  // between rounds. Absent from older hosts, so nothing new renders there.
+  const deckSubmissionOpen = useMultiplayerDraftStore((s) => s.view?.deck_submission_open === true);
+  const [editing, setEditing] = useState(false);
+
+  if (deckSubmissionOpen && editing) {
+    return (
+      <div className="flex w-full flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-2">
+          <p className="text-sm text-white/60">{t("podPhaseView.editDeckHint")}</p>
+          <button
+            onClick={() => setEditing(false)}
+            className={menuButtonClass({ tone: "neutral", size: "sm" })}
+          >
+            {t("podPhaseView.backToStandings")}
+          </button>
+        </div>
+        <PodDeckBuilder
+          responsiveLayout={responsiveLayout}
+          mode={{ kind: "betweenRounds", onSubmitted: () => setEditing(false) }}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
@@ -864,6 +954,14 @@ function RoundCompleteView() {
           ? t("podPhaseView.waitingNextRound")
           : t("podPhaseView.nextRoundShortly")}
       </p>
+      {deckSubmissionOpen && (
+        <button
+          onClick={() => setEditing(true)}
+          className={menuButtonClass({ tone: "emerald", size: "md", className: "self-center" })}
+        >
+          {t("podPhaseView.editDeck")}
+        </button>
+      )}
     </div>
   );
 }
@@ -1349,14 +1447,48 @@ function DraftingPhaseContent({
   );
 }
 
-function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraftLayout }) {
+/** A deck submission held until the player answers the confirmation dialog. */
+interface PendingDeckSubmission {
+  commanders: string[];
+  companion?: string | null;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+/**
+ * The context `PodDeckBuilder` is rendered in, chosen by its caller. Land
+ * suggestion is deckbuilding-only on both seams (the store's
+ * `autoSuggestLands` and the host's `suggestLandsForSeatInner`), so the
+ * between-rounds editor turns the builder's suggestion control off.
+ */
+type PodDeckBuilderMode =
+  | { kind: "deckbuilding" }
+  | { kind: "betweenRounds"; onSubmitted: () => void };
+
+function PodDeckBuilder({
+  responsiveLayout,
+  mode,
+}: {
+  responsiveLayout: ResponsiveDraftLayout;
+  mode: PodDeckBuilderMode;
+}) {
+  const { t } = useTranslation("draft");
   const view = useMultiplayerDraftStore((s) => s.view);
   const workspace = useMultiplayerDraftStore((s) => s.workspaceState);
   const interactionLocked = useMultiplayerDraftStore((s) => s.pickInteractionLocked);
   const submitDeck = useMultiplayerDraftStore((s) => s.submitDeck);
+  // CR 702.139a: reopening a submitted deck starts from its designation, so a
+  // resubmission keeps an unchanged companion rather than silently clearing it.
+  const submittedCompanion = useMultiplayerDraftStore((s) => s.submittedCompanion);
   const autoSuggestLands = useMultiplayerDraftStore((s) => s.autoSuggestLands);
   const submissionError = useMultiplayerDraftStore((s) => s.error);
   const [preferences, setPreferences] = useState<DraftWorkspacePreferences>(loadDraftWorkspacePreferences);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  // Single-use: `ConfirmDialog` exits through `AnimatePresence`, which keeps
+  // the exiting buttons clickable with their previous handlers. Each handler
+  // takes and clears this ref, so a second click during the exit finds
+  // nothing and the deck is submitted at most once.
+  const pendingSubmission = useRef<PendingDeckSubmission | null>(null);
   const handlePreferencesChange = useCallback((next: DraftWorkspacePreferences) => {
     setPreferences(next);
     saveDraftWorkspacePreferences(next);
@@ -1364,25 +1496,74 @@ function PodDeckBuilder({ responsiveLayout }: { responsiveLayout: ResponsiveDraf
 
   if (!view || !workspace) return null;
 
+  // The deck builder awaits this promise, so its submitting state and error
+  // display stay in force until the player answers the dialog: Confirm settles
+  // it with the store submission's outcome, Cancel resolves it unsubmitted.
+  const confirmSubmitDeck = (commanders: string[] = [], companion?: string | null) =>
+    new Promise<void>((resolve, reject) => {
+      pendingSubmission.current = { commanders, companion, resolve, reject };
+      setConfirmOpen(true);
+    });
+  const takePendingSubmission = () => {
+    const pending = pendingSubmission.current;
+    pendingSubmission.current = null;
+    setConfirmOpen(false);
+    return pending;
+  };
+  const handleConfirmSubmit = () => {
+    const pending = takePendingSubmission();
+    if (!pending) return;
+    const submission = pending.companion
+      ? submitDeck(pending.commanders, pending.companion)
+      : submitDeck(pending.commanders);
+    submission.then(() => {
+      if (mode.kind === "betweenRounds") mode.onSubmitted();
+      pending.resolve();
+    }, pending.reject);
+  };
+  const handleCancelSubmit = () => takePendingSubmission()?.resolve();
+
+  // Worded from engine-published facts only. A pod that plays no in-session
+  // rounds (`CompleteImmediately`, e.g. Commander Draft) — or an older host
+  // that omits `post_draft_play` — gets the wording that promises nothing.
+  const confirmMessage = () => {
+    if (view.post_draft_play !== "TournamentPairings") return t("deckSubmitConfirm.final");
+    return view.pod_policy === "Competitive"
+      ? t("deckSubmitConfirm.competitive")
+      : t("deckSubmitConfirm.casual");
+  };
+
   return (
-    <LimitedDeckBuilder
-      local={{
-        view,
-        workspace,
-        preferences,
-        interactionLocked,
-        capabilities: { kind: "editable-pool", suggestions: true },
-        onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
-        onPreferencesChange: handlePreferencesChange,
-        onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
-        onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
-        onAutoSuggestLands: autoSuggestLands,
-        onSubmitDeck: submitDeck,
-      }}
-      submissionError={submissionError}
-      showSuggestions
-      responsiveLayout={responsiveLayout}
-    />
+    <>
+      <LimitedDeckBuilder
+        local={{
+          view,
+          workspace,
+          preferences,
+          interactionLocked,
+          capabilities: { kind: "editable-pool", suggestions: mode.kind === "deckbuilding" },
+          onWorkspaceChange: (next) => useMultiplayerDraftStore.getState().setWorkspaceState(next),
+          onPreferencesChange: handlePreferencesChange,
+          onAddBasicLand: (name) => useMultiplayerDraftStore.getState().addBasicLand(name),
+          onRemoveBasicLand: (name) => useMultiplayerDraftStore.getState().removeBasicLand(name),
+          onAutoSuggestLands: autoSuggestLands,
+          onSubmitDeck: confirmSubmitDeck,
+          initialCompanion: submittedCompanion,
+        }}
+        submissionError={submissionError}
+        showSuggestions
+        responsiveLayout={responsiveLayout}
+      />
+      <ConfirmDialog
+        open={confirmOpen}
+        tone="primary"
+        title={t("deckSubmitConfirm.title")}
+        message={confirmMessage()}
+        confirmLabel={t("deckSubmitConfirm.confirm")}
+        onConfirm={handleConfirmSubmit}
+        onCancel={handleCancelSubmit}
+      />
+    </>
   );
 }
 
@@ -1535,26 +1716,28 @@ function PodErrorView({
   const { t } = useTranslation("draft");
   const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
   const reason = usePodErrorMessage(useMultiplayerDraftStore((s) => s.error));
+  const hostPresentation = hostRecoveryFailure ? hostRecoveryFailurePresentation(hostRecoveryFailure.kind) : null;
   // A host recovery failure names itself: a session it covers keeps its own
-  // messages for its own screen. A guest's recovery failure wins over the store
-  // error, because a retry that fails offline writes the offline sentinel while
-  // the recovery failure and its retry stay. A guest's compatibility refusal
-  // carries its code and shows the translated incompatibility message instead;
-  // its English message stays in the failure and the store error.
+  // messages for its own screen. A save the draft engine cannot read offers no
+  // retry. A guest's recovery failure wins over the store error, because a
+  // retry that fails offline writes the offline sentinel while the recovery
+  // failure and its retry stay. A guest's compatibility refusal carries its
+  // code and shows the translated incompatibility message instead; its English
+  // message stays in the failure and the store error.
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : hostRecoveryFailure
-          ? t(hostRecoveryFailure.kind === "incompatible" ? "podError.incompatible" : "podError.connection")
+        : hostPresentation
+          ? t(hostPresentation.messageKey)
           : recoveryFailure?.kind === "incompatible" && recoveryFailure.code !== undefined
             ? t("podError.incompatible")
             : recoveryFailure?.message ?? reason ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
-      {phase === "error" && (hostRecoveryFailure || recoveryFailure?.kind === "retryable") && (
+      {phase === "error" && (hostPresentation ? hostPresentation.offersRetry : recoveryFailure?.kind === "retryable") && (
         <button
           onClick={onRetry}
           className={menuButtonClass({ tone: "emerald", size: "md" })}
@@ -1576,6 +1759,7 @@ function PodErrorView({
 
 function phaseContent(
   screen: DraftPodScreen,
+  podSetup: React.ReactNode,
   onLeave: () => void,
   responsiveLayout: ResponsiveDraftLayout,
   fillEmbeddedHeight: boolean,
@@ -1590,7 +1774,7 @@ function phaseContent(
   switch (screen) {
     case "idle":
     case "connecting":
-      return <PodSetup />;
+      return podSetup;
     case "lobby":
       return <DraftPodLobby onLeave={onLeave} />;
     case "drafting":
@@ -1604,7 +1788,7 @@ function phaseContent(
         />
       );
     case "deckbuilding":
-      return <PodDeckBuilder responsiveLayout={responsiveLayout} />;
+      return <PodDeckBuilder responsiveLayout={responsiveLayout} mode={{ kind: "deckbuilding" }} />;
     case "betweenGames":
       return <BetweenGamesView responsiveLayout={responsiveLayout} fillEmbeddedHeight={fillEmbeddedHeight} onDismiss={onDismissOverlay} />;
     case "pairing":
@@ -1612,7 +1796,7 @@ function phaseContent(
     case "matchInProgress":
       return <MatchInProgressView />;
     case "roundComplete":
-      return <RoundCompleteView />;
+      return <RoundCompleteView responsiveLayout={responsiveLayout} />;
     case "complete":
       return <CompleteView onLeave={onLeave} />;
     case "error":
@@ -1639,6 +1823,7 @@ function DraftPodPageContent() {
   const leave = useMultiplayerDraftStore((s) => s.leave);
   const resumeDraft = useMultiplayerDraftStore((s) => s.resumeDraft);
   const resetPod = useDraftPodStore((s) => s.reset);
+  const resumeNativeDraftPod = useDraftPodStore((s) => s.resumeNativeDraftPod);
   const resumeHostedPod = useDraftPodStore((s) => s.resumeHostedPod);
   const retireHostedPodRecoveryFailure = useDraftPodStore((s) => s.retireHostedPodRecoveryFailure);
   const hostRecoveryFailure = useDraftPodStore((s) => s.hostRecoveryFailure);
@@ -1653,9 +1838,16 @@ function DraftPodPageContent() {
   // the fifth kind adds a map entry in `draftKind.ts` and nothing here.
   const requestedKind = draftKindForEntry(searchParams.get("kind"));
   const resumeRequested = searchParams.get("resume") === "1";
-  const entryMode = entry === "host" || entry === "guest" || entry === "auto"
+  const entryMode = entry === "host" || entry === "guest" || entry === "auto" || entry === "native"
     ? entry
     : resumeRequested ? "host" : "auto";
+  // The URL names no server: a native setup has authority only when this
+  // navigation's history state names the setup the pod store admitted.
+  const routeSetupGeneration = entryMode === "native" ? nativeDraftSetupRouteGeneration(location.state) : null;
+  const nativeSetup = useDraftPodStore((s) =>
+    routeSetupGeneration !== null && s.nativeSetup?.generation === routeSetupGeneration ? s.nativeSetup : null,
+  );
+  const nativeRecoveryFailure = useDraftPodStore((s) => s.nativeRecoveryFailure);
   const [responsiveViewport, setResponsiveViewport] = useState(() => ({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -1671,6 +1863,12 @@ function DraftPodPageContent() {
     hostRecoveryFailure,
     entryGeneration.current,
   ) ? hostRecoveryFailure : null;
+  // Both conditions: route tokens restart with each page mount, so a later
+  // mount's first token can equal an earlier mount's.
+  const visibleNativeRecoveryFailure = entryMode === "native"
+    && nativeRecoveryFailure?.routeToken === entryGeneration.current
+    ? nativeRecoveryFailure
+    : null;
 
   const responsiveLayout: ResponsiveDraftLayout = getResponsiveDraftLayout(
     responsiveViewport.width,
@@ -1691,7 +1889,11 @@ function DraftPodPageContent() {
     setEndingDraft(true);
     void (async () => {
       try {
-        await leave(false);
+        if (!(await exitLeaveIsCurrent(leave(false)))) {
+          endingDraftLatch.current = false;
+          setEndingDraft(false);
+          return;
+        }
         resetPod();
         navigate("/");
       } catch (err) {
@@ -1782,6 +1984,13 @@ function DraftPodPageContent() {
     const controller = new AbortController();
 
     void (async () => {
+      if (entryMode === "native") {
+        // The tab's own native seat, if it holds one. This entry starts no pod
+        // operation; only an admitted setup's forms create or join.
+        retireHostedPodRecoveryFailure();
+        await resumeNativeDraftPod({ routeToken, signal: controller.signal });
+        return;
+      }
       if (entryMode === "host" || entryMode === "auto") {
         // A host locator gets first claim on automatic entry. A guest locator
         // is considered only after a terminal/invalid host locator has actually
@@ -1821,17 +2030,20 @@ function DraftPodPageContent() {
       retryController.current = null;
       if (generation.current === routeToken) generation.current++;
     };
-  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod, retireHostedPodRecoveryFailure]);
+  }, [entryMode, location.pathname, location.search, resumeDraft, resumeHostedPod, resumeNativeDraftPod, retireHostedPodRecoveryFailure]);
 
   const retryGuestRecovery = useCallback(() => {
     retryController.current?.abort();
     const controller = new AbortController();
     retryController.current = controller;
     const routeToken = ++entryGeneration.current;
+    // The explicit retry supersedes a pending automatic entry recovery, the
+    // pod store's own steps included, and clears the failure it would leave.
+    retireHostedPodRecoveryFailure();
     void resumeDraft({ routeToken, signal: controller.signal }).finally(() => {
       if (retryController.current === controller) retryController.current = null;
     });
-  }, [resumeDraft]);
+  }, [resumeDraft, retireHostedPodRecoveryFailure]);
 
   const retryHostedRecovery = useCallback((failure: HostedPodRecoveryFailure | null) => {
     if (!failure || !isHostedPodRecoveryFailureCurrent(failure, entryGeneration.current)) return;
@@ -1859,19 +2071,13 @@ function DraftPodPageContent() {
     void enterKindForEntry(requestedKind);
   }, [requestedKind, enterKindForEntry, resumeRequested]);
 
+  // An exit whose owner changed while it waited leaves the pod store and the
+  // route to that successor.
   const handleLeave = useCallback(async () => {
-    await leave(false);
+    if (!(await exitLeaveIsCurrent(leave(false)))) return;
     resetPod();
     navigate("/");
   }, [leave, resetPod, navigate]);
-
-  // The lobby has already left the session it showed. A recovery that took over
-  // while that leave ran is not that session, so nothing here leaves again: the
-  // route's end ends it with its saved session kept.
-  const handleLobbyLeft = useCallback(() => {
-    resetPod();
-    navigate("/");
-  }, [resetPod, navigate]);
 
   // A host recovery failure is about a saved pod this tab is not running, so
   // its exit gives up nothing: a held session keeps running, with its recovery
@@ -1881,7 +2087,7 @@ function DraftPodPageContent() {
     if (isDraftPodSessionHeld(useMultiplayerDraftStore.getState())) {
       retireHostedPodRecoveryFailure();
     } else {
-      await leave(true);
+      if (!(await exitLeaveIsCurrent(leave(true)))) return;
       resetPod();
     }
     navigate("/");
@@ -1942,7 +2148,8 @@ function DraftPodPageContent() {
               />
             : phaseContent(
                 visibleScreen,
-                visibleScreen === "lobby" ? handleLobbyLeft : handleLeave,
+                <PodSetup nativeSetup={nativeSetup} nativeRecoveryFailure={visibleNativeRecoveryFailure} />,
+                handleLeave,
                 responsiveLayout,
                 fillEmbeddedHeight,
                 phoneLayout,

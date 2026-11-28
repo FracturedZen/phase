@@ -3,13 +3,13 @@ use std::borrow::Cow;
 use crate::game::engine::EngineError;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    battlefield_departure_slot, extract_target_filter_from_effect, ResolvedAbility,
-    TargetChoiceTiming, TargetFilter, TargetRef,
+    battlefield_departure_slot, extract_target_filter_from_effect, Effect, EffectScope,
+    ResolvedAbility, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoPassMode, GameState, PriorityPassingMode, StackEntry, WaitingFor,
+    AutoPassMode, GameState, PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::phase::Phase;
@@ -26,10 +26,11 @@ use super::turns;
 
 /// Handle a priority pass from the current priority player (CR 117.4).
 ///
-/// Uses a BTreeSet (priority_passes) to track which players or shared-turn
-/// team representatives have passed consecutively. CR 117.4 + CR 117.6 +
-/// CR 805.5b: When all players/teams pass in succession, the top object on the
-/// stack resolves (or the phase advances if the stack is empty).
+/// Uses a BTreeSet (priority_passes) to track which individual seats have
+/// passed consecutively. CR 117.4 + CR 117.6 + CR 805.5b: when all players pass
+/// in succession — every living member of every team under shared team turns,
+/// since a team passes only when no player on it wishes to act — the top
+/// object on the stack resolves (or the phase advances if the stack is empty).
 /// Any non-pass action clears the set (handled by callers via `reset_priority`).
 /// `current_seat` is the player who *holds* priority (the semantic seat), which
 /// the caller must supply — it is NOT necessarily `state.priority_player`. Under
@@ -78,20 +79,28 @@ pub(crate) fn handle_priority_pass_with_limit(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> PriorityPassOutcome {
-    let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
+    // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: teams rather
+    // than individual players have priority, and a team passes only when no
+    // player on it wishes to act — so the tracked pass is the INDIVIDUAL
+    // seat, and the team advances only when every living member has passed.
+    state.priority_passes.insert(current_seat);
 
-    // Record this seat's pass (CR 117.4). CR 117.6 + CR 805.5b: In shared-team
-    // turn games, teams rather than individual players have priority, so the
-    // tracked pass seat is the team's representative.
-    state.priority_passes.insert(canonical_seat);
+    // Also maintain legacy counter for transition period. Saturating: under
+    // unanimous team pass a window legitimately accumulates one pass per
+    // living member per round, so a cumulative counter must never panic on a
+    // long game — it only tracks consecutiveness, and every all-passed event
+    // resets it via `clear_priority_passes`.
+    state.priority_pass_count = state.priority_pass_count.saturating_add(1);
 
-    // Also maintain legacy counter for transition period
-    state.priority_pass_count += 1;
+    // CR 805.5b: all teams pass in succession exactly when every living player
+    // has passed. For individual-turn formats this is the plain APNAP set, so
+    // the check below preserves the single-pass-per-seat behavior exactly.
+    let all_living = super::topology::all_living_players_in_team_order(state);
+    let all_passed = all_living
+        .iter()
+        .all(|player| state.priority_passes.contains(player));
 
-    let participants = super::topology::priority_pass_participants(state);
-    let living_count = participants.len();
-
-    if state.priority_passes.len() >= living_count {
+    if all_passed {
         // CR 117.4: All living players have passed consecutively.
         clear_priority_passes(state);
 
@@ -105,13 +114,14 @@ pub(crate) fn handle_priority_pass_with_limit(
                 return deferred_transition_outcome(state);
             }
             // CR 510.4: The combat damage step's turn-based action runs in two
-            // sub-steps when a first-strike/double-strike creature is present. If
-            // the first-strike sub-step paused on a CR 603.3b trigger-ordering
-            // prompt (combat_damage.rs), `resolve_combat_damage` returned before
-            // the MANDATORY second (regular) sub-step ran (`regular_damage_done ==
-            // false`). Those ordered triggers have now resolved and all players
-            // passed with an empty stack, but combat damage is INCOMPLETE — re-enter
-            // the combat-damage turn-based action (auto_advance re-calls
+            // sub-steps when a first-strike/double-strike creature is present, and
+            // each ends with a CR 510.3 priority window. After the first-strike
+            // sub-step `resolve_combat_damage` returns (`regular_damage_done ==
+            // false`) whatever filled that window: a CR 603.3b trigger-ordering
+            // prompt, a trigger on the stack, or nothing. Once the stack is empty
+            // and all players have passed (CR 117.4), combat damage is INCOMPLETE —
+            // the MANDATORY second (regular) sub-step has not run. Re-enter the
+            // combat-damage turn-based action (auto_advance re-calls
             // resolve_combat_damage, which runs only the regular sub-step) instead
             // of advancing to end of combat (which would silently skip the regular
             // damage, violating CR 510.4). `regular_damage_done` is set true before
@@ -185,6 +195,10 @@ pub(crate) fn handle_priority_pass_with_limit(
             // After resolve_next: the stack shrank by `consumed` entries.
             // Update auto-pass baselines by the SAME amount so trigger-growth
             // detection stays accurate across apply() calls (§7.2 / R6).
+            // CR 805.5b: overlay entries are exactly the session
+            // representatives' own keys (self-membership). A teammate's own
+            // key keeps its trigger-growth baseline accurate across apply()
+            // calls even while the representative's session runs.
             let session_representative_auto_pass_keys = state
                 .stack_resolution_session
                 .as_ref()
@@ -193,11 +207,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                         .auto_pass
                         .keys()
                         .copied()
-                        .filter(|player| {
-                            session.representatives.contains(
-                                &super::topology::priority_pass_representative(state, *player),
-                            )
-                        })
+                        .filter(|player| session.representatives.contains(player))
                         .collect::<std::collections::BTreeSet<_>>()
                 })
                 .unwrap_or_default();
@@ -233,13 +243,20 @@ pub(crate) fn handle_priority_pass_with_limit(
             }
         }
     } else {
-        // CR 117.3d + CR 117.6 + CR 805.5b: The player/team passed; priority
-        // moves to the next player/team in turn order. Advance from the
-        // semantic seat that just passed, canonicalized to its priority
-        // representative, not from `priority_player` — under CR 723
-        // turn-control the latter is the controller, which would mis-seat the
-        // cursor.
-        let next = next_priority_player(state, canonical_seat);
+        // CR 117.3d + CR 117.6 + CR 805.5b: the seat passed. When its team
+        // still has a living member who has not passed, the TEAM retains
+        // priority (parked on its representative — any teammate may still
+        // act). Otherwise priority moves to the next team in turn order.
+        // Advance from the semantic seat that just passed, canonicalized to
+        // its priority representative, not from `priority_player` — under
+        // CR 723 turn-control the latter is the controller, which would
+        // mis-seat the cursor.
+        let canonical_seat = super::topology::priority_pass_representative(state, current_seat);
+        let next = if super::topology::team_has_passed(state, canonical_seat) {
+            next_priority_player(state, canonical_seat)
+        } else {
+            canonical_seat
+        };
         state.priority_player = next;
 
         events.push(GameEvent::PriorityPassed { player_id: next });
@@ -261,7 +278,7 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// holder's seat is the controller, so the live `priority_player` must be
 /// compared against that mapped submitter, never against the seat itself.
 ///
-/// CR 732.2a-c: a shortened pre-cast shortcut proposal (CR 732.2a-b) obliges the
+/// CR 732.2a-c: a shortened shortcut proposal (CR 732.2a-b), on either route, obliges the
 /// player who now has priority to "make a different game choice than what was
 /// originally proposed" (CR 732.2c). The runtime models that obligation as a
 /// divergence latch, and a bare pass can never discharge it.
@@ -270,12 +287,28 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// `pass_priority_structurally_legal` below call this, so no fast path can drift
 /// from the reducer.
 pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(), EngineError> {
-    if state.priority_player != turn_control::authorized_submitter_for_player(state, player) {
+    // CR 805.5a: any living teammate may pass when the team holds priority —
+    // the window parks on the representative, but the reducer records the
+    // acting member's pass individually. Without this, the guard rejects
+    // exactly the passes the reducer's teammate arm accepts. The holder
+    // itself is excluded so the CR 723.5 submitter-sync check below still
+    // fires for it on shared windows.
+    let strict_teammate_of_holder = match &state.waiting_for {
+        WaitingFor::Priority { player: holder }
+            if *holder != player && super::topology::side_takes_shared_turn(state, *holder) =>
+        {
+            super::topology::team_members(state, *holder).contains(&player)
+        }
+        _ => false,
+    };
+    if !strict_teammate_of_holder
+        && state.priority_player != turn_control::authorized_submitter_for_player(state, player)
+    {
         return Err(EngineError::NotYourPriority);
     }
     if precast_copy_shortcut::blocks_pass(state, player) {
         return Err(EngineError::ActionNotAllowed(
-            "A shortened pre-cast shortcut requires a different meaningful action before passing"
+            "A shortened shortcut requires a different meaningful action before passing"
                 .to_string(),
         ));
     }
@@ -355,13 +388,20 @@ pub(crate) enum StandingPriorityPass {
     /// the top triggered ability, or the player's own object on top when it is
     /// not `Held`.
     Granted,
-    /// CR 117.1d + CR 605.3a: the player's own object is on top, but resolving
-    /// it can move a permanent whose mana ability they can activate now off the
-    /// battlefield (CR 400.7), so the window is kept for that activation. Kept
-    /// unconditionally: the mana stays until the step ends (CR 106.4), and what
-    /// it can pay for once the object resolves (a sorcery-speed spell after a
-    /// karoo returns itself) is not castable now, so no castability test here
-    /// can tell. Opponent objects are not covered; they fall to the ladder.
+    /// CR 117.1d + CR 605.3a: the window is kept for a mana activation. Either
+    /// the player's own object is on top, and resolving it moves a permanent
+    /// whose mana ability they can activate now off the battlefield (CR 400.7),
+    /// so that activation is lost; or the object is their own activated ability
+    /// that untaps its own source while that source is untapped with a {T} mana
+    /// ability an untap would give again, so the untap is wasted unless they
+    /// tap it first (CR 701.26b).
+    ///
+    /// The departure reason is kept unconditionally: the mana stays until the
+    /// step ends (CR 106.4), and what it can pay for once the object resolves
+    /// (a sorcery-speed spell after a karoo returns itself) is not castable now,
+    /// so no castability test here can tell.
+    ///
+    /// Opponent objects are not covered; they fall to the ladder.
     Held,
     /// No standing answer; the window needs a fresh decision.
     Undecided,
@@ -387,9 +427,12 @@ pub(crate) fn standing_priority_pass(
         // An own object on top is the ladder's MTGA-parity standing pass (it
         // outranks castability, see `auto_pass_recommended`): whatever the
         // player could do now, they can still do once it resolves — except
-        // activate a mana ability of a permanent it moves off the battlefield.
+        // activate a mana ability of a permanent it moves off the battlefield,
+        // or, when it is their activated ability untapping its own source, tap
+        // that source for mana while the untap can still give that mana a
+        // second time.
         Some(top) if top.controller == player => {
-            if resolution_can_remove_activatable_mana_source(state, player, top) {
+            if resolution_forecloses_mana_activation(state, player, top) {
                 StandingPriorityPass::Held
             } else {
                 StandingPriorityPass::Granted
@@ -397,6 +440,17 @@ pub(crate) fn standing_priority_pass(
         }
         Some(_) | None => StandingPriorityPass::Undecided,
     }
+}
+
+/// CR 117.1d + CR 605.3a: whether resolving `top` closes off a mana activation
+/// `player` can make now, the two reasons [`StandingPriorityPass::Held`] names.
+fn resolution_forecloses_mana_activation(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    resolution_can_remove_activatable_mana_source(state, player, top)
+        || resolution_untaps_ready_mana_source(state, player, top)
 }
 
 /// CR 117.1d + CR 605.3a + CR 400.7: whether resolving `top` can move a
@@ -421,7 +475,8 @@ fn resolution_can_remove_activatable_mana_source(
     if !chain_has_battlefield_departure(root) {
         return false;
     }
-    let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
+    let explicit = super::mana_abilities::ManaActivationPurpose::Explicit;
+    let sources: Vec<ObjectId> = mana_sources::mana_actions_for_player(state, player, explicit)
         .iter()
         .filter_map(GameAction::source_object)
         .collect();
@@ -445,6 +500,83 @@ fn resolution_can_remove_activatable_mana_source(
     sources
         .iter()
         .any(|&source| reaches.iter().any(|reach| reach.contains(&board, source)))
+}
+
+/// CR 701.26b + CR 605.3a: whether resolving `top`, `player`'s own activated
+/// ability, untaps its own source while that source is untapped with a {T}
+/// mana ability an untap would give again, judged from the source alone
+/// (`mana_sources::untap_would_repeat_mana`, which holds when in doubt). Only
+/// tapped permanents can be untapped, so the untap does nothing unless they tap
+/// it first, and this is the window to do it. Basalt Monolith: "{3}: Untap this
+/// artifact." under Rings of Brighthearth, with the copy resolved and the
+/// original still on the stack. Only the entry and its source are read.
+fn resolution_untaps_ready_mana_source(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    // An activated ability is on the stack because a player activated it
+    // (CR 602.2), or as a copy of one (CR 707.10: Rings of Brighthearth's copy
+    // isn't activated), so this stop is one per object of a line the player
+    // started. A triggered ability goes on the stack by itself (CR 603.2 +
+    // CR 603.3); holding for it would stop Wilderness Reclamation every end step.
+    // A spell, or an untap of anything but the ability's own source, keeps the
+    // pass.
+    let ability = match &top.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => ability,
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => return false,
+    };
+    untapped_source(state, ability)
+        .and_then(|source| state.objects.get(&source))
+        .is_some_and(|source| mana_sources::untap_would_repeat_mana(source, player))
+}
+
+/// CR 701.26b + CR 605.3a: the untap reason of [`StandingPriorityPass::Held`]
+/// alone: `player`'s own activated ability on top wastes an untap on its own
+/// mana source. For a window another player's consent to resolve the stack
+/// would pass; it reads only the entry and its source, never the departure
+/// reason's board scan.
+pub(crate) fn own_top_wastes_an_untap(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    top.controller == player && resolution_untaps_ready_mana_source(state, player, top)
+}
+
+/// The object `ability` untaps when it is a plain "Untap this artifact." /
+/// "Untap this creature." and nothing else: one unconditional, untargeted,
+/// non-optional instruction with no "unless" payment, player scope or branch
+/// after it (Basalt Monolith, Grim
+/// Monolith, Devoted Druid, Soliton). It is bound as the resolver binds it
+/// (`ResolvedAbility::self_ref_binding`): none once the source has left the
+/// battlefield, even if it came back (CR 400.7). An ability that does more
+/// (Eater of the Dead's exile, Harsh Deceiver's reveal) keeps the pass, so the
+/// hold never turns on a condition, a target or a hidden card.
+fn untapped_source(state: &GameState, ability: &ResolvedAbility) -> Option<ObjectId> {
+    let plain_self_untap = matches!(
+        ability.effect,
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            scope: EffectScope::Single,
+            target: TargetFilter::SelfRef,
+        }
+    ) && ability.sub_ability.is_none()
+        && ability.else_ability.is_none()
+        && ability.coin_branches.is_none()
+        && ability.condition.is_none()
+        && ability.targets.is_empty()
+        && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.unless_pay.is_none()
+        && ability.player_scope.is_none()
+        && ability.repeat_for.is_none();
+    plain_self_untap
+        .then(|| ability.self_ref_binding(state))
+        .flatten()
 }
 
 /// Whether any instruction in `ability`'s chain can move battlefield objects to
@@ -634,7 +766,9 @@ fn collect_battlefield_departures<'a>(
 ///
 /// For non-team formats: next living player in seat order after `current`.
 /// For shared-team-turn formats: CR 117.6 + CR 805.5b make priority and pass
-/// bookkeeping team-level, ordered by each team's representative.
+/// bookkeeping team-level, ordered by each team's representative. A team is
+/// skipped only when every living member has passed — one teammate's pass
+/// never passes for the team.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     let canonical_current = super::topology::priority_pass_representative(state, current);
     // CR 101.4 + CR 117.3d: `participants` is APNAP order, which already honors
@@ -648,7 +782,7 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     for offset in 1..=participants.len() {
         let idx = (current_idx + offset) % participants.len();
         let candidate = participants[idx];
-        if !state.priority_passes.contains(&candidate) {
+        if !super::topology::team_has_passed(state, candidate) {
             return candidate;
         }
     }
@@ -976,11 +1110,22 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
-        // P0 (active team member) passes
-        let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
+        // CR 805.5b: one teammate's pass never passes for the team — P0 passes,
+        // the active team retains priority parked on its representative.
+        let result = handle_priority_pass(PlayerId(0), &mut state, &mut events);
+        assert!(matches!(
+            result,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.contains(&PlayerId(0)));
+        assert!(!state.priority_passes.contains(&PlayerId(1)));
 
-        // CR 117.6 + CR 805.5b: priority is team-level in 2HG, so the active
-        // team pass moves directly to the opposing team's representative.
+        // P1 (teammate) passes — now the team passes to the opposing team's
+        // representative in APNAP order.
+        let result = handle_priority_pass(PlayerId(1), &mut state, &mut events);
         assert!(matches!(
             result,
             WaitingFor::Priority {
@@ -988,8 +1133,6 @@ mod tests {
             }
         ));
         assert_eq!(state.priority_player, PlayerId(2));
-        assert!(state.priority_passes.contains(&PlayerId(0)));
-        assert!(!state.priority_passes.contains(&PlayerId(1)));
     }
 
     #[test]
@@ -1002,15 +1145,19 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
-        handle_priority_pass(state.priority_player, &mut state, &mut events); // active team
-        let result = handle_priority_pass(state.priority_player, &mut state, &mut events); // opposing team
+        // CR 805.5b: all four living players pass — active team (P0, P1), then
+        // opposing team (P2, P3) — advancing the empty stack.
+        handle_priority_pass(PlayerId(0), &mut state, &mut events);
+        handle_priority_pass(PlayerId(1), &mut state, &mut events);
+        handle_priority_pass(PlayerId(2), &mut state, &mut events);
+        let result = handle_priority_pass(PlayerId(3), &mut state, &mut events);
 
         assert!(matches!(result, WaitingFor::Priority { .. }));
         assert!(state.priority_passes.is_empty());
     }
 
     #[test]
-    fn two_hg_stale_teammate_pass_canonicalizes_to_team_representative() {
+    fn two_hg_stale_teammate_pass_records_individually_and_stays_on_team() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
         state.turn_number = 1;
         state.phase = crate::types::phase::Phase::PreCombatMain;
@@ -1019,16 +1166,18 @@ mod tests {
         state.priority_passes.clear();
         let mut events = Vec::new();
 
+        // A stale teammate seat's pass records that individual — not the
+        // representative — and the team retains priority on its rep.
         let result = handle_priority_pass(state.priority_player, &mut state, &mut events);
 
         assert_eq!(
             result,
             WaitingFor::Priority {
-                player: PlayerId(2)
+                player: PlayerId(0)
             }
         );
-        assert!(state.priority_passes.contains(&PlayerId(0)));
-        assert!(!state.priority_passes.contains(&PlayerId(1)));
+        assert!(state.priority_passes.contains(&PlayerId(1)));
+        assert!(!state.priority_passes.contains(&PlayerId(0)));
     }
 
     // --- pass legality authority (CR 117.3d / CR 723.5 / CR 732.2c) ---
@@ -1052,7 +1201,7 @@ mod tests {
             Err(EngineError::NotYourPriority)
         ));
 
-        // (c) CR 732.2c: a shortened pre-cast shortcut obliges its owner to make
+        // (c) CR 732.2c: a shortened shortcut obliges its owner to make
         // a different game choice; a bare pass can never discharge it.
         let mut latched = setup();
         latched.precast_shortcut_runtime.must_diverge = Some(PlayerId(0));
@@ -1062,9 +1211,44 @@ mod tests {
             panic!("a latched divergence obligation must reject a bare pass");
         };
         assert!(
-            message.contains("shortened pre-cast shortcut"),
+            message.contains("shortened shortcut"),
             "the reducer's exact message must be preserved by the extraction, got {message:?}"
         );
+    }
+
+    /// T1c. CR 805.5a: on a shared-team window the guard admits every living
+    /// teammate — the reducer records the acting member's pass individually —
+    /// while still refusing the opposing team.
+    #[test]
+    fn pass_priority_legality_admits_teammates_on_a_parked_window() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(pass_priority_legality(&state, PlayerId(0)).is_ok());
+        assert!(
+            pass_priority_legality(&state, PlayerId(1)).is_ok(),
+            "a teammate may pass on the team's parked window"
+        );
+        assert!(matches!(
+            pass_priority_legality(&state, PlayerId(2)),
+            Err(EngineError::NotYourPriority)
+        ));
+
+        // The holder itself still goes through the submitter-sync check: a
+        // desynced priority_player rejects even on a shared window.
+        let mut desynced = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        desynced.active_player = PlayerId(0);
+        desynced.priority_player = PlayerId(2);
+        desynced.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(matches!(
+            pass_priority_legality(&desynced, PlayerId(0)),
+            Err(EngineError::NotYourPriority)
+        ));
     }
 
     /// T1b. `pass_priority_structurally_legal` is the authority PLUS the
@@ -1116,6 +1300,7 @@ mod tests {
                 PlayerId(0),
             )),
             ability_index: 0,
+            paused_removal: None,
         });
         assert!(!pass_priority_structurally_legal(&cost_move, PlayerId(0)));
         assert!(
@@ -1162,6 +1347,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source_id,
@@ -1314,6 +1500,7 @@ mod tests {
 
     mod removable_mana_source {
         use super::*;
+        use crate::game::ability_utils::build_resolved_from_def;
         use crate::game::scenario::GameScenario;
         use crate::types::ability::{
             BounceSelection, ControllerRef, Effect, PlayerFilter, TypedFilter,
@@ -1352,6 +1539,22 @@ mod tests {
                     subject_match_count: None,
                     die_result: None,
                     provenance: None,
+                },
+            }
+        }
+
+        fn activated_top(
+            controller: PlayerId,
+            source: ObjectId,
+            ability: ResolvedAbility,
+        ) -> StackEntry {
+            StackEntry {
+                id: ObjectId(901),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
                 },
             }
         }
@@ -1413,6 +1616,125 @@ mod tests {
             assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Undecided);
         }
 
+        /// Basalt Monolith, verbatim.
+        const BASALT_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{3}: Untap this artifact.";
+        /// Hardbristle Bandit, verbatim.
+        const HARDBRISTLE_BANDIT: &str = "{T}: Add one mana of any color.\nWhenever you commit a crime, untap this creature. This ability triggers only once each turn. (Targeting opponents, anything they control, and/or cards in their graveyards is a crime.)";
+
+        /// An untapped Basalt Monolith for each player, and P0's untapped
+        /// Hardbristle Bandit.
+        fn printed_untaps() -> (GameState, ObjectId, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            let monolith = scenario
+                .add_artifact_from_oracle(PlayerId(0), "Basalt Monolith", BASALT_MONOLITH)
+                .id();
+            let opponent_monolith = scenario
+                .add_artifact_from_oracle(PlayerId(1), "Basalt Monolith", BASALT_MONOLITH)
+                .id();
+            let bandit = scenario
+                .add_creature_from_oracle(
+                    PlayerId(0),
+                    "Hardbristle Bandit",
+                    1,
+                    1,
+                    HARDBRISTLE_BANDIT,
+                )
+                .id();
+            let state = scenario.build().state().clone();
+            (state, monolith, opponent_monolith, bandit)
+        }
+
+        /// Monolith's printed "{3}: Untap this artifact.", activated by its
+        /// controller.
+        fn monolith_untap(state: &GameState, monolith: ObjectId) -> StackEntry {
+            let source = &state.objects[&monolith];
+            let untap = source
+                .abilities
+                .iter()
+                .find(|ability| matches!(&*ability.effect, Effect::SetTapState { .. }))
+                .expect("Monolith's printed untap");
+            activated_top(
+                source.controller,
+                monolith,
+                build_resolved_from_def(untap, monolith, source.controller),
+            )
+        }
+
+        /// The Bandit's printed "Whenever you commit a crime, untap this
+        /// creature.", triggered.
+        fn bandit_untap(state: &GameState, bandit: ObjectId) -> StackEntry {
+            let source = &state.objects[&bandit];
+            let untap = source
+                .trigger_definitions
+                .iter_all()
+                .find_map(|entry| entry.definition.execute.as_deref())
+                .expect("the Bandit's printed trigger");
+            top(
+                source.controller,
+                bandit,
+                build_resolved_from_def(untap, bandit, source.controller),
+            )
+        }
+
+        /// CR 701.26b: the untap does nothing to a permanent that is already
+        /// untapped, so the window is held until it has been tapped.
+        #[test]
+        fn own_activated_untap_holds_only_while_its_object_can_tap_for_mana() {
+            let (mut state, monolith, _, _) = printed_untaps();
+            let untap = monolith_untap(&state, monolith);
+            state.stack.push_back(untap.clone());
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Held);
+
+            state.objects.get_mut(&monolith).unwrap().tapped = true;
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Granted);
+        }
+
+        #[test]
+        fn opponent_activated_untap_stays_undecided() {
+            let (mut state, _, opponent_monolith, _) = printed_untaps();
+            let untap = monolith_untap(&state, opponent_monolith);
+            state.stack.push_back(untap.clone());
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Undecided);
+        }
+
+        #[test]
+        fn full_control_outranks_the_untap_hold() {
+            let (mut state, monolith, _, _) = printed_untaps();
+            state
+                .priority_passing_modes
+                .insert(PlayerId(0), PriorityPassingMode::FullControl);
+            let untap = monolith_untap(&state, monolith);
+            state.stack.push_back(untap.clone());
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Withheld);
+        }
+
+        /// CR 603.2 + CR 603.3: a triggered ability goes on the stack with no
+        /// player act, so the Bandit's untap of itself keeps the pass while
+        /// the Bandit can tap for mana, as Monolith's activated one would not.
+        #[test]
+        fn own_triggered_untap_keeps_the_pass_while_its_object_can_tap_for_mana() {
+            let (state, monolith, _, bandit) = printed_untaps();
+            let mut activated_state = state.clone();
+            let activated = monolith_untap(&activated_state, monolith);
+            activated_state.stack.push_back(activated.clone());
+            assert_eq!(
+                verdict(&activated_state, &activated),
+                StandingPriorityPass::Held
+            );
+
+            assert!(
+                mana_sources::untap_would_repeat_mana(&state.objects[&bandit], PlayerId(0)),
+                "reach: the Bandit could tap for mana again"
+            );
+            let mut triggered_state = state;
+            let triggered = bandit_untap(&triggered_state, bandit);
+            triggered_state.stack.push_back(triggered.clone());
+            assert_eq!(
+                verdict(&triggered_state, &triggered),
+                StandingPriorityPass::Granted
+            );
+        }
+
         /// The classifier keeps the own-object pass for instructions that move
         /// nothing off the battlefield, even with an activatable land in play.
         #[test]
@@ -1437,6 +1759,8 @@ mod tests {
             // Patron of the Moon: lands from hand onto the battlefield.
             let put_lands = own_top(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Hand),
                     destination: Zone::Battlefield,
                     target: TargetFilter::Typed(TypedFilter::land()),
@@ -1459,6 +1783,8 @@ mod tests {
             // operand naming the found card.
             let found_card_to_hand = own_top(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Hand,
                     target: TargetFilter::Any,
@@ -1491,7 +1817,7 @@ mod tests {
                 ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::SelfRef,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1512,7 +1838,7 @@ mod tests {
                     own_top(
                         Effect::Sacrifice {
                             target: TargetFilter::TriggeringSource,
-                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                             min_count: 0,
                         },
                         vec![],
@@ -1585,7 +1911,7 @@ mod tests {
                 ability.sub_ability = Some(Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1651,7 +1977,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::ParentTarget,
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],
@@ -1712,6 +2038,7 @@ mod tests {
             let (mut state, forest, _) = board();
             let rest_on_bottom = own_top(
                 Effect::ChangeZoneAll {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
                     origin: None,
                     destination: Zone::Library,
                     target: TargetFilter::TrackedSet {
@@ -1723,7 +2050,7 @@ mod tests {
                     enter_with_counters: vec![],
                     face_down_profile: None,
                     library_position: None,
-                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    library_shuffle: crate::types::ability::LibraryShuffleMode::default(),
                     random_order: false,
                 },
                 vec![],
@@ -1745,7 +2072,7 @@ mod tests {
             let sacrifice_those = own_top(
                 Effect::Sacrifice {
                     target: TargetFilter::TrackedSet { id: concrete },
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                     min_count: 0,
                 },
                 vec![],
@@ -1809,7 +2136,7 @@ mod tests {
                 let mut ability = ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: your_lands(),
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 }.into(),
                         min_count: 0,
                     },
                     vec![],

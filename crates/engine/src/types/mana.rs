@@ -474,6 +474,7 @@ fn ability_activation_scope_rank(value: AbilityActivationScope) -> u8 {
     match value {
         AbilityActivationScope::OfSpellType => 0,
         AbilityActivationScope::Any => 1,
+        AbilityActivationScope::AnyNonSpellPayment => 2,
     }
 }
 
@@ -507,6 +508,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::RollPlanarDie => 4,
         SpecialAction::EndContinuousEffect => 5,
         SpecialAction::Foretell => 6,
+        SpecialAction::Suspend => 7,
     }
 }
 
@@ -1442,7 +1444,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -1473,7 +1475,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Elf".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],
@@ -1538,7 +1540,7 @@ mod tests {
             types: vec!["Creature".to_string()],
             subtypes: vec!["Goblin".to_string()],
             keyword_kinds: vec![],
-            cast_from_zone: None,
+            cast_origin: None,
             mana_value: None,
             color_count: None,
             colors: vec![],

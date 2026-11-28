@@ -16,6 +16,7 @@ import {
   type DraftGuestConnection,
   type DraftGuestEvent,
   type DraftGuestRecoveryFailure,
+  type DraftGuestRecoveryPointer,
 } from "./p2p-draft-guest";
 import type {
   DraftCommanderLaunch,
@@ -23,6 +24,7 @@ import type {
   DraftMatchSettlement,
   DraftPauseReason,
 } from "../network/draftProtocol";
+import type { ActiveDraftPointerTxn } from "../services/draftPersistence";
 import type { DraftIntergameCommand, DraftIntergameCommandAck } from "../services/intergameCommandLedger";
 import { joinRoom, type JoinResult } from "../network/connection";
 import type { DraftWorkspaceState } from "../components/draft/workspace/types";
@@ -44,13 +46,14 @@ export type DraftPodGuestStatus =
 
 export type DraftPodGuestEvent =
   | { type: "statusChanged"; status: DraftPodGuestStatus }
+  | { type: "recoveryCommitted"; pointer: DraftGuestRecoveryPointer; recovery: ActiveDraftPointerTxn }
   | { type: "joined"; seatIndex: number; draftCode: string }
   | { type: "reconnected"; seatIndex: number }
   | { type: "workspaceRestored"; workspaceState: DraftWorkspaceState | null }
   | { type: "viewUpdated"; view: DraftPlayerView }
   | { type: "pickAcknowledged"; view: DraftPlayerView }
   | { type: "deckSubmissionAcknowledged"; submissionId: string; view: DraftPlayerView }
-  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; view: DraftPlayerView }
+  | { type: "recoveredDeckSubmissionAccepted"; mainDeck: string[]; commanders: string[]; companion?: string | null; view: DraftPlayerView }
   | { type: "lobbyUpdate"; seats: SeatPublicView[]; joined: number; total: number }
   | { type: "draftPaused"; reason: DraftPauseReason }
   | { type: "draftResumed" }
@@ -264,6 +267,9 @@ export class DraftPodGuestAdapter {
 
   private handleGuestEvent(event: DraftGuestEvent): void {
     switch (event.type) {
+      case "recoveryCommitted":
+        this.emit({ type: "recoveryCommitted", pointer: event.pointer, recovery: event.recovery });
+        break;
       case "joined":
         this._seatIndex = event.seatIndex;
         this._draftCode = event.draftCode;
@@ -303,6 +309,7 @@ export class DraftPodGuestAdapter {
           type: "recoveredDeckSubmissionAccepted",
           mainDeck: event.mainDeck,
           commanders: event.commanders,
+          companion: event.companion,
           view: event.view,
         });
         break;
@@ -477,9 +484,13 @@ export class DraftPodGuestAdapter {
     await this.guest.submitSharedStackDecision(pile, decision);
   }
 
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<void> {
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
-    await this.guest.submitDeck(mainDeck, commanders);
+    if (companion !== undefined) {
+      await this.guest.submitDeck(mainDeck, commanders, companion);
+    } else {
+      await this.guest.submitDeck(mainDeck, commanders);
+    }
   }
 
   async updateWorkspace(state: DraftWorkspaceState): Promise<void> {

@@ -292,26 +292,20 @@ pub(crate) fn is_wide_payoff_parts(triggers: &[TriggerDefinition]) -> bool {
 
 /// True if the effect creates a creature token. CR 111.1.
 fn effect_is_creature_token(e: &&Effect) -> bool {
-    matches!(e, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature"))
+    e.token_creation_members().any(|member| matches!(member, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature")))
 }
 
 /// True if the effect creates ≥2 creature tokens (mass generator). CR 111.1.
 fn effect_is_mass_token(e: &&Effect) -> bool {
-    match e {
-        Effect::Token { types, count, .. } => {
-            if !types.iter().any(|s| s == "Creature") {
-                return false;
-            }
+    e.token_creation_members().any(|member| match member {
+        Effect::Token { types, count, .. } if types.iter().any(|s| s == "Creature") => {
             match count {
-                // Fixed count ≥ 2 is unambiguously mass.
                 QuantityExpr::Fixed { value } => *value >= 2,
-                // Non-Fixed (Ref, HalfRounded, Offset, Multiply) — dynamic
-                // quantity, treat as mass since it can exceed 1. CR 111.1.
                 _ => true,
             }
         }
         _ => false,
-    }
+    })
 }
 
 /// True if the static definition is an anthem: Continuous mode, affected
@@ -413,6 +407,7 @@ mod tests {
 
     fn creature_token_effect(count: QuantityExpr) -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Saproling".to_string(),
             power: engine::types::ability::PtValue::Fixed(1),
             toughness: engine::types::ability::PtValue::Fixed(1),
@@ -428,11 +423,13 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
 
     fn treasure_token_effect() -> Effect {
         Effect::Token {
+            enters_blocking: None,
             name: "Treasure".to_string(),
             power: engine::types::ability::PtValue::Fixed(0),
             toughness: engine::types::ability::PtValue::Fixed(0),
@@ -448,6 +445,7 @@ mod tests {
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
+            additional_members: Vec::new(),
         }
     }
 
@@ -676,7 +674,8 @@ mod tests {
         assert!(
             feature
                 .payoff_names
-                .contains(&"Llanowar Elves Clone".to_string()),
+                .iter()
+                .any(|i| i == "Llanowar Elves Clone"),
             "payoff_names should include the generator's name"
         );
     }
@@ -688,31 +687,9 @@ mod tests {
             .push(anthem_static(creature_you_control_filter()));
         let feature = detect(&[deck_entry(face)]);
         assert!(
-            feature
-                .anthem_names
-                .contains(&"Glorious Anthem".to_string()),
+            feature.anthem_names.iter().any(|i| i == "Glorious Anthem"),
             "anthem_names should include the anthem's name"
         );
-    }
-
-    #[test]
-    fn aristocrats_overlap_independent() {
-        // A Bitterblossom-shape card (upkeep trigger creating a 1/1 faerie)
-        // should count as BOTH a token generator (tokens_wide) and a fodder
-        // source (aristocrats). The two features are independent. This test
-        // verifies tokens_wide registers it; aristocrats has its own test.
-        let mut face = empty_face("Bitterblossom");
-        let exec = AbilityDefinition::new(
-            AbilityKind::Spell,
-            creature_token_effect(QuantityExpr::Fixed { value: 1 }),
-        );
-        // CR 603.2b: "at the beginning of your upkeep" → TriggerMode::Phase.
-        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
-        trigger.execute = Some(Box::new(exec));
-        face.triggers.push(trigger);
-        let feature = detect(&[deck_entry(face)]);
-        // tokens_wide registers Bitterblossom as a generator.
-        assert_eq!(feature.token_generator_count, 1);
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -16,8 +17,11 @@ use super::ability::{
     CostReduction, FilterProp, QuantityExpr, SacrificeRequirement, TargetFilter, TypeFilter,
     TypedFilter,
 };
+use super::card_type::CoreType;
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
+use super::player::PlayerId;
+use super::text_grammar::{parse_number, OracleError};
 
 pub use super::text_grammar::craft_materials_default;
 
@@ -747,6 +751,218 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+    /// CR 702.16i + CR 611.3a + CR 109.5: current colors of permanents
+    /// controlled by the granting static ability's current controller.
+    AmongPermanentsYouControl,
+}
+
+/// CR 105.2 + CR 105.4 (Matt R8-F1): the resolved color-count quality of a
+/// matched `ProtectionTarget::Quality`. Only the three spellings the matcher
+/// accepts can appear here — every other quality string fails to match, so it
+/// never resolves. Kept distinct from [`MatchedProtectionQuality::Multicolored`]
+/// (the dedicated variant): two abilities spelled differently stay two
+/// applications even when they match the same sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProtectionColorlessness {
+    Colorless,
+    Monocolored,
+    Multicolored,
+}
+
+/// CR 702.16k (Matt R8-F1): the resolved player scope of a matched
+/// `ProtectionTarget::FromPlayer`. The statically-scoped arms resolve
+/// directly; `SpecificPlayer` resolves relative to the bearer controller.
+/// Other target/chosen refs fail closed in the gate, so they never resolve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum ProtectionPlayerScope {
+    Opponent,
+    You,
+}
+
+/// CR 702.16g + CR 615.13 (Matt R8-F1): the resolved quality of the
+/// protection ability that matched one damage event. The damage gate claims
+/// each event for the FIRST matching ability (short-circuit), and the batch
+/// tally keys protection prevention by this quality plus the recipient — so
+/// simultaneous events claimed by different abilities publish as separate
+/// prevention applications, while events claimed by same-quality abilities
+/// still aggregate.
+///
+/// Every payload is the match-time resolution, never the printed spelling:
+/// `ChosenColor`/`ChosenCardType` resolve to the chosen value (merging with
+/// the same quality printed literally), `ChosenPlayer` to the chosen player,
+/// card-type names to the matched [`CoreType`] (case/plural-insensitive, the
+/// same seven types the matcher accepts) or — for the creature-subtype
+/// fallback the parser also stores as `CardType` — to an FNV-1a fingerprint
+/// of the lowercased spelling, and filter predicates to an FNV-1a fingerprint
+/// over their ordered effective `(comparator, threshold)` pairs. Fingerprints
+/// are spelling-sensitive on purpose: textually different abilities split
+/// rather than merge, which is the correct direction — same ability, same
+/// value, same key, always.
+///
+/// All discriminants below are explicit and every payload encodes losslessly,
+/// so keys stay save-stable across builds: pause records serialize them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum MatchedProtectionQuality {
+    Color(ManaColor),
+    CardType(CoreType),
+    CardSubtype(u64),
+    Colorlessness(ProtectionColorlessness),
+    Multicolored,
+    Player(PlayerId),
+    Everything,
+    Filter(u64),
+    FromPlayer(ProtectionPlayerScope),
+    /// CR 702.16a + CR 201.2: "protection from the chosen card name" (Runed
+    /// Halo) — FNV-1a fingerprint of the chosen name, mirroring the
+    /// `CardSubtype`/`Filter` fingerprint precedent. The discriminant keeps
+    /// the name domain disjoint from every other fingerprint domain.
+    ChosenName(u64),
+}
+
+impl MatchedProtectionQuality {
+    /// Deterministic sort words for the batch-drain rank: the variant
+    /// discriminant plus a minor word that distinguishes every two qualities
+    /// of the same variant (filter fingerprints ride whole). Explicit
+    /// discriminants, never `as` casts, so record order is build-stable.
+    pub fn sort_words(self) -> (u64, u8) {
+        match self {
+            MatchedProtectionQuality::Color(color) => (
+                match color {
+                    ManaColor::White => 0,
+                    ManaColor::Blue => 1,
+                    ManaColor::Black => 2,
+                    ManaColor::Red => 3,
+                    ManaColor::Green => 4,
+                },
+                0,
+            ),
+            MatchedProtectionQuality::CardType(core) => (
+                match core {
+                    CoreType::Artifact => 0,
+                    CoreType::Creature => 1,
+                    CoreType::Enchantment => 2,
+                    CoreType::Instant => 3,
+                    CoreType::Land => 4,
+                    CoreType::Planeswalker => 5,
+                    CoreType::Sorcery => 6,
+                    CoreType::Tribal => 7,
+                    CoreType::Battle => 8,
+                    CoreType::Kindred => 9,
+                    CoreType::Dungeon => 10,
+                    CoreType::Plane => 11,
+                    CoreType::Phenomenon => 12,
+                    CoreType::Scheme => 13,
+                    CoreType::Conspiracy => 14,
+                    CoreType::Boss => 15,
+                    CoreType::Event => 16,
+                    CoreType::Vanguard => 17,
+                },
+                1,
+            ),
+            MatchedProtectionQuality::CardSubtype(fingerprint) => (fingerprint, 2),
+            MatchedProtectionQuality::Colorlessness(colorlessness) => (
+                match colorlessness {
+                    ProtectionColorlessness::Colorless => 0,
+                    ProtectionColorlessness::Monocolored => 1,
+                    ProtectionColorlessness::Multicolored => 2,
+                },
+                3,
+            ),
+            MatchedProtectionQuality::Multicolored => (0, 4),
+            MatchedProtectionQuality::Player(player) => (u64::from(player.0), 5),
+            MatchedProtectionQuality::Everything => (0, 6),
+            MatchedProtectionQuality::Filter(fingerprint) => (fingerprint, 7),
+            MatchedProtectionQuality::FromPlayer(scope) => (
+                match scope {
+                    ProtectionPlayerScope::Opponent => 0,
+                    ProtectionPlayerScope::You => 1,
+                },
+                8,
+            ),
+            MatchedProtectionQuality::ChosenName(fingerprint) => (fingerprint, 9),
+        }
+    }
+
+    /// CR 616.1 (Matt R10-F1): the virtual-candidate rid parts for this
+    /// quality — the variant discriminant (selects one of the ten
+    /// `PROTECTION_REPLACEMENT_SOURCE_*` sentinels) plus the minor word
+    /// (rides whole in the rid index). Shares the ordinal table with
+    /// [`sort_words`](Self::sort_words) so the two can never disagree.
+    pub fn replacement_rid_parts(self) -> (u8, u64) {
+        let (minor, discriminant) = self.sort_words();
+        (discriminant, minor)
+    }
+
+    /// CR 616.1 (Matt R10-F1): inverse of
+    /// [`replacement_rid_parts`](Self::replacement_rid_parts). Total over
+    /// packed values but partial over arbitrary input: unknown discriminants
+    /// or out-of-range minor ordinals (only reachable from corrupt or
+    /// foreign rids, never our own writes) return `None` so callers can fail
+    /// contained. Explicit matches, never `as` casts — rids persist in
+    /// pause records, so the codec must be build-stable.
+    pub fn from_replacement_parts(discriminant: u8, minor: u64) -> Option<Self> {
+        match discriminant {
+            0 => match minor {
+                0 => Some(MatchedProtectionQuality::Color(ManaColor::White)),
+                1 => Some(MatchedProtectionQuality::Color(ManaColor::Blue)),
+                2 => Some(MatchedProtectionQuality::Color(ManaColor::Black)),
+                3 => Some(MatchedProtectionQuality::Color(ManaColor::Red)),
+                4 => Some(MatchedProtectionQuality::Color(ManaColor::Green)),
+                _ => None,
+            },
+            1 => match minor {
+                0 => Some(MatchedProtectionQuality::CardType(CoreType::Artifact)),
+                1 => Some(MatchedProtectionQuality::CardType(CoreType::Creature)),
+                2 => Some(MatchedProtectionQuality::CardType(CoreType::Enchantment)),
+                3 => Some(MatchedProtectionQuality::CardType(CoreType::Instant)),
+                4 => Some(MatchedProtectionQuality::CardType(CoreType::Land)),
+                5 => Some(MatchedProtectionQuality::CardType(CoreType::Planeswalker)),
+                6 => Some(MatchedProtectionQuality::CardType(CoreType::Sorcery)),
+                7 => Some(MatchedProtectionQuality::CardType(CoreType::Tribal)),
+                8 => Some(MatchedProtectionQuality::CardType(CoreType::Battle)),
+                9 => Some(MatchedProtectionQuality::CardType(CoreType::Kindred)),
+                10 => Some(MatchedProtectionQuality::CardType(CoreType::Dungeon)),
+                11 => Some(MatchedProtectionQuality::CardType(CoreType::Plane)),
+                12 => Some(MatchedProtectionQuality::CardType(CoreType::Phenomenon)),
+                13 => Some(MatchedProtectionQuality::CardType(CoreType::Scheme)),
+                14 => Some(MatchedProtectionQuality::CardType(CoreType::Conspiracy)),
+                15 => Some(MatchedProtectionQuality::CardType(CoreType::Boss)),
+                16 => Some(MatchedProtectionQuality::CardType(CoreType::Event)),
+                17 => Some(MatchedProtectionQuality::CardType(CoreType::Vanguard)),
+                _ => None,
+            },
+            2 => Some(MatchedProtectionQuality::CardSubtype(minor)),
+            3 => match minor {
+                0 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Colorless,
+                )),
+                1 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Monocolored,
+                )),
+                2 => Some(MatchedProtectionQuality::Colorlessness(
+                    ProtectionColorlessness::Multicolored,
+                )),
+                _ => None,
+            },
+            4 if minor == 0 => Some(MatchedProtectionQuality::Multicolored),
+            5 => u8::try_from(minor)
+                .ok()
+                .map(|id| MatchedProtectionQuality::Player(PlayerId(id))),
+            6 if minor == 0 => Some(MatchedProtectionQuality::Everything),
+            7 => Some(MatchedProtectionQuality::Filter(minor)),
+            8 => match minor {
+                0 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::Opponent,
+                )),
+                1 => Some(MatchedProtectionQuality::FromPlayer(
+                    ProtectionPlayerScope::You,
+                )),
+                _ => None,
+            },
+            9 => Some(MatchedProtectionQuality::ChosenName(minor)),
+            _ => None,
+        }
+    }
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -758,6 +974,7 @@ pub enum ProtectionColorSet {
 #[serde(remote = "Self", tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
+    Blight(u32),
     PayLife(i32),
     /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
     PayLifeEqualToPower,
@@ -1448,6 +1665,27 @@ pub enum Keyword {
 
     /// Fallback for unrecognized keywords.
     Unknown(String),
+}
+
+/// The engine's keyword-list representation policy for a newly granted keyword
+/// instance, shared by the battlefield (layer 6) and off-zone keyword paths so
+/// they cannot diverge. It preserves existing battlefield behaviour; the order in
+/// which grants are applied (CR 613.7 timestamps) is the caller's effect
+/// ordering, not decided here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordGrantPolicy {
+    /// Identical instances are kept, each as its own entry (see
+    /// [`Keyword::instances_must_coexist`]): Toxic's total sums them
+    /// (CR 702.164b); Sunburst and Bloodthirst count them per instance.
+    Accumulate,
+    /// The latest applied grant replaces every earlier entry of the same variant
+    /// (see [`Keyword::overrides_same_kind_on_grant`]): Crew, Saddle and Enchant
+    /// are single-value representations.
+    ReplaceSameVariant,
+    /// Distinct keyword values coexist. Preserve the existing representation's
+    /// exact-value deduplication; this does not determine companion-trigger
+    /// multiplicity.
+    DedupeIdentical,
 }
 
 impl Keyword {
@@ -2282,6 +2520,8 @@ impl Keyword {
     ///   (CR 702.40b: each instance triggers separately) — stack-functioning
     ///   triggered abilities whose instance count is consumed by `for _ in 0..count`
     ///   loops in `game/triggers.rs`.
+    /// - Prowess (CR 702.108b: each instance triggers separately) — a
+    ///   battlefield triggered ability counted by the spell-cast collector.
     /// - Myriad (CR 702.116a: a triggered ability; CR 702.116b: each instance
     ///   triggers separately) / Increment (CR 702.191a: a triggered ability;
     ///   CR 702.191b: each instance triggers separately) / Provoke (CR 702.39b:
@@ -2297,13 +2537,12 @@ impl Keyword {
     ///   realized by `synthesize_sunburst` (one ETB-counter replacement per
     ///   `Keyword::Sunburst`), not by the runtime trigger installer this
     ///   predicate gates. Out of this class for that reason.
-    /// - Prowess — runtime presence is a boolean `has_prowess` check, so counting
-    ///   instances would be inert (separate deeper bug, not addressed here).
     pub fn instances_function_separately(&self) -> bool {
         matches!(
             self,
             Keyword::Cascade
                 | Keyword::Storm
+                | Keyword::Prowess
                 | Keyword::Myriad
                 | Keyword::Increment
                 | Keyword::Provoke
@@ -2312,19 +2551,14 @@ impl Keyword {
         )
     }
 
-    /// CR 702.164b + CR 702.44d: Keywords whose multiple instances must COEXIST on
-    /// the keyword list rather than collapse to one when an identical instance is
-    /// granted on top of a printed one. When such a keyword is granted on top of an
-    /// identical printed instance, BOTH must remain on the keyword list so each
-    /// instance's effect is realized separately. Two disjoint reasons a keyword
-    /// belongs here, both served by the same "don't dedup identical instances"
-    /// mechanic in the keyword-grant paths:
+    /// Keywords whose identical instances must coexist when granted. Each
+    /// occurrence contributes to the keyword's effect in one of these ways:
     ///
     /// - **Parameter-value summation** (CR 702.164b): the aggregate reader sums
     ///   each instance's parameter (a creature's total toxic value). Only Toxic
     ///   sums today. Protection (CR 702.16g), Ward, Annihilator, Afflict, Frenzy do
     ///   NOT sum — they keep deduping identical instances.
-    /// - **Instance-count multiplicity** (CR 702.44d + CR 702.54c): an as-enters
+    /// - **As-enters multiplicity** (CR 702.44d + CR 702.54c): an as-enters
     ///   static ability where "each instance works separately" — Sunburst places
     ///   its as-enters counters once per instance (CR 702.44a), and Bloodthirst
     ///   likewise places its counters once per instance (CR 702.54a). A GRANTED
@@ -2337,12 +2571,13 @@ impl Keyword {
     ///   silently lost. (Bloodthirst carries a `BloodthirstValue`, so the
     ///   granted-count is per DISTINCT value — a granted `bloodthirst 3` and a
     ///   printed `bloodthirst 1` never dedup regardless.)
+    /// - **Triggered-ability multiplicity** (CR 702.108b): each instance of
+    ///   Prowess supplies its own trigger when its controller casts a
+    ///   noncreature spell.
     ///
-    /// Distinct from `instances_function_separately` (which gates per-instance
-    /// TRIGGER installation, and deliberately excludes Sunburst because its
-    /// multiplicity is realized by synthesis / the granted-replacement path, not by
-    /// the trigger installer — a different semantic axis). Add any future keyword
-    /// whose identical instances must coexist here.
+    /// `instances_function_separately` preserves repeated printed keyword
+    /// occurrences for their trigger paths. This policy preserves identical
+    /// instances added by grants.
     ///
     /// Out of scope (intentionally not gated by this predicate): cast-time spell
     /// keyword merge (`casting.rs` `upsert_keyword_by_kind`/`merge_spell_keyword` —
@@ -2351,7 +2586,7 @@ impl Keyword {
     pub fn instances_must_coexist(&self) -> bool {
         matches!(
             self,
-            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_)
+            Keyword::Toxic(_) | Keyword::Sunburst | Keyword::Bloodthirst(_) | Keyword::Prowess
         )
     }
 
@@ -2372,6 +2607,18 @@ impl Keyword {
             self,
             Keyword::Crew { .. } | Keyword::Enchant(_) | Keyword::Saddle(_)
         )
+    }
+
+    /// The single authority for how a newly granted instance of this keyword
+    /// combines with the instances already on a keyword list.
+    pub fn grant_policy(&self) -> KeywordGrantPolicy {
+        if self.instances_must_coexist() {
+            KeywordGrantPolicy::Accumulate
+        } else if self.overrides_same_kind_on_grant() {
+            KeywordGrantPolicy::ReplaceSameVariant
+        } else {
+            KeywordGrantPolicy::DedupeIdentical
+        }
     }
 
     /// CR 113.2c: The runtime-REALIZED subset of [`Self::instances_function_separately`]
@@ -2428,6 +2675,14 @@ fn capitalize_first(s: &str) -> String {
 fn parse_companion_condition(text: &str) -> CompanionCondition {
     let lower = text.to_lowercase();
 
+    if let Ok((_, over)) = parse_companion_deck_size_over(&lower) {
+        return CompanionCondition::MinDeckSizeOver(over);
+    }
+
+    if parse_companion_singleton(&lower).is_ok() {
+        return CompanionCondition::Singleton;
+    }
+
     if lower.contains("even mana value") || lower.contains("even converted mana cost") {
         CompanionCondition::EvenManaValues
     } else if lower.contains("odd mana value") || lower.contains("odd converted mana cost") {
@@ -2440,8 +2695,6 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
         CompanionCondition::PermanentsHaveActivatedAbilities
     } else if lower.contains("more than one of the same mana symbol") {
         CompanionCondition::NoRepeatedManaSymbols
-    } else if lower.contains("twenty or more cards") || lower.contains("80") {
-        CompanionCondition::MinDeckSizeOver(20)
     } else if lower.contains("mana value 3 or greater") {
         CompanionCondition::MinManaValue(3)
     } else if lower.contains("mana value 2 or less") {
@@ -2454,6 +2707,67 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
         // Fallback: attempt to identify by partial matching
         CompanionCondition::SharedCardType
     }
+}
+
+/// CR 702.139a + CR 702.139b: the deck-size companion condition, written
+/// "Your starting deck contains at least N cards more than the minimum deck size"
+/// (Yorion, Sky Nomad). Reads the lowercased condition after the keyword name,
+/// tolerating the `Companion—` separator, and yields the surplus `N` over the
+/// format's minimum (the runtime supplies the minimum, so the same parse covers
+/// 60-card Constructed and 40-card Limited). Trailing punctuation and reminder
+/// text are left unconsumed.
+fn parse_companion_deck_size_over(input: &str) -> super::text_grammar::OracleResult<'_, u32> {
+    let (rest, _) = companion_condition_lead(input)?;
+    preceded(
+        tag("your starting deck contains at least "),
+        terminated(parse_number, tag(" cards more than the minimum deck size")),
+    )
+    .parse(rest)
+}
+
+/// CR 702.139a: the `Companion` keyword's separator (em dash, en dash or hyphen)
+/// and its surrounding whitespace, ahead of the condition proper.
+fn companion_condition_lead(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            multispace0,
+            opt(alt((
+                tag::<_, _, OracleError<'_>>("\u{2014}"),
+                tag("\u{2013}"),
+                tag("-"),
+            ))),
+            multispace0,
+        ),
+    )
+    .parse(input)
+}
+
+/// CR 702.139a + CR 702.139b: the singleton companion condition, as Lutri, the
+/// Spellchaser prints it: "Each nonland card in your starting deck has a
+/// different name." The "no two nonland cards ... have the same name" phrasing
+/// names the same condition. Reads the lowercased condition after the keyword
+/// name. The nonland scope is part of the printed condition, so lands never
+/// count toward a repeat (the runtime evaluation skips them).
+fn parse_companion_singleton(input: &str) -> super::text_grammar::OracleResult<'_, ()> {
+    let (rest, _) = companion_condition_lead(input)?;
+    alt((
+        value(
+            (),
+            (
+                tag("each nonland card in your starting deck "),
+                tag("has a different name"),
+            ),
+        ),
+        value(
+            (),
+            (
+                tag("no two nonland cards in your starting deck "),
+                tag("have the same name"),
+            ),
+        ),
+    ))
+    .parse(rest)
 }
 
 /// Extract creature subtypes from Kaheera-style companion condition text.
@@ -2867,7 +3181,22 @@ impl FromStr for Keyword {
                         parse_keyword_mana_cost(p),
                     )))
                 }
-                "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
+                "ward" => {
+                    let mut words = p.split_ascii_whitespace();
+                    if words
+                        .next()
+                        .is_some_and(|word| word.eq_ignore_ascii_case("blight"))
+                    {
+                        return Ok(match (words.next(), words.next()) {
+                            (Some(count), None) => count.parse().map_or_else(
+                                |_| Keyword::Unknown(s.to_string()),
+                                |count| Keyword::Ward(WardCost::Blight(count)),
+                            ),
+                            _ => Keyword::Unknown(s.to_string()),
+                        });
+                    }
+                    return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p))));
+                }
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
                 "rampage" => return Ok(Keyword::Rampage(p.parse().unwrap_or(1))),
@@ -3495,25 +3824,32 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
-/// identity" (and its "that is not in" / "not in" spellings) into a
-/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
-/// quality splitter can preserve sentence punctuation.
+/// CR 702.16i: Parse a qualified color set, read live from the board or fixed at
+/// game start (a commander's color identity, CR 903.4a). One trailing period is
+/// tolerated because the keyword quality splitter can preserve punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;
 
     all_consuming(terminated(
-        value(
-            ProtectionColorSet::OutsideCommanderColorIdentity,
-            (
-                tag::<_, _, E<'_>>("each color "),
-                alt((
-                    tag("that's not in "),
-                    tag("that is not in "),
-                    tag("not in "),
-                )),
-                super::text_grammar::parse_your_commanders_color_identity,
-            ),
+        preceded(
+            tag::<_, _, E<'_>>("each color "),
+            alt((
+                value(
+                    ProtectionColorSet::OutsideCommanderColorIdentity,
+                    (
+                        alt((
+                            tag("that's not in "),
+                            tag("that is not in "),
+                            tag("not in "),
+                        )),
+                        super::text_grammar::parse_your_commanders_color_identity,
+                    ),
+                ),
+                value(
+                    ProtectionColorSet::AmongPermanentsYouControl,
+                    (tag("among "), tag("permanents "), tag("you control")),
+                ),
+            )),
         ),
         opt(tag(".")),
     ))
@@ -5251,6 +5587,55 @@ mod tests {
         );
     }
 
+    /// CR 616.1 (Matt R10-F1): the rid codec is lossless on every variant
+    /// (fingerprints ride whole) and fails contained on foreign input, so
+    /// virtual-candidate rids survive pause records without a state lookup.
+    #[test]
+    fn matched_protection_quality_rid_codec_round_trips() {
+        for quality in [
+            MatchedProtectionQuality::Color(ManaColor::Red),
+            MatchedProtectionQuality::Color(ManaColor::Green),
+            MatchedProtectionQuality::CardType(CoreType::Artifact),
+            MatchedProtectionQuality::CardType(CoreType::Conspiracy),
+            MatchedProtectionQuality::CardType(CoreType::Vanguard),
+            MatchedProtectionQuality::CardSubtype(0),
+            MatchedProtectionQuality::CardSubtype(u64::MAX),
+            MatchedProtectionQuality::Colorlessness(ProtectionColorlessness::Multicolored),
+            MatchedProtectionQuality::Multicolored,
+            MatchedProtectionQuality::Player(PlayerId(0)),
+            MatchedProtectionQuality::Player(PlayerId(7)),
+            MatchedProtectionQuality::Everything,
+            MatchedProtectionQuality::Filter(1),
+            MatchedProtectionQuality::Filter(u64::MAX),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::Opponent),
+            MatchedProtectionQuality::FromPlayer(ProtectionPlayerScope::You),
+            MatchedProtectionQuality::ChosenName(0),
+            MatchedProtectionQuality::ChosenName(u64::MAX),
+        ] {
+            let (discriminant, minor) = quality.replacement_rid_parts();
+            assert_eq!(
+                MatchedProtectionQuality::from_replacement_parts(discriminant, minor),
+                Some(quality),
+                "rid codec must round-trip {quality:?}"
+            );
+        }
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(10, 0),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(0, 5), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(1, 18),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(4, 1), None);
+        assert_eq!(
+            MatchedProtectionQuality::from_replacement_parts(5, 256),
+            None
+        );
+        assert_eq!(MatchedProtectionQuality::from_replacement_parts(8, 2), None);
+    }
+
     /// CR 702.16i + CR 903.4: "each color that's not in your commander's color
     /// identity" is a dynamic color set, not an untyped card-type string.
     #[test]
@@ -5281,6 +5666,51 @@ mod tests {
             .unwrap(),
             serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
         );
+    }
+
+    #[test]
+    fn parse_protection_target_among_controlled_permanents_and_serde() {
+        let expected = ProtectionTarget::EachColor(ProtectionColorSet::AmongPermanentsYouControl);
+        for phrase in [
+            "each color among permanents you control",
+            "Each color among permanents you control.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected);
+        }
+        assert_eq!(
+            Keyword::from_str("Protection:each color among permanents you control").unwrap(),
+            Keyword::Protection(expected.clone())
+        );
+        for (quality, wire) in [
+            (
+                expected,
+                serde_json::json!({"EachColor": "AmongPermanentsYouControl"}),
+            ),
+            (
+                ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+                serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&quality).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ProtectionTarget>(wire).unwrap(),
+                quality
+            );
+        }
+        assert!(serde_json::from_value::<ProtectionTarget>(
+            serde_json::json!({"EachColor": "UnknownSet"})
+        )
+        .is_err());
+        for phrase in [
+            "each color among permanents you control while attacking",
+            "each color among creatures you control",
+            "each color among permanents your opponents control",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.into())
+            );
+        }
     }
 
     /// Hostile siblings of the color-set phrase stay untyped card-type strings.

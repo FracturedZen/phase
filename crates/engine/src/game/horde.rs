@@ -347,8 +347,14 @@ pub(crate) fn complete_advanced_mill_from_loss(
 ) -> crate::game::zone_pipeline::BatchMoveResult {
     // Ordinary mill event publication: the same per-card `Milled` events an
     // ordinary mill emits, so milled triggers (Zellix class) fire.
-    let result =
-        crate::game::effects::mill::complete_mill_delivery(state, player_id, milled, events);
+    let result = crate::game::effects::mill::complete_mill_delivery(
+        state,
+        player_id,
+        milled,
+        crate::types::ability::LibraryPosition::Top,
+        Zone::Graveyard,
+        events,
+    );
     // Synchronous cohort phase-out (CR 702.26). A `Moved` replacement (Rest
     // in Peace class) could still have diverted a cohort member, so only
     // phase out what actually entered.
@@ -1109,8 +1115,11 @@ fn reveal_library_token(
         source_id: card_id,
         controller: horde,
         attach_to: TokenHostRequest::NotRequested,
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     };
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: horde,
         spec: Box::new(spec),
         copy: None,
@@ -2732,7 +2741,8 @@ mod tests {
             state.objects[&first[0]]
                 .card_types
                 .subtypes
-                .contains(&"Orc".to_string()),
+                .iter()
+                .any(|i| i == "Orc"),
             "the amassed army is an Orc Army"
         );
         assert!(
@@ -2900,6 +2910,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: to,
                     target: TargetFilter::Any,

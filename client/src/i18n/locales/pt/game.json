@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} de {{total}} repetições distribuídas.",
     "evenSplit": "Restaurar a divisão igual",
     "customDistribution": "Distribuição personalizada — o motor não pré-visualizou esta divisão.",
-    "announceTitle": "Escolha o alvo que cada repetição anuncia:",
-    "announce": "Anunciar",
-    "announceAria": "Anunciar {{subject}}",
     "mayTitle": "Habilidade opcional {{group}} — repetir esta escolha em cada iteração?",
     "mayTake": "Usar",
     "mayDecline": "Recusar",
     "mayTakeAria": "Usar a habilidade opcional {{group}}",
     "mayDeclineAria": "Recusar a habilidade opcional {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Declaração proposta:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efeito de substituição de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — usar em cada iteração",
       "decline": "{{subject}} — recusar em cada iteração"
@@ -155,7 +152,8 @@
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Virada"
+    "tapped": "Virada",
+    "reloadArt": "Toque para recarregar a arte"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -164,6 +162,8 @@
     "flip": "Virar",
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
+    "reportNotSent": "Não enviado",
+    "reloadArt": "Recarregar arte",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -204,6 +204,14 @@
         "label": "Rótulo",
         "fallback": "Escolha"
       }
+    },
+    "attacking": {
+      "you": "Atacando você",
+      "player": "Atacando {{player}}",
+      "yourPlaneswalker": "Atacando seu planeswalker {{name}}",
+      "planeswalker": "Atacando o planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a batalha {{name}}",
+      "nothing": "Atacando, mas nenhum jogador, planeswalker ou batalha"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Nenhuma",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
-    "target": "Alvo",
     "token": "Ficha",
     "tokenTooltip": "Ficha que é uma cópia de uma carta real",
     "copy": "Cópia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totais de ataque",
+    "targetTotal_few": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_many": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de dano",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de dano"
   },
   "fullControl": {
     "label": "Controle",
@@ -562,7 +574,9 @@
     "dungeonTooltip": "Aventurando-se em {{name}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
     "poisonAriaLabel_other": "{{count}} marcadores de veneno",
-    "poisonTooltip": "Marcadores de veneno: {{count}}\nUm jogador com dez ou mais marcadores de veneno perde o jogo.",
+    "poisonTooltip": "Marcadores de veneno: {{count}}",
+    "poisonLossPlayer": "Um jogador com {{threshold}} ou mais marcadores de veneno perde o jogo.",
+    "poisonLossTeam": "Uma equipe com {{threshold}} ou mais marcadores de veneno perde o jogo.",
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
     "energyTooltip": "Marcadores de energia: {{count}}\nMarcadores de energia são um recurso do jogador gasto por habilidades de cards.",
@@ -659,6 +673,8 @@
     "commander": "Comandante",
     "commanderTitle": "Comandante: {{name}}",
     "commanderTitleTax": "Comandante: {{name}} (Taxa: +{{tax}})",
+    "boss": "Chefe",
+    "bossTitle": "Chefe: {{name}}",
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
@@ -822,7 +838,19 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
-    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)"
+    "attackTargetTrample": "{{name}} (Atropelar)",
+    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "lethalButton": "Letal",
+    "clearButton": "Limpar",
+    "assignLethalTo": "Atribuir dano letal a {{target}}",
+    "clearDamageFor": "Limpar o dano atribuído a {{target}}",
+    "lethalFirstButton": "Dano letal primeiro",
+    "lethalFirstTitle": "Atribua dano letal a cada criatura bloqueadora na ordem e depois atribua o restante",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} de dano restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} de dano restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1167,6 +1195,11 @@
       "drawFirst": "Comprar Primeiro",
       "drawFirstDescription": "Faça a compra extra em seu primeiro turno"
     },
+    "startingPlayer": {
+      "title": "Escolha quem joga primeiro",
+      "playerPlaysFirst": "{{name}} joga primeiro",
+      "opponentChoosing": "{{name}} está escolhendo quem joga primeiro…"
+    },
     "mulligan": {
       "opponentDeciding": "O oponente está decidindo sua mão inicial…",
       "londonTitle": "London Mulligan ({{count}} feitos)",
@@ -1189,7 +1222,10 @@
       "subtitleKeepWithBottom": "Mantenha esta mão (você colocará {{count}} no fundo) ou faça mulligan novamente para 7 cartas novas.",
       "subtitleKeepFree": "Mantenha esta mão (mulligan grátis — nenhuma carta para o fundo) ou faça mulligan novamente para 7 cartas novas.",
       "subtitleOpeningFree": "Mantenha esta mão ou faça um mulligan grátis (nenhuma carta para o fundo).",
-      "subtitleOpeningOne": "Mantenha esta mão ou faça mulligan para 7 cartas novas (você colocará 1 no fundo ao manter)."
+      "subtitleOpeningOne": "Mantenha esta mão ou faça mulligan para 7 cartas novas (você colocará 1 no fundo ao manter).",
+      "onThePlay": "Você joga primeiro",
+      "onTheDraw": "Você compra primeiro",
+      "takeTurn": "Você joga no turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pré-Jogo",
@@ -1214,6 +1250,7 @@
       "draw": "EMPATE",
       "victory": "VITÓRIA",
       "defeat": "DERROTA",
+      "complete": "FIM DE JOGO",
       "lifeSummary": "Você: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duração: {{time}}",
@@ -1253,6 +1290,7 @@
       "onlyForSpellColor": "Apenas para mágicas da cor {{color}}.",
       "onlyForSpellFromZone": "Apenas para mágicas {{polarity}} {{zone}}.",
       "cannotCastSpellFromZone": "Não pode ser gasto para conjurar mágicas de {{zone}}.",
+      "cannotCastSpellsOutsideType": "Não pode ser gasto para conjurar mágicas que não sejam do tipo {{spellType}}.",
       "onlyForFaceDownSpell": "Apenas para mágicas viradas para baixo.",
       "onlyForAny": "Apenas para um destes usos: {{restrictions}}",
       "onlyForSpecialAction": "Apenas para a ação especial {{action}}.",
@@ -1310,7 +1348,12 @@
         "Ticket": "ticket"
       },
       "generic": "um custo",
-      "pay": "Pagar {{cost}}"
+      "blight": "Praga {{count}}",
+      "blightBoundedX": "Praga X (até a maior resistência entre as criaturas que você controla)",
+      "pay": "Pagar {{cost}}",
+      "draw": "compre uma carta",
+      "drawCount_one": "compre {{count}} carta",
+      "drawCount_other": "compre {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Anular a Menos Que Você Pague",
@@ -1318,7 +1361,8 @@
       "title": "{{effect}} a Menos Que Você Pague",
       "titleChooseOne": "{{effect}} a Menos Que Você Pague Um",
       "dontPay": "Não Pagar",
-      "takeEffect": "Aceitar o Efeito"
+      "takeEffect": "Aceitar o Efeito",
+      "priorChoice": "Jogador {{id}}: {{choice}}"
     },
     "spliceOffer": {
       "title": "Unir com Arcano?",
@@ -1401,8 +1445,13 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
+      "commanderDamage": "Dano de Comandante",
+      "poisonCounters": "Marcadores de veneno",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
+      "archenemySeat": "Archenemy",
+      "archenemyYou": "Você",
+      "archenemyOpponent": "Oponente {{number}}",
       "firstPlayer": {
         "random": "Aleatório",
         "play": "Jogar",
@@ -1514,7 +1563,9 @@
       "titleReveal": "Revelar da Mão",
       "titleOpponentHand": "Mão do Oponente",
       "subtitleReveal": "Escolha uma carta para revelar ou recuse",
-      "subtitleChoose": "Escolha uma carta"
+      "subtitleChoose": "Escolha uma carta",
+      "subtitleRevealAnyNumber": "Escolha qualquer número de cartas para revelar",
+      "subtitleChooseCount": "Escolha {{count}} cartas"
     },
     "search": {
       "title": "Procurar no Grimório",
@@ -1778,6 +1829,10 @@
       "title": "Ordenar as cópias",
       "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
     },
+    "memberOrder": {
+      "title": "Ordene os cards",
+      "subtitle": "Escolha qual card é processado em seguida"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"
@@ -1818,6 +1873,13 @@
       "titleExact_one": "Descarte uma carta",
       "titleExact_other": "Descarte {{count}} cartas",
       "titleWard": "Vigilância — Descarte uma carta",
+      "instructionWithReason": "{{reason}}: {{instruction}}",
+      "reason": {
+        "ward": "Vigilância",
+        "connive": "Conluiar",
+        "additionalCost": "Custo adicional",
+        "manaAbility": "Habilidade de mana"
+      },
       "subtitleUpTo_one": "Escolha até {{count}} carta para descartar",
       "subtitleUpTo_other": "Escolha até {{count}} cartas para descartar",
       "subtitleUnless": "Escolha {{count}} cartas ou 1 carta correspondente para descartar",
@@ -1977,7 +2039,8 @@
     "scrollLeft": "Rolar para a esquerda",
     "scrollRight": "Rolar para a direita",
     "confirm": "Confirmar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Aventura",
@@ -2101,9 +2164,20 @@
     "title": "Escolher destinatário do presente",
     "subtitle": "Escolha qual oponente recebe o presente prometido."
   },
+  "costRecipient": {
+    "title": "Escolha um oponente",
+    "subtitle": "Escolha o oponente para este custo: {{cost}}."
+  },
   "entryController": {
     "title": "Escolher controlador ao entrar",
     "subtitle": "Escolha qual oponente controla esta permanente ao entrar."
+  },
+  "replacementDecisionOrder": {
+    "title": "Escolha qual decisão tomar primeiro",
+    "subtitle": "Estas escolhas de substituição acontecem ao mesmo tempo. Escolha qual fazer primeiro.",
+    "unknownObject": "Objeto desconhecido",
+    "attachedTo": "Em {{host}}",
+    "attachments": "Com {{names}}"
   },
   "optionalCost": {
     "gift": {
@@ -2271,6 +2345,13 @@
     "creatureFallback": "Criatura {{id}}"
   },
   "distributeAmong": {
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} restantes a {{target}}",
+    "clearButton": "Limpar",
+    "clearTarget": "Limpar a atribuição a {{target}}",
     "unitCounter": "marcador {{counter}}",
     "unitDamage": "dano",
     "unitLife": "vida",
@@ -2399,6 +2480,9 @@
     "optionalTriggers": "Habilidades desencadeadas opcionais ({{count, number}})",
     "replacementChoices": "Escolhas de substituição ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Mantenha pressionado para ver a carta inteira"
+  },
   "optionalEffect": {
     "sourceFallback": "Efeito",
     "title": "{{name}} - Efeito Opcional",
@@ -2455,6 +2539,8 @@
       "zoneHand": "sua mão",
       "discard": "Descarte {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Faça um oponente ganhar {{amount}} pontos de vida",
+      "haveEachOtherPlayerGainLife": "Faça cada outro jogador ganhar {{amount}} pontos de vida",
       "reveal": "Revele {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2511,7 +2597,7 @@
     "appliedLast": "Aplicado por último — este prevalece",
     "resultLabel": "Resultado: {{outcome}}",
     "confirmOrder": "Confirmar ordem",
-    "dragHint": "Arraste para reordenar, ou use as setas.",
+    "dragHint": "Arraste pela alça <grip>⠿</grip> para reordenar, ou use as setas.",
     "chooseSubtitle": "Escolha qual efeito de substituição aplicar.",
     "candidateFallback": "Efeito de Substituição {{number}}",
     "orderSubtitleComposing": "Todos esses efeitos mudam como este evento acontece. Arraste para definir a ordem em que se aplicam: todos se aplicam, então a ordem muda o resultado (CR 616.1).",
@@ -2520,6 +2606,7 @@
     "composesNote": "Todos os efeitos se aplicam — a ordem muda como se combinam.",
     "moveUpNamed": "Mover {{name}} antes",
     "moveDownNamed": "Mover {{name}} depois",
+    "dragHandleNamed": "Arraste {{name}} para reordenar",
     "positionAnnounce": "Posição {{position}} de {{total}}"
   },
   "retargetChoice": {
@@ -2539,6 +2626,9 @@
     "partitionSubtitle": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma.",
     "partitionSubtitleRemaining_one": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogador a mais depois de você)",
     "partitionSubtitleRemaining_other": "Separe suas criaturas em duas pilhas. {{chooser}} escolherá uma. ({{count}} jogadores a mais depois de você)",
+    "partitionInstruction": "{{chooser}} escolhe uma",
+    "partitionInstructionRemaining_one": "{{chooser}} escolhe uma ({{count}} jogador a mais depois de você)",
+    "partitionInstructionRemaining_other": "{{chooser}} escolhe uma ({{count}} jogadores a mais depois de você)",
     "pileALabel": "Pilha A:",
     "pileBLabel": "Pilha B:",
     "pileAria": "{{name}} — pilha {{pile}}",
@@ -2620,6 +2710,7 @@
   },
   "outsideGame": {
     "fromExile": "Do exílio",
+    "fromCompanion": "Do companheiro",
     "fromSideboard": "Do sideboard",
     "fromBoosterPack": "De um booster de {{setCode}}",
     "fromCubeBoosterPack": "De um booster do cube"
@@ -2644,6 +2735,20 @@
     "EndCombat": "Fim do combate",
     "PostCombatMain": "Fase principal 2",
     "End": "Etapa final",
+    "Cleanup": "Limpeza"
+  },
+  "phaseShortName": {
+    "Untap": "Desvirar",
+    "Upkeep": "Manutenção",
+    "Draw": "Compra",
+    "PreCombatMain": "Principal 1",
+    "BeginCombat": "Combate",
+    "DeclareAttackers": "Atacantes",
+    "DeclareBlockers": "Bloqueadores",
+    "CombatDamage": "Dano",
+    "EndCombat": "Fim combate",
+    "PostCombatMain": "Principal 2",
+    "End": "Final",
     "Cleanup": "Limpeza"
   },
   "counterMoveDistribution": {
@@ -2701,6 +2806,9 @@
       "single": "{{action}} a permanent",
       "exactCount_one": "{{action}} {{count}} permanent",
       "exactCount_other": "{{action}} {{count}} permanents",
+      "protectedObject": "Pague para proteger {{object}}",
+      "blightCounters_one": "Coloque um marcador -1/-1 em uma criatura que você controla",
+      "blightCounters_other": "Coloque {{count}} marcadores -1/-1 em uma criatura que você controla",
       "rangeCount_one": "{{action}} {{min}}-{{count}} permanent",
       "rangeCount_other": "{{action}} {{min}}-{{count}} permanents",
       "upToCount_one": "{{action}} up to {{count}} permanent",

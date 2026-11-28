@@ -180,11 +180,7 @@ pub(crate) fn ability_is_sacrifice_outlet(ability: &AbilityDefinition) -> bool {
 
     // Gate 4: exclude pure-mana-producing sac outlets ("T, sacrifice this: add {G}").
     let effects = collect_chain_effects(ability);
-    if effects.iter().all(|e| matches!(e, Effect::Mana { .. })) {
-        return false;
-    }
-
-    true
+    !effects.iter().all(|e| matches!(e, Effect::Mana { .. }))
 }
 
 /// True if this ability is a sacrifice outlet with no mana component in the cost.
@@ -361,7 +357,7 @@ fn is_fodder_source(face: &CardFace) -> bool {
 fn is_creature_fodder_effect(e: &&Effect) -> bool {
     match e {
         // CR 111.1: creature token production.
-        Effect::Token { types, .. } => types.iter().any(|s| s == "Creature"),
+        Effect::Token { .. } => e.token_creation_members().any(|member| matches!(member, Effect::Token { types, .. } if types.iter().any(|s| s == "Creature"))),
         // Recursion from graveyard to battlefield targeting a creature.
         // No CR keyword action — generic zone-change effect. The graveyard
         // constraint may ride `origin` or the target filter — `reanimator` owns
@@ -525,6 +521,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -566,6 +564,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::Any,
@@ -637,6 +637,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Saproling".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -653,6 +654,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         )
     }
@@ -661,6 +663,7 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Token {
+                enters_blocking: None,
                 name: "Treasure".to_string(),
                 power: PtValue::Fixed(0),
                 toughness: PtValue::Fixed(0),
@@ -677,6 +680,7 @@ mod tests {
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),
+                additional_members: Vec::new(),
             },
         )
     }
@@ -685,6 +689,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -709,6 +715,8 @@ mod tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![

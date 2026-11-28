@@ -114,6 +114,7 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
         DraftAction::SubmitDeck {
             main_deck,
             commanders,
+            companion,
             printings,
             ..
         } => {
@@ -133,6 +134,9 @@ pub fn guard_draft_action_payload(action: &DraftAction) -> Result<(), String> {
                 commanders,
                 MAX_COMMANDER_DESIGNATIONS,
             )?;
+            if let Some(c) = companion {
+                validate_token("SubmitDeck.companion", c, MAX_TOKEN_LEN)?;
+            }
             validate_deck_printings_bounds("SubmitDeck.printings", printings)?;
         }
         DraftAction::ReportMatchResult { match_id, .. } => {
@@ -183,8 +187,10 @@ mod tests {
                     seat: 0,
                     main_deck: vec!["Plains".into()],
                     commanders: vec![],
+                    companion: None,
                     printings: vec![row.clone(); count],
                 },
+                request_id: crate::protocol::DraftRequestId::try_from(1).unwrap(),
             };
             assert_eq!(
                 crate::client_message_wire_guard::guard_client_message_before_dispatch(
@@ -203,11 +209,11 @@ mod tests {
             format!(r#"{{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":{sidecar}}}"#);
         if data_first {
             format!(
-                r#"{{"data":{{"action":{{"data":{data},"type":"SubmitDeck"}},"draft_code":"ABCD12"}},"type":"DraftAction"}}"#
+                r#"{{"data":{{"action":{{"data":{data},"type":"SubmitDeck"}},"draft_code":"ABCD12","request_id":1}},"type":"DraftAction"}}"#
             )
         } else {
             format!(
-                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}}}}}}"#
+                r#"{{"type":"DraftAction","data":{{"draft_code":"ABCD12","action":{{"type":"SubmitDeck","data":{data}}},"request_id":1}}}}"#
             )
         }
     }
@@ -698,6 +704,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
             commanders: Vec::new(),
+            companion: None,
             printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
@@ -710,6 +717,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest\nIsland".to_string()],
             commanders: Vec::new(),
+            companion: None,
             printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
@@ -735,6 +743,7 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS + 1],
+            companion: None,
             printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
@@ -753,9 +762,23 @@ mod tests {
             seat: 0,
             main_deck: vec!["Forest".to_string()],
             commanders: vec!["Forest".to_string(); MAX_COMMANDER_DESIGNATIONS],
+            companion: Some("Yorion, Sky Nomad".to_string()),
             printings: Vec::new(),
         };
         assert!(guard_draft_action_payload(&action).is_ok());
+    }
+
+    #[test]
+    fn submit_deck_rejects_invalid_companion_name() {
+        let action = DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec!["Forest".to_string()],
+            commanders: Vec::new(),
+            companion: Some("Yorion\nSky Nomad".to_string()),
+            printings: Vec::new(),
+        };
+        let err = guard_draft_action_payload(&action).unwrap_err();
+        assert!(err.contains("SubmitDeck.companion"));
     }
 
     #[test]

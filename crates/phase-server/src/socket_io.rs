@@ -1119,12 +1119,11 @@ fn state_frame(message: &ServerMessage) -> StateFrame<'_> {
         | ServerMessage::TimerUpdate { .. }
         | ServerMessage::Pong { .. }
         | ServerMessage::PeerInfo { .. }
-        | ServerMessage::DraftCreated { .. }
-        | ServerMessage::DraftJoined { .. }
+        | ServerMessage::DraftCommandAccepted { .. }
+        | ServerMessage::DraftCommandRefused { .. }
         | ServerMessage::DraftStateUpdate { .. }
         | ServerMessage::DraftMatchStart { .. }
         | ServerMessage::DraftTimerSync { .. }
-        | ServerMessage::DraftActionRejected { .. }
         | ServerMessage::DraftOver { .. }
         | ServerMessage::DraftSpectatorView { .. }
         | ServerMessage::TakebackRequested { .. }
@@ -1862,6 +1861,7 @@ mod codec_tests {
         assert_eq!(events.len(), 512);
         *log_entries = vec![GameLogEntry {
             seq: 1,
+            game_number: 1,
             turn: 1,
             phase: Phase::PreCombatMain,
             category: LogCategory::Game,
@@ -5223,3 +5223,7 @@ pub(crate) mod resource_probe {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "socket_io_large_full_tests.rs"]
+mod large_full_tests;

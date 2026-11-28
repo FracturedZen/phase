@@ -88,11 +88,13 @@ pub enum TriggerEventKey {
     /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
     /// event published by the control-changing instruction handlers
     /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
-    /// of turn" control effect).
-    /// NOTE: Control changes that publish no `ControllerChanged` event
-    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
-    /// elimination) do NOT flow through this bucket — they are not caught by
-    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
+    /// of turn" control effect) and by a full layer evaluation's controller diff
+    /// for control it derives without an instruction (static / Aura control, a
+    /// lapsed `ForAsLongAs` duration).
+    /// NOTE: this publishes every control change actually derived by a full
+    /// layer evaluation, without duplicating existing instruction publication.
+    /// It does not guarantee that every rules-required control transition is
+    /// derived; phase-rs/phase#10947 remains.
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,
@@ -148,6 +150,9 @@ pub enum TriggerEventKey {
     /// CR 602.1 (activated abilities) + CR 603.1 (triggered abilities):
     /// keyword-activated, ability-copy, and ninjutsu activation events.
     AbilityOrCopyActivated,
+    /// CR 603.2 + CR 603.3b: a triggered ability triggered (another ability's
+    /// trigger condition is that triggering).
+    AbilityTriggered,
     /// CR 702.112: A creature became renowned.
     Renowned,
     /// CR 701.37: A creature became monstrous.
@@ -178,11 +183,108 @@ pub enum TriggerEventKey {
     PhaseOut,
 }
 
+impl TriggerEventKey {
+    /// CR 603.10: whether an ability that triggers on an event with this key
+    /// "looks back in time", so a permanent that left the battlefield in the
+    /// same event (or the same instruction) as the event still sees it.
+    /// Every other trigger checks the objects that exist immediately after the
+    /// event.
+    pub fn is_look_back(&self) -> bool {
+        match self {
+            // CR 603.10a: leaves-the-battlefield abilities (dying included) and
+            // abilities that trigger when a player sacrifices a permanent.
+            Self::LeaveBattlefield(_) | Self::Dies(_) | Self::Sacrificed => true,
+            // CR 603.10b: abilities that trigger when a permanent phases out.
+            Self::PhaseOut => true,
+            // CR 603.10c: abilities that trigger when an object becomes
+            // unattached. The key is coarse (attach and unattach share it), so
+            // this over-approximates toward observation.
+            Self::AttachmentChanged => true,
+            // CR 603.10d: abilities that trigger when a player loses control of
+            // an object.
+            Self::ChangesController => true,
+            // CR 603.10f: abilities that trigger when a player loses the game.
+            Self::PlayerLost => true,
+            Self::EnterBattlefield(_)
+            | Self::SpellCast(_)
+            | Self::BecomesTarget
+            | Self::Attacks
+            | Self::Blocks
+            | Self::DealsDamage
+            | Self::DamagePrevented
+            | Self::CardsDrawn
+            | Self::LifeChanged
+            | Self::ManaProduced
+            | Self::ManaSpent
+            | Self::CounterAdded
+            | Self::CounterRemoved
+            | Self::BeginningOfPhase(_)
+            | Self::Taps
+            | Self::TapsForMana
+            | Self::Untaps
+            | Self::Destroyed
+            | Self::Discarded
+            | Self::Milled
+            | Self::TokenCreated
+            | Self::FaceOrTransform
+            | Self::PlayerCounterChanged
+            | Self::DieOrCoin
+            | Self::MonarchOrInitiative
+            | Self::VisitAttraction
+            | Self::Specializes
+            | Self::Clashed
+            | Self::Voted
+            | Self::DayNightChanged
+            | Self::DungeonOrClassOrCase
+            | Self::PlayerActionPerformed
+            | Self::Bending
+            | Self::TurnStarted
+            | Self::Exiled
+            | Self::Revealed
+            | Self::AbilityOrCopyActivated
+            | Self::Renowned
+            | Self::BecomesMonstrous
+            | Self::ManifestDreadResolved
+            | Self::Explored
+            | Self::DiscoverResolved
+            | Self::AdaptResolved
+            | Self::ConniveResolved
+            | Self::Exerted
+            | Self::Enlisted
+            | Self::Foretold
+            | Self::Fight
+            // CR 603.10: not among the CR 603.10a-g look-back events, so it sees the
+            // objects that exist immediately after the event.
+            | Self::AbilityTriggered
+            | Self::PhaseIn => false,
+        }
+    }
+}
+
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
+///
+/// Decoded through a normalizing `Deserialize` (`remote = "Self"`): the legacy
+/// unit form `"Planeswalker"` (written before the variant carried a `subtype`;
+/// it always meant every planeswalker the protected player controls) still
+/// loads as `Planeswalker { subtype: None }`. This is a deliberate, narrow
+/// departure from the strict card-data / transport decode policy in
+/// `game_state.rs` (obsolete tags stay rejected): the tag only ever had one
+/// meaning, so accepting it loses nothing. Precedent: the `TriggerMode` shim
+/// below and the `WardCost` shim in `keywords.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(remote = "Self")]
 pub enum AttackTargetFilter {
     Player,
-    Planeswalker,
+    /// CR 508.1c: "can't attack planeswalkers you control" — attacks against
+    /// planeswalkers the protected player controls. Controller-anchored (the
+    /// matcher compares against `source_controller`, never `source_owner`).
+    /// CR 205.3j: `subtype: Some(_)` narrows to planeswalkers bearing the
+    /// named subtype (a planeswalker subtype, canonicalized by
+    /// `parse_subtype`), e.g. "can't attack Jaces you control"; `None`
+    /// defends all of them.
+    Planeswalker {
+        subtype: Option<String>,
+    },
     PlayerOrPlaneswalker,
     Battle,
     /// CR 506.2 + CR 508.1a: "can't attack its owner" — the permanent may not
@@ -227,6 +329,54 @@ pub enum AttackTargetFilter {
     /// restriction, so the runtime matcher needs that object's id, not the
     /// controller the `you`-scoped variants resolve.
     PlayerAttackedBySourceThisTurn,
+}
+
+impl Serialize for AttackTargetFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        AttackTargetFilter::serialize(self, serializer)
+    }
+}
+
+/// Non-buffering visitor behind `AttackTargetFilter`'s normalizing
+/// `Deserialize`. Routes every current-shape payload to the derived
+/// implementation and maps the one legacy unit tag (`"Planeswalker"`) onto
+/// its only historical meaning. Uses `deserialize_any`, so it needs a
+/// self-describing format (serde_json, serde-wasm-bindgen — the only ones in
+/// use); bincode / postcard cannot decode an `AttackTargetFilter`.
+struct AttackTargetFilterVisitor;
+
+impl<'de> serde::de::Visitor<'de> for AttackTargetFilterVisitor {
+    type Value = AttackTargetFilter;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("an AttackTargetFilter (variant name string or externally tagged map)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<AttackTargetFilter, E> {
+        use serde::de::IntoDeserializer;
+        match v {
+            // CR 508.1c: before the `subtype` axis existed, the unit
+            // `Planeswalker` filter was only ever every planeswalker the
+            // protected player controls.
+            "Planeswalker" => Ok(AttackTargetFilter::Planeswalker { subtype: None }),
+            other => {
+                AttackTargetFilter::deserialize(IntoDeserializer::<E>::into_deserializer(other))
+            }
+        }
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        map: A,
+    ) -> Result<AttackTargetFilter, A::Error> {
+        AttackTargetFilter::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+    }
+}
+
+impl<'de> Deserialize<'de> for AttackTargetFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(AttackTargetFilterVisitor)
+    }
 }
 
 /// CR 701.31 + CR 701.31d: which role the trigger's source must occupy in the
@@ -279,6 +429,19 @@ pub enum AbilityLifecyclePoint {
     Triggered,
     /// CR 608.2: the observed ability finished resolving.
     Resolved,
+}
+
+/// CR 603.2 + CR 603.3b: whose triggered ability an
+/// `AbilityTriggered { cause, source }` observer watches, relative to the
+/// cause subjects its `valid_card` admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CausedAbilitySource {
+    /// "causes a triggered ability **of that creature** to trigger": the
+    /// observed ability's source is one of the admitted cause subjects.
+    CausingObject,
+    /// "causes a triggered ability to trigger": any triggered ability whose
+    /// cause has an admitted subject.
+    Any,
 }
 
 /// All trigger modes from Forge's TriggerType enum (CR 603).
@@ -336,7 +499,14 @@ pub enum TriggerMode {
     SpellCastOrCopy,
     AbilityCast,
     AbilityResolves,
-    AbilityTriggered,
+    /// CR 603.2 + CR 603.3b: "Whenever [cause] causes a triggered ability
+    /// [of that creature] to trigger". `cause` reuses the CR 603.2d doubler
+    /// axis; the ordinary `valid_card` filters the cause subject, not the
+    /// ability's source.
+    AbilityTriggered {
+        cause: crate::types::statics::TriggerCause,
+        source: CausedAbilitySource,
+    },
     SpellAbilityCast,
     SpellAbilityCopy,
     /// CR 603.2g: Triggers when a spell or ability is countered (event must actually occur).
@@ -514,6 +684,11 @@ pub enum TriggerMode {
     /// "Gotcha!" — the "When you do" reflexive trigger. The watched condition lives
     /// in `TriggerDefinition::gotcha_condition`.
     GotchaSaid,
+    /// Un-card touch (no CR entry): fires when a player touches an object —
+    /// "Whenever a player's skin or fingernail touches this creature" (Vile Bile).
+    /// The touched object is matched by `valid_card`, the touching player by
+    /// `valid_target`; the player is the event's triggering player ("that player").
+    Touched,
     /// CR 701.44: Triggers when a creature explores.
     Explored,
     /// CR 702.110: Exploit trigger — when a creature exploits another creature.
@@ -716,6 +891,208 @@ pub enum TriggerMode {
     Unknown(String),
 }
 
+/// CR 603.3b: the part of the two-part placement process a triggered ability
+/// is put on the stack in. Declaration order is placement order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TriggerPlacementPart {
+    /// CR 603.3b: a trigger condition that isn't another ability triggering.
+    Ordinary,
+    /// CR 603.3b: a trigger condition that is another ability triggering.
+    ObservesAbilityTriggering,
+}
+
+impl TriggerMode {
+    /// CR 603.3b: which part of the placement process an ability with this
+    /// trigger condition is put on the stack in.
+    pub fn placement_part(&self) -> TriggerPlacementPart {
+        match self {
+            // CR 603.3b: another ability triggering (Historian's Boon's final chapter ability "triggers", CR 714.2e).
+            TriggerMode::AbilityTriggered { .. }
+            | TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Triggered,
+            } => TriggerPlacementPart::ObservesAbilityTriggering,
+            // CR 603.3b: an ability resolving is not an ability triggering.
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            }
+            | TriggerMode::ChangesZone
+            | TriggerMode::ChangesZoneAll
+            | TriggerMode::ChangesController { .. }
+            | TriggerMode::LeavesBattlefield
+            | TriggerMode::DamageDone
+            | TriggerMode::DamageDoneOnce
+            | TriggerMode::DamageAll
+            | TriggerMode::DamageDealtOnce
+            | TriggerMode::DamageDoneOnceByController
+            | TriggerMode::DamageReceived
+            | TriggerMode::DamagePreventedOnce
+            | TriggerMode::ExcessDamage
+            | TriggerMode::ExcessDamageAll
+            | TriggerMode::SpellCast
+            | TriggerMode::SpellCopy
+            | TriggerMode::SpellCastOrCopy
+            | TriggerMode::AbilityCast
+            | TriggerMode::AbilityResolves
+            | TriggerMode::SpellAbilityCast
+            | TriggerMode::SpellAbilityCopy
+            | TriggerMode::Countered
+            | TriggerMode::Attacks
+            | TriggerMode::AttackersDeclared
+            | TriggerMode::YouAttack
+            | TriggerMode::YouAttackUnblocked
+            | TriggerMode::AttackersDeclaredOneTarget
+            | TriggerMode::AttackerBlocked
+            | TriggerMode::AttackerBlockedOnce
+            | TriggerMode::AttackerBlockedByCreature
+            | TriggerMode::AttackerUnblocked
+            | TriggerMode::AttackerUnblockedOnce
+            | TriggerMode::Blocks
+            | TriggerMode::BlockersDeclared
+            | TriggerMode::BecomesBlocked
+            | TriggerMode::CounterAdded
+            | TriggerMode::CounterAddedOnce
+            | TriggerMode::CounterAddedAll
+            | TriggerMode::CounterPlayerAddedAll
+            | TriggerMode::CounterTypeAddedAll
+            | TriggerMode::CounterRemoved
+            | TriggerMode::CounterRemovedOnce
+            | TriggerMode::Sacrificed
+            | TriggerMode::SacrificedOnce
+            | TriggerMode::Destroyed
+            | TriggerMode::Taps
+            | TriggerMode::TapsForMana
+            | TriggerMode::TapAll
+            | TriggerMode::Untaps
+            | TriggerMode::UntapAll
+            | TriggerMode::BecomesTarget
+            | TriggerMode::BecomesTargetOnce
+            | TriggerMode::Drawn
+            | TriggerMode::Discarded
+            | TriggerMode::DiscardedAll
+            | TriggerMode::Milled
+            | TriggerMode::MilledOnce
+            | TriggerMode::MilledAll
+            | TriggerMode::Exiled
+            | TriggerMode::Revealed
+            | TriggerMode::Shuffled
+            | TriggerMode::LifeGained
+            | TriggerMode::LifeLost
+            | TriggerMode::LifeLostAll
+            | TriggerMode::LifeChanged
+            | TriggerMode::PayLife
+            | TriggerMode::PayCumulativeUpkeep
+            | TriggerMode::PayEcho
+            | TriggerMode::TokenCreated
+            | TriggerMode::TokenCreatedOnce
+            | TriggerMode::TurnFaceUp
+            | TriggerMode::Transformed
+            | TriggerMode::Phase
+            | TriggerMode::PhaseIn
+            | TriggerMode::PhaseOut
+            | TriggerMode::PhaseOutAll
+            | TriggerMode::TurnBegin
+            | TriggerMode::NewGame
+            | TriggerMode::BecomeMonarch
+            | TriggerMode::TakesInitiative
+            | TriggerMode::LosesGame
+            | TriggerMode::Championed
+            | TriggerMode::Exerted
+            | TriggerMode::Crewed
+            | TriggerMode::Crews
+            | TriggerMode::Saddled
+            | TriggerMode::Saddles
+            | TriggerMode::SaddlesOrCrews
+            | TriggerMode::Cycled
+            | TriggerMode::CycledOrDiscarded
+            | TriggerMode::NinjutsuActivated
+            | TriggerMode::KeywordAbilityActivated(..)
+            | TriggerMode::AbilityActivated
+            | TriggerMode::LoyaltyAbilityActivated
+            | TriggerMode::Evolve
+            | TriggerMode::Evolved
+            | TriggerMode::GotchaSaid
+            | TriggerMode::Touched
+            | TriggerMode::Explored
+            | TriggerMode::Exploited
+            | TriggerMode::Enlisted
+            | TriggerMode::ManaAdded
+            | TriggerMode::ManaAbilityProduced
+            | TriggerMode::ManaExpend
+            | TriggerMode::LandPlayed
+            | TriggerMode::PlayCard
+            | TriggerMode::Attached
+            | TriggerMode::Unattach
+            | TriggerMode::Adapt
+            | TriggerMode::Connives
+            | TriggerMode::Foretell
+            | TriggerMode::Investigated
+            | TriggerMode::DungeonCompleted
+            | TriggerMode::RoomEntered
+            | TriggerMode::PlanarDice
+            | TriggerMode::Planeswalked { .. }
+            | TriggerMode::ChaosEnsues
+            | TriggerMode::RolledDie
+            | TriggerMode::RolledDieOnce
+            | TriggerMode::FlippedCoin
+            | TriggerMode::Clashed
+            | TriggerMode::DayTimeChanges
+            | TriggerMode::ClassLevelGained
+            | TriggerMode::Copied
+            | TriggerMode::ConjureAll
+            | TriggerMode::Vote
+            | TriggerMode::BecomeRenowned
+            | TriggerMode::BecomeMonstrous
+            | TriggerMode::Proliferate
+            | TriggerMode::RingTemptsYou
+            | TriggerMode::Surveil
+            | TriggerMode::Scry
+            | TriggerMode::PlayerPerformedAction
+            | TriggerMode::Fight
+            | TriggerMode::FightOnce
+            | TriggerMode::Abandoned
+            | TriggerMode::CaseSolved
+            | TriggerMode::ClaimPrize
+            | TriggerMode::CollectEvidence
+            | TriggerMode::CommitCrime
+            | TriggerMode::CrankContraption
+            | TriggerMode::Devoured
+            | TriggerMode::Discover
+            | TriggerMode::Forage
+            | TriggerMode::FullyUnlock
+            | TriggerMode::GiveGift
+            | TriggerMode::ManifestDread
+            | TriggerMode::Mentored
+            | TriggerMode::Mutates
+            | TriggerMode::SearchedLibrary
+            | TriggerMode::SeekAll
+            | TriggerMode::SetInMotion
+            | TriggerMode::AsSetInMotion
+            | TriggerMode::Specializes
+            | TriggerMode::Stationed
+            | TriggerMode::Trains
+            | TriggerMode::UnlockDoor
+            | TriggerMode::VisitAttraction
+            | TriggerMode::BecomesCrewed
+            | TriggerMode::BecomesPlotted
+            | TriggerMode::BecomesSaddled
+            | TriggerMode::Immediate
+            | TriggerMode::Always
+            | TriggerMode::EntersOrAttacks
+            | TriggerMode::AttacksOrBlocks
+            | TriggerMode::BlocksOrBecomesBlocked
+            | TriggerMode::EntersOrHauntedCreatureDies
+            | TriggerMode::StateCondition
+            | TriggerMode::Airbend
+            | TriggerMode::Earthbend
+            | TriggerMode::Firebend
+            | TriggerMode::Waterbend
+            | TriggerMode::ElementalBend
+            | TriggerMode::HauntedCreatureDies
+            | TriggerMode::Unknown(..) => TriggerPlacementPart::Ordinary,
+        }
+    }
+}
+
 impl Serialize for TriggerMode {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         TriggerMode::serialize(self, serializer)
@@ -770,7 +1147,6 @@ impl FromStr for TriggerMode {
             "AbilityActivated" => TriggerMode::AbilityActivated,
             "AbilityCast" => TriggerMode::AbilityCast,
             "AbilityResolves" => TriggerMode::AbilityResolves,
-            "AbilityTriggered" => TriggerMode::AbilityTriggered,
             "Adapt" => TriggerMode::Adapt,
             "Airbend" => TriggerMode::Airbend,
             "Always" => TriggerMode::Always,
@@ -851,6 +1227,7 @@ impl FromStr for TriggerMode {
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "GotchaSaid" => TriggerMode::GotchaSaid,
+            "Touched" => TriggerMode::Touched,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
             "Exerted" => TriggerMode::Exerted,
@@ -972,9 +1349,101 @@ impl fmt::Display for TriggerMode {
     }
 }
 
+/// CR 605.1b: whether a trigger mode observes a mana event — the mode half of
+/// triggered-mana-ability classification. The current rule reads: "A triggered
+/// ability is a mana ability if ... it triggers from the activation or
+/// resolution of an activated mana ability (see rule 605.1a) or from mana
+/// being added to a player's mana pool, ...".
+///
+/// Qualifying modes (each observes only mana events, proven by its matcher):
+/// - `TapsForMana`: keyed off `TappedForMana` (CR 106.12a), emitted once per
+///   {T}-cost mana-ability resolution that produces mana.
+/// - `ManaAbilityProduced`: `ManaAbilityProduced` events only.
+/// - `ManaAdded`: `ManaAdded` events only (parser-dormant: the matcher exists
+///   but no parser producer emits the mode; included because it is
+///   mana-exclusive).
+///
+/// Excluded with reasons:
+/// - `AbilityActivated`: no mana-kind qualifier exists (only
+///   `ActivatedAbilityIsNonMana`), and zero printed activation-triggers carry
+///   a mana-adding untargeted body (55-card activation-trigger census; the
+///   sole add-mana hit, Pygmy Hippo, is Attacks-mode). A future mana-kind
+///   qualifier needs a new `TriggerCondition` + matcher axis, not a wider set.
+/// - `ManaExpend`: spend-side, not production.
+/// - `Taps`, `ChangesZone`, `SpellCast`, `Attacks`, and every other mode:
+///   observe non-mana events.
+/// - `Unknown`: fails closed (an unrecognized mode cannot prove it observes a
+///   mana event).
+///
+/// Single authority: the trigger parser's mana-ability admission and the
+/// `HasManaAbility` filter eval both call this, so the two cannot drift.
+pub fn trigger_mode_observes_mana_event(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::TapsForMana | TriggerMode::ManaAdded | TriggerMode::ManaAbilityProduced
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 603.3b: a trigger condition that is another ability triggering is
+    /// placed in the second part; every other condition, including an ability
+    /// resolving, in the first.
+    #[test]
+    fn placement_part_separates_ability_triggering_conditions() {
+        use crate::types::statics::TriggerCause;
+        let second = [
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::CreatureAttacking,
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::Any,
+            },
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Triggered,
+            },
+        ];
+        for mode in &second {
+            assert_eq!(
+                mode.placement_part(),
+                TriggerPlacementPart::ObservesAbilityTriggering,
+                "{mode:?}"
+            );
+        }
+        let first = [
+            TriggerMode::FinalSagaChapterAbility {
+                lifecycle: AbilityLifecyclePoint::Resolved,
+            },
+            TriggerMode::Attacks,
+            TriggerMode::ChangesZone,
+            TriggerMode::CounterAdded,
+            TriggerMode::BecomesTarget,
+            TriggerMode::CommitCrime,
+            TriggerMode::Unknown("x".to_string()),
+        ];
+        for mode in &first {
+            assert_eq!(
+                mode.placement_part(),
+                TriggerPlacementPart::Ordinary,
+                "{mode:?}"
+            );
+        }
+        assert!(TriggerPlacementPart::Ordinary < TriggerPlacementPart::ObservesAbilityTriggering);
+    }
 
     #[test]
     fn parse_known_trigger_modes() {
@@ -1215,6 +1684,47 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
+    /// CR 603.2 + CR 603.3b: the three printed observer shapes (Firebender
+    /// Ascension, Aboleth Spawn, Strict Proctor) survive a serde round trip
+    /// through the normalizing `Deserialize`.
+    #[test]
+    fn ability_triggered_printed_shapes_round_trip() {
+        use crate::types::statics::TriggerCause;
+        let modes = vec![
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::CreatureAttacking,
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::CausingObject,
+            },
+            TriggerMode::AbilityTriggered {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant: crate::types::statics::CausingObject::Any,
+                },
+                source: CausedAbilitySource::Any,
+            },
+        ];
+        let json = serde_json::to_string(&modes).unwrap();
+        let decoded: Vec<TriggerMode> = serde_json::from_str(&json).unwrap();
+        assert_eq!(modes, decoded);
+    }
+
+    /// The bare Forge string carries no cause or source, so it cannot name a
+    /// D1 shape: it falls to `Unknown` instead of a parameterless observer.
+    #[test]
+    fn ability_triggered_forge_string_is_unknown() {
+        assert_eq!(
+            TriggerMode::from_str("AbilityTriggered").unwrap(),
+            TriggerMode::Unknown("AbilityTriggered".to_string())
+        );
+    }
+
     #[test]
     fn trigger_mode_count_at_least_141() {
         let modes = [
@@ -1222,7 +1732,6 @@ mod tests {
             "AbilityActivated",
             "AbilityCast",
             "AbilityResolves",
-            "AbilityTriggered",
             "Adapt",
             "Airbend",
             "Always",
@@ -1297,6 +1806,7 @@ mod tests {
             "Evolve",
             "Evolved",
             "GotchaSaid",
+            "Touched",
             "ExcessDamage",
             "ExcessDamageAll",
             "Exerted",
@@ -1403,5 +1913,83 @@ mod tests {
             known_count >= 147,
             "Expected 147+ known trigger modes, got {known_count}"
         );
+    }
+
+    /// CR 508.1c: the subtype axis round-trips through serde in the
+    /// struct-variant form, and the legacy unit tag written before the axis
+    /// existed still decodes as its only historical meaning (every
+    /// planeswalker the protected player controls). Committed card-data and
+    /// integration fixtures may hold the legacy form, so removing the
+    /// `Deserialize` shim fails their consumers.
+    #[test]
+    fn planeswalker_subtype_round_trips_and_legacy_unit_decodes_as_unscoped() {
+        for (subtype, json) in [
+            (None, r#"{"Planeswalker":{"subtype":null}}"#),
+            (
+                Some("Jace".to_string()),
+                r#"{"Planeswalker":{"subtype":"Jace"}}"#,
+            ),
+        ] {
+            let filter = AttackTargetFilter::Planeswalker { subtype };
+            assert_eq!(serde_json::to_string(&filter).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<AttackTargetFilter>(json).unwrap(),
+                filter
+            );
+        }
+
+        // Legacy unit form -> unscoped (the shim under test).
+        assert_eq!(
+            serde_json::from_str::<AttackTargetFilter>(r#""Planeswalker""#).unwrap(),
+            AttackTargetFilter::Planeswalker { subtype: None }
+        );
+        // The legacy tag also decodes when nested, the shape fixtures hold.
+        let nested: Vec<AttackTargetFilter> = serde_json::from_str(
+            r#"["Planeswalker",{"Planeswalker":{"subtype":"Jace"}},"Player"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            nested,
+            vec![
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string())
+                },
+                AttackTargetFilter::Player,
+            ]
+        );
+        // Unknown tags still fail: the shim maps exactly one legacy form.
+        assert!(serde_json::from_str::<AttackTargetFilter>(r#""NotAFilter""#).is_err());
+    }
+
+    /// CR 605.1b: the mode half of triggered-mana-ability classification admits
+    /// exactly the three mana-event modes. `ManaAdded` is parser-dormant (no
+    /// producer) but mana-exclusive, so it is included; `Unknown` fails closed.
+    #[test]
+    fn mana_event_modes_are_exactly_the_observing_triple() {
+        for mode in [
+            TriggerMode::TapsForMana,
+            TriggerMode::ManaAbilityProduced,
+            TriggerMode::ManaAdded,
+        ] {
+            assert!(
+                trigger_mode_observes_mana_event(&mode),
+                "observes: {mode:?}"
+            );
+        }
+        for mode in [
+            TriggerMode::Unknown("X".to_string()),
+            TriggerMode::AbilityActivated,
+            TriggerMode::ManaExpend,
+            TriggerMode::Taps,
+            TriggerMode::ChangesZone,
+            TriggerMode::SpellCast,
+            TriggerMode::Attacks,
+        ] {
+            assert!(
+                !trigger_mode_observes_mana_event(&mode),
+                "excluded: {mode:?}"
+            );
+        }
     }
 }

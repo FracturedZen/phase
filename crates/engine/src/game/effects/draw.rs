@@ -110,6 +110,7 @@ pub fn preview_draw_delivery(
         requested,
         HashSet::new(),
         DrawSequenceOrigin::Plain,
+        None,
         &mut events,
     ) {
         DrawSequenceOutcome::Completed { delivered, .. }
@@ -153,6 +154,12 @@ pub(crate) fn allowed_draw_count(
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
         return 0;
     };
+    // CR 800.4a: a player who has left the game is no longer a player in it and
+    // draws nothing; a draw still owed to them is an event that can't happen
+    // (CR 614.17c), like one a can't-draw effect forbids.
+    if player.is_eliminated {
+        return 0;
+    }
 
     let mut allowed = count;
     // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
@@ -351,11 +358,17 @@ pub fn resolve(
     // (num_cards > 1) performs that many individual card draws, each offered
     // replacement independently, instead of the whole count being replaced or
     // drawn as one atomic batch.
+    // CR 608.2c: a draw directly followed by a "… this way" head naming an
+    // earlier instruction holds that instruction's ledger on its frame, so a
+    // replacement of one of its draws cannot leave its own result for the head.
+    let this_way_antecedent_ledger = super::keeps_this_way_ledger_for_following_head(ability)
+        .then(|| state.last_zone_changed_ids.clone());
     match start_draw_sequence_with_replacement_applied(
         state,
         drawing_player,
         num_cards,
         ability.replacement_applied.clone(),
+        this_way_antecedent_ledger,
         events,
     ) {
         ReplacementResult::Execute(_) | ReplacementResult::Prevented => {}
@@ -498,16 +511,19 @@ fn start_draw_sequence_with_replacement_applied(
     player: crate::types::player::PlayerId,
     count: u32,
     applied: HashSet<AppliedReplacementKey>,
+    this_way_antecedent_ledger: Option<Vec<ObjectId>>,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_origin(
+    start_draw_sequence_with_origin_outcome(
         state,
         player,
         count,
         applied,
         DrawSequenceOrigin::Plain,
+        this_way_antecedent_ledger,
         events,
     )
+    .into_replacement_result()
 }
 
 /// CR 121.2 + CR 121.6b: Begin a draw instruction with its completion origin.
@@ -521,7 +537,7 @@ pub(crate) fn start_draw_sequence_with_origin(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, events)
+    start_draw_sequence_with_origin_outcome(state, player, count, applied, origin, None, events)
         .into_replacement_result()
 }
 
@@ -531,6 +547,7 @@ fn start_draw_sequence_with_origin_outcome(
     count: u32,
     applied: HashSet<AppliedReplacementKey>,
     origin: DrawSequenceOrigin,
+    this_way_antecedent_ledger: Option<Vec<ObjectId>>,
     events: &mut Vec<GameEvent>,
 ) -> DrawSequenceOutcome {
     let Some(frame_id) =
@@ -538,6 +555,12 @@ fn start_draw_sequence_with_origin_outcome(
     else {
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
+    if this_way_antecedent_ledger.is_some() {
+        state
+            .draw_sequence_frame_mut(frame_id)
+            .expect("a newly pushed draw instruction is live")
+            .this_way_antecedent_ledger = this_way_antecedent_ledger;
+    }
     if let ControlFlow::Break(parked) =
         consult_draw_instruction(state, frame_id, player, count, applied, events)
     {
@@ -572,7 +595,7 @@ fn consult_draw_instruction(
         frame.applied = applied;
         return ControlFlow::Continue(());
     }
-    let result = draw_through_replacement_with_applied(
+    let (result, substitute_prompt) = draw_through_replacement_with_applied(
         state,
         player,
         count,
@@ -581,7 +604,10 @@ fn consult_draw_instruction(
         events,
         |state, event, _events| settle_draw_instruction(state, event),
     );
+    // CR 614.11a + CR 121.6b: a replacing action that asks for a choice is
+    // completed before the sequence resumes.
     let resumable = !matches!(result, ReplacementResult::NeedsChoice(_))
+        && substitute_prompt.is_none()
         && state
             .active_draw_sequence()
             .is_some_and(|frame| frame.frame_id == frame_id);
@@ -731,7 +757,7 @@ fn resume_draw_sequence_outcome(
         let (player, applied) = frame.begin_next_unit();
 
         let mut unit_drawn: u32 = 0;
-        let result = draw_through_replacement_with_applied(
+        let (result, substitute_prompt) = draw_through_replacement_with_applied(
             state,
             player,
             1,
@@ -760,9 +786,16 @@ fn resume_draw_sequence_outcome(
                 if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
                 }
+                // CR 614.11a + CR 121.6b: when the action replacing this draw
+                // asks a player to choose ("each player returns a permanent they
+                // control … instead"), the whole replacement is completed before
+                // the sequence resumes. The frame stays parked with its cursor
+                // past this unit; the priority-time frame drain resumes it once
+                // the replacement has finished.
                 if state
                     .active_draw_sequence()
                     .is_none_or(|frame| frame.frame_id != frame_id)
+                    || substitute_prompt.is_some()
                 {
                     return DrawSequenceOutcome::Parked(ReplacementResult::NeedsChoice(
                         state
@@ -783,6 +816,13 @@ fn resume_draw_sequence_outcome(
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     };
+    // CR 608.2c + CR 121.6b + CR 614.11a: every replacement of this
+    // instruction's draws has completed, including any action that ran as its
+    // own chain and published its own ledger; restore the earlier instruction's
+    // ledger for the "… this way" head that follows this draw.
+    if let Some(ledger) = frame.this_way_antecedent_ledger.take() {
+        state.last_zone_changed_ids = ledger;
+    }
     if !credit_completed_draw_child_result(state, &frame) {
         return DrawSequenceOutcome::Parked(ReplacementResult::Prevented);
     }
@@ -895,8 +935,19 @@ pub(crate) fn plan_simultaneous_draw(
     state: &GameState,
     seats: &[(crate::types::player::PlayerId, ResolvedAbility)],
 ) -> Option<Vec<DrawDealerSeat>> {
+    if state.format_config.format.shared_zones().library != ZoneScope::Shared {
+        return None;
+    }
+    plan_coordinated_draw(state, seats)
+}
+
+/// CR 121.2a + CR 608.2e: Settle all drawers' counts before the first card
+/// moves. The dealer reads the appropriate library for each scheduled draw.
+pub(super) fn plan_coordinated_draw(
+    state: &GameState,
+    seats: &[(crate::types::player::PlayerId, ResolvedAbility)],
+) -> Option<Vec<DrawDealerSeat>> {
     if seats.len() < 2
-        || state.format_config.format.shared_zones().library != ZoneScope::Shared
         || state
             .active_draw_sequence()
             .is_some_and(|frame| frame.capture_next_child_delivery)
@@ -1024,6 +1075,10 @@ fn settle_dealer_seat(
 /// draw sequences use this authority to resume replacement continuations.
 /// `stage` is which of the two draw proposals this is (CR 121.2a): the whole
 /// instruction, or one of its individual draws.
+///
+/// Alongside the replacement result it returns the prompt a substitute left
+/// open (`Some` when the replacing action itself asks a player to choose, e.g.
+/// "each player returns a permanent they control … instead").
 fn draw_through_replacement_with_applied(
     state: &mut GameState,
     player_id: crate::types::player::PlayerId,
@@ -1032,7 +1087,10 @@ fn draw_through_replacement_with_applied(
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
     apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> replacement::ReplacementResult {
+) -> (
+    replacement::ReplacementResult,
+    Option<crate::types::game_state::WaitingFor>,
+) {
     let proposed = ProposedEvent::Draw {
         player_id,
         count,
@@ -1040,13 +1098,15 @@ fn draw_through_replacement_with_applied(
         applied,
     };
     let result = replacement::replace_event(state, proposed, events);
+    let mut substitute_prompt = None;
     match &result {
         ReplacementResult::Execute(event) => {
             apply_executed(state, event.clone(), events);
             if state.has_post_replacement_drain() {
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                substitute_prompt =
+                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    );
             }
         }
         ReplacementResult::Prevented => {}
@@ -1055,7 +1115,7 @@ fn draw_through_replacement_with_applied(
                 crate::game::replacement::replacement_choice_waiting_for(*player, state);
         }
     }
-    result
+    (result, substitute_prompt)
 }
 
 /// CR 121.1: Apply a post-replacement `ProposedEvent::Draw` to the game state.
@@ -1279,16 +1339,18 @@ fn enqueue_miracle_offer_for_first_draw(
     }
     // CR 702.94a: Static ability functions from hand — check the drawn object's
     // effective keywords (printed + continuous grants like Molecule Man's hand
-    // miracle). `effective_off_zone_keywords` is the object-scoped authority for
-    // non-battlefield zones; if layers remove miracle before draw resolution the
-    // offer simply never queues.
-    let miracle_cost =
-        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
-            .into_iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
-                _ => None,
-            });
+    // miracle). `effective_off_zone_keyword` is the object-scoped single-instance
+    // authority for non-battlefield zones; if layers remove miracle before draw
+    // resolution the offer simply never queues.
+    let miracle_cost = crate::game::off_zone_characteristics::effective_off_zone_keyword(
+        state,
+        object_id,
+        crate::types::keywords::KeywordKind::Miracle,
+    )
+    .and_then(|k| match k {
+        crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
+        _ => None,
+    });
     let Some(cost) = miracle_cost else {
         return;
     };
@@ -2167,6 +2229,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 };
             }),
             ("another drawer", |ability| {
@@ -2319,6 +2382,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -2394,6 +2459,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,

@@ -8,6 +8,7 @@ import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.t
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { useTargetingPromptStore } from "../../stores/targetingPromptStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
   boardChoiceSelectedPower,
@@ -337,6 +338,9 @@ export function TargetingOverlay() {
                         ? t("targeting.chooseTargetOf", { current: Math.min(currentTargetSlot + 1, targetSlots.length), total: targetSlots.length })
                         : t("targeting.chooseTarget")
                       );
+  const affectedObject = boardChoice?.affectedObject != null
+    ? objects?.[boardChoice.affectedObject]
+    : undefined;
 
   // The engine description is free-form text of unbounded length. Collapsed it
   // is the tail of a single caption line, so the line's ellipsis is what bounds
@@ -351,6 +355,41 @@ export function TargetingOverlay() {
   const descriptionToggleAction = descriptionExpanded
     ? t("targeting.collapseDescription")
     : t("targeting.expandDescription");
+
+  // The stack panel docks on a layer below this overlay, so this block drawn
+  // over it hides the panel's header, which holds the only control that moves
+  // the panel to the other side of the board (#11004). The block publishes
+  // its top and bottom edges, and the panel keeps its header clear of them.
+  // Two kinds of change move the edges, so they are measured on both: every
+  // commit (the effect has no dependency list), which sees the page's
+  // `--game-targeting-prompt-top` and this block's own content, such as a new
+  // instruction or the description expanding; and every resize of the block,
+  // which sees what changes without a commit, such as the viewport width
+  // re-wrapping the instruction.
+  const setPromptEdges = useTargetingPromptStore((s) => s.setEdges);
+  const promptBlockRef = useRef<HTMLDivElement | null>(null);
+  const measurePromptEdges = useCallback(() => {
+    const block = promptBlockRef.current;
+    if (!block) return;
+    const { top, bottom } = block.getBoundingClientRect();
+    setPromptEdges({ topPx: top, bottomPx: bottom });
+  }, [setPromptEdges]);
+  useLayoutEffect(() => measurePromptEdges());
+  // A ref callback rather than an effect: the block exists only past the early
+  // returns below, and the callback's cleanup runs exactly when the block
+  // leaves the DOM, which is when the published edges must drop back to 0.
+  const attachPromptBlock = useCallback((block: HTMLDivElement) => {
+    promptBlockRef.current = block;
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(measurePromptEdges);
+    observer?.observe(block);
+    return () => {
+      observer?.disconnect();
+      promptBlockRef.current = null;
+      setPromptEdges({ topPx: 0, bottomPx: 0 });
+    };
+  }, [measurePromptEdges, setPromptEdges]);
 
   const handleCancel = useCallback(() => {
     dispatch({ type: "CancelCast" });
@@ -571,6 +610,8 @@ export function TargetingOverlay() {
             instruction to ONE line is what keeps it clear where it clears, not
             a number. */}
         <div
+          ref={attachPromptBlock}
+          data-targeting-prompt
           className="absolute left-0 right-0 flex flex-col items-center gap-1 px-2"
           style={{ top: "var(--game-targeting-prompt-top, 0.25rem)" }}
         >
@@ -591,6 +632,14 @@ export function TargetingOverlay() {
             <div className="text-center text-lg font-semibold text-cyan-400 leading-snug line-clamp-2">
               <RichLabel text={overlayPrompt} />
             </div>
+            {boardChoice?.effectDescription && (
+              <p className="text-center text-xs text-gray-400">{boardChoice.effectDescription}</p>
+            )}
+            {affectedObject && (
+              <p className="text-center text-xs text-gray-300">
+                {t("boardChoice.prompt.protectedObject", { object: affectedObject.name })}
+              </p>
+            )}
             {promptMeta.length > 0 && (
               <div className="flex w-full items-center justify-center gap-x-2 text-xs">
                 <div ref={descriptionLineRef} className="min-w-0 truncate">
@@ -920,6 +969,9 @@ function boardChoicePrompt(
   objects: Record<number, GameObject> | undefined,
   t: TFunction<"game">,
 ): string {
+  if (choice.blightCounters !== undefined) {
+    return t("boardChoice.prompt.blightCounters", { count: choice.blightCounters });
+  }
   const action = t(`boardChoice.actions.${choice.intent}`);
   switch (choice.selection.type) {
     case "single":
@@ -982,7 +1034,9 @@ function boardChoiceConfirmLabel(
         count: choice.selection.count,
       });
     case "rangeCount":
-      if (selectedIds.length === 0 && choice.selection.min === 0) {
+      // A keep with nothing selected is a real choice (it sacrifices the
+      // rest), so it reads "Confirm (0/N)", never "Skip".
+      if (selectedIds.length === 0 && choice.selection.min === 0 && choice.intent !== "keep") {
         return t("boardChoice.skip");
       }
       if (choice.intent === "sacrifice") {
@@ -1032,6 +1086,8 @@ function boardChoiceConfirmClass(choice: BoardChoiceView): string {
 
 function boardChoiceSkipLabel(choice: BoardChoiceView, t: TFunction<"game">): string {
   switch (choice.skipLabel) {
+    case "decline":
+      return t("gamePage.unlessPayment.dontPay");
     case "keepTapped":
       return t("gamePage.untap.keepTapped");
     case undefined:

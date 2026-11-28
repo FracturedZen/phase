@@ -65,6 +65,7 @@ function readPickInteraction(): DraftPickInteractionSnapshot {
   const state = useDraftStore.getState();
   return {
     interactionGeneration: state.interactionGeneration,
+    interactionGenerationCause: state.interactionGenerationCause,
     pickInteractionLocked: state.pickInteractionLocked,
     pendingPickIntent: state.pendingPickIntent,
   };
@@ -877,7 +878,7 @@ export function DraftPage() {
               onRemoveBasicLand: (name) => useDraftStore.getState().removeBasicLand(name),
               onAutoSuggestDeck: () => useDraftStore.getState().autoSuggestDeck(),
               onAutoSuggestLands: () => useDraftStore.getState().autoSuggestLands(),
-              onSubmitDeck: () => useDraftStore.getState().submitDeck(),
+              onSubmitDeck: (commanders, companion) => useDraftStore.getState().submitDeck(commanders, companion),
               onCardHover: setHoveredCard,
             }}
           />

@@ -304,6 +304,34 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], undefined)).toBe(true);
   });
 
+  it("maps Ward Blight to a singleton choice with an explicit decline", () => {
+    const choice = getBoardChoiceView({
+      type: "UnlessBlightChoice",
+      data: {
+        player: 1,
+        counters: 2,
+        creatures: [10, 11],
+        pending_effect: {},
+        cost: { type: "Blight", count: 2 },
+        remaining: [],
+        affected_object: 20,
+        effect_description: "Ward",
+      },
+    });
+    expect(choice).toEqual({
+      player: 1,
+      objectIds: [10, 11],
+      intent: "blight",
+      blightCounters: 2,
+      affectedObject: 20,
+      effectDescription: "Ward",
+      selection: { type: "exactCount", count: 1 },
+      response: { type: "SelectCards" },
+      skipAction: { type: "PayUnlessCost", data: { pay: false } },
+      skipLabel: "decline",
+    });
+  });
+
   it("maps PayCost ReturnToHand to a confirmed board choice", () => {
     const choice = getBoardChoiceView(
       {
@@ -734,6 +762,28 @@ describe("getBoardChoiceView", () => {
 
     expect(choice).not.toBeNull();
     expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
+  });
+
+  it("maps an up-to keeper's engine bounds to a range that confirms with nothing kept", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10],
+        required_count: 2,
+        minimum_count: 0,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    if (!choice) return;
+    expect(choice.selection).toEqual({ type: "rangeCount", min: 0, max: 2 });
+    expect(canConfirmBoardChoice(choice, [], undefined)).toBe(true);
   });
 
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
@@ -1215,6 +1265,7 @@ const PARTITION_FIXTURES: Record<
   GameOver: NO_TARGET_REF_LEGAL_SET,
   ReplacementChoice: NO_TARGET_REF_LEGAL_SET,
   EntryControllerChoice: NO_TARGET_REF_LEGAL_SET,
+  ReplacementDecisionOrder: NO_TARGET_REF_LEGAL_SET,
   OrderTriggers: NO_TARGET_REF_LEGAL_SET,
   CopyTargetChoice: NO_TARGET_REF_LEGAL_SET,
   ExploreChoice: NO_TARGET_REF_LEGAL_SET,
@@ -1263,6 +1314,7 @@ const PARTITION_FIXTURES: Record<
   MiracleReveal: NO_TARGET_REF_LEGAL_SET,
   PayCost: NO_TARGET_REF_LEGAL_SET,
   BlightChoice: NO_TARGET_REF_LEGAL_SET,
+  UnlessBlightChoice: NO_TARGET_REF_LEGAL_SET,
   PayManaAbilityMana: NO_TARGET_REF_LEGAL_SET,
   ManaAbilityManaPayment: NO_TARGET_REF_LEGAL_SET,
   ChooseManaColor: NO_TARGET_REF_LEGAL_SET,
@@ -1307,7 +1359,7 @@ const PARTITION_FIXTURES: Record<
   ChooseFromZoneChoice: NO_TARGET_REF_LEGAL_SET,
   BeholdChoice: NO_TARGET_REF_LEGAL_SET,
   EmpowerJaceChoice: NO_TARGET_REF_LEGAL_SET,
-  SpellCopyOrderChoice: NO_TARGET_REF_LEGAL_SET,
+  MemberOrderChoice: NO_TARGET_REF_LEGAL_SET,
   EffectZoneChoice: NO_TARGET_REF_LEGAL_SET,
   DrawnThisTurnTopdeckChoice: NO_TARGET_REF_LEGAL_SET,
   AssistChoosePlayer: NO_TARGET_REF_LEGAL_SET,
@@ -1318,6 +1370,7 @@ const PARTITION_FIXTURES: Record<
   ManifestDreadChoice: NO_TARGET_REF_LEGAL_SET,
   LearnChoice: NO_TARGET_REF_LEGAL_SET,
   ClashChooseOpponent: NO_TARGET_REF_LEGAL_SET,
+  ChooseStartingPlayer: NO_TARGET_REF_LEGAL_SET,
   ChooseFromZoneOpponentChooser: NO_TARGET_REF_LEGAL_SET,
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,

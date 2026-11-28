@@ -28,12 +28,13 @@ use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, Effect, EffectScope,
-    PlayerChoiceDistinctness, PtValue, QuantityExpr, TapStateChange, TargetFilter,
-    TargetSelectionMode, TypedFilter,
+    AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef, Effect,
+    EffectScope, PlayerChoiceDistinctness, PtValue, QuantityExpr, StaticDefinition, TapStateChange,
+    TargetFilter, TargetSelectionMode, TypedFilter,
 };
 use engine::types::events::GameEvent;
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -206,7 +207,7 @@ fn shipped_self_attached_role_cards_keep_their_role() {
         ),
     ] {
         if db.get_face_by_name(card).is_none() {
-            eprintln!("skipping: {card} is not in integration_cards.json.gz");
+            eprintln!("skipping: {card} is not in integration_cards/");
             continue;
         }
         let mut scenario = GameScenario::new();
@@ -261,9 +262,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
         return;
     };
     if db.get_face_by_name("Asinine Antics").is_none() {
-        eprintln!(
-            "skipping the shipped replay: Asinine Antics is not in integration_cards.json.gz"
-        );
+        eprintln!("skipping the shipped replay: Asinine Antics is not in integration_cards/");
         return;
     }
     let mut scenario = GameScenario::new();
@@ -287,6 +286,7 @@ fn for_each_role_tokens_enchant_their_own_iteration_host() {
 
 fn role_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Monster Role".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -306,6 +306,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 
@@ -313,8 +314,13 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
 /// enchantment token whose host filter names a PLAYER. Used where the row has to
 /// distinguish a player host from an object host, so the token is a Curse rather
 /// than a Role (CR 303.4: a Curse is the Aura subclass that enchants players).
+///
+/// Like the export, the token carries "enchant player" as an unconditional
+/// `SelfRef` keyword grant (CR 111.3 + CR 702.5a): without an enchant
+/// restriction the Aura has no stated player host and cannot legally enchant one.
 fn curse_token_effect(attach_to: TargetFilter) -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Selenia's Curse".to_string(),
         power: PtValue::Fixed(0),
         toughness: PtValue::Fixed(0),
@@ -332,8 +338,13 @@ fn curse_token_effect(attach_to: TargetFilter) -> Effect {
         enters_attacking: false,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
-        static_abilities: Vec::new(),
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Player),
+            }])],
         enter_with_counters: Vec::new(),
+        additional_members: Vec::new(),
     }
 }
 
@@ -657,7 +668,7 @@ fn selenias_curse_enchants_the_targeted_opponent() {
     };
     let card = "Selenia, the Cursed Heart";
     if db.get_face_by_name(card).is_none() {
-        eprintln!("skipping: {card} is not in integration_cards.json.gz");
+        eprintln!("skipping: {card} is not in integration_cards/");
         return;
     }
 

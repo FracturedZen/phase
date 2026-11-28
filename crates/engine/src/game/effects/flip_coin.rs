@@ -296,9 +296,8 @@ impl FlipRun<'_> {
     ///
     /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
     /// retain their owning scope, including explicit emptiness; legacy missing scope
-    /// is not reconstructed. A die roll started by a coin's continuation drain still
-    /// loses its published per-survivor result at the drain's whole-snapshot restore
-    /// (pre-existing, unchanged).
+    /// is not reconstructed. Continuation die-result handoff follows
+    /// [`crate::game::effects::drain_pending_continuation`].
     ///
     /// CR 705.3: the frame does not carry the run's `set`. A set with an indicated
     /// result settles every flip inline (`flip_through_replacement`), so only an
@@ -971,6 +970,7 @@ mod tests {
         let win_effect = Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Token {
+                enters_blocking: None,
                 name: "Coin Token".to_string(),
                 power: crate::types::ability::PtValue::Fixed(1),
                 toughness: crate::types::ability::PtValue::Fixed(1),
@@ -987,6 +987,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
         ));
         let ability = bound_coin(
@@ -1100,6 +1101,8 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,
@@ -1131,6 +1134,8 @@ mod tests {
             let mut def = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Battlefield,
                     target: TargetFilter::ParentTarget,
@@ -1393,6 +1398,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(2),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1475,6 +1482,8 @@ mod tests {
             object_id: spell_id,
             card_id: CardId(2),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let ability = build_resolved_from_def(execute, krark_id, PlayerId(0));
@@ -1604,6 +1613,8 @@ mod tests {
             object_id: ObjectId(999),
             card_id: CardId(2),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         let ability =
@@ -1644,6 +1655,8 @@ mod tests {
             object_id: ObjectId(999),
             card_id: CardId(2),
             cast_mana_value: None,
+            cast_mana_spent: None,
+            cast_incarnation: None,
         });
 
         // Lose branch: "that player loses 3 life" — bound to TriggeringPlayer so

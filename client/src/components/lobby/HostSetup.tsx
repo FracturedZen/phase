@@ -10,8 +10,9 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
+import { U8_MAX } from "../../adapter/types";
 import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
-import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
+import { FORMAT_REGISTRY, formatSuppliesDeck, isArchenemyFamilyFormat, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -29,7 +30,7 @@ import type {
 import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { submitCandidateSeatDeck, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   cedhSeatProblem,
   pickAiSeatDecks,
@@ -53,8 +54,7 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
-import { bracketToEngineTier } from "../../types/bracketEstimate";
+import { captureSubmissionArtPreferences } from "../../services/deckSubmission";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -789,6 +789,12 @@ export function HostSetup({
     }
     // Remove AI seats that exceed the new count (seat 0 is always the host)
     setAiSeats((prev) => prev.filter((s) => s.seatIndex < count));
+    // A picked archenemy seat strands when the table shrinks below it. Clamp
+    // to the last seat (a guest seat), preserving the "someone else is the
+    // archenemy" intent rather than silently handing the role to the host.
+    if (isArchenemyFamilyFormat(formatConfig.format) && (formatConfig.archenemy_player ?? 0) >= count) {
+      setLocalFormatConfig((prev) => ({ ...prev, archenemy_player: count - 1 }));
+    }
   };
 
   // A format whose MINIMUM exceeds the P2P ceiling cannot be clamped into
@@ -887,7 +893,7 @@ export function HostSetup({
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...await submitParsedDeck(picks[i].deck, snapshot), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: await submitCandidateSeatDeck(picks[i], snapshot),
       },
     })));
   };
@@ -903,7 +909,15 @@ export function HostSetup({
     setIsSubmitting(true);
     try {
       // The submission uses the chosen count; persistence keeps the format ceiling.
-      const finalConfig = { ...formatConfig, max_players: playerCount };
+      let finalConfig = { ...formatConfig, max_players: playerCount };
+      // Belt-and-braces: a stranded archenemy seat (a click beating the
+      // clamp to the commit boundary) must not submit past the table edge.
+      if (
+        isArchenemyFamilyFormat(finalConfig.format) &&
+        (finalConfig.archenemy_player ?? 0) >= playerCount
+      ) {
+        finalConfig = { ...finalConfig, archenemy_player: playerCount - 1 };
+      }
       // Resolve Random locally: the server uses a different starter-deck pool.
       // The batch captures one art authority, while remembered seats stay selections.
       const submittedAiSeats: AiSeatConfig[] = suppliesDeck
@@ -1213,6 +1227,26 @@ export function HostSetup({
               </Field>
             )}
 
+            {/* Archenemy seat (Archenemy family only). Seat numbers are 1-based
+                to match the seat panel below and the lobby's `Player N` names;
+                seat 0 is always the host. */}
+            {isArchenemyFamilyFormat(formatConfig.format) && (
+              <Field label={t("hostSetup.archenemySeat")}>
+                <div className={segWrap}>
+                  {Array.from({ length: playerCount }, (_, seat) => (
+                    <button
+                      type="button"
+                      key={seat}
+                      onClick={() => setLocalFormatConfig((prev) => ({ ...prev, archenemy_player: seat }))}
+                      className={seg((formatConfig.archenemy_player ?? 0) === seat)}
+                    >
+                      {seat === 0 ? t("hostSetup.youHost") : t("hostSetup.seat", { number: seat + 1 })}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+            )}
+
             <Field label={t("hostSetup.matchType")}>
               <div className={segWrap}>
                 <button type="button" onClick={() => setMatchType("Bo1")} className={seg(effectiveMatchType === "Bo1")}>
@@ -1280,10 +1314,30 @@ export function HostSetup({
                 id="host-setup-cmd-dmg"
                 value={formatConfig.commander_damage_threshold ?? 21}
                 min={1}
+                max={255}
                 onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,
                     commander_damage_threshold: threshold,
+                  }))
+                }
+                className={inp}
+              />
+            </Field>
+          )}
+
+          {/* Individual poison-loss threshold (CR 704.5c; absent in Two-Headed Giant) */}
+          {formatConfig.poison_counter_threshold != null && (
+            <Field label={t("hostSetup.poisonCounters")} htmlFor="host-setup-poison">
+              <IntegerField
+                id="host-setup-poison"
+                value={formatConfig.poison_counter_threshold}
+                min={1}
+                max={U8_MAX}
+                onCommit={(poison_counter_threshold) =>
+                  setLocalFormatConfig((prev) => ({
+                    ...prev,
+                    poison_counter_threshold,
                   }))
                 }
                 className={inp}

@@ -88,6 +88,8 @@ fn exile_three_branch() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Owned {
@@ -124,7 +126,7 @@ fn sacrifice_food_branch() -> AbilityDefinition {
                     .controller(ControllerRef::You)
                     .subtype("Food".to_string()),
             ),
-            count: QuantityExpr::Fixed { value: 1 },
+            count: QuantityExpr::Fixed { value: 1 }.into(),
             min_count: 1,
         },
     )

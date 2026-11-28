@@ -22,9 +22,10 @@ use lobby_broker::validation::{
     validate_end_tournament_fields, validate_get_tournament_fields,
     validate_join_tournament_fields, validate_renew_tournament_credential_fields,
     validate_report_match_result_fields, validate_start_tournament_round_fields,
-    validate_unregister_lobby_fields, validate_update_lobby_metadata_fields,
-    CreateTournamentFields, DropFromTournamentFields, EndTournamentFields, JoinTournamentFields,
-    RenewTournamentCredentialFields, ReportMatchResultFields, StartTournamentRoundFields,
+    validate_submit_tournament_deck_fields, validate_unregister_lobby_fields,
+    validate_update_lobby_metadata_fields, CreateTournamentFields, DropFromTournamentFields,
+    EndTournamentFields, JoinTournamentFields, RenewTournamentCredentialFields,
+    ReportMatchResultFields, StartTournamentRoundFields, SubmitTournamentDeckFields,
     UpdateLobbyMetadataFields,
 };
 
@@ -33,7 +34,7 @@ use crate::client_hello_guard::guard_client_hello;
 use crate::draft_action_payload_guard::guard_draft_action_payload;
 use crate::draft_wire_guard::{
     guard_create_draft_with_settings, guard_draft_action, guard_join_draft_with_password,
-    guard_reconnect_draft,
+    guard_native_fifo_policy, guard_reconnect_draft,
 };
 use crate::emote_guard::guard_emote;
 use crate::game_action_payload_guard::guard_game_action_payload;
@@ -69,11 +70,11 @@ fn guard_booster_pack_pool(pool: &Option<Vec<String>>, ranked: bool) -> Result<(
 
 /// Validate wire fields for any inbound `ClientMessage` before handler work.
 ///
-/// `mode` is used for variants whose policy differs between Full and LobbyOnly
-/// (currently none reject here — mode gating stays in `reject_if_disabled`).
+/// `mode` is used for variants whose policy differs between Full and LobbyOnly.
+/// Full mode re-runs the strict format-config gate that lobby decoding relaxes.
 pub fn guard_client_message_before_dispatch(
     msg: &ClientMessage,
-    _mode: ServerMode,
+    mode: ServerMode,
 ) -> Result<(), String> {
     match msg {
         ClientMessage::ClientHello {
@@ -169,7 +170,13 @@ pub fn guard_client_message_before_dispatch(
                 requested_code: requested_code.as_deref(),
             })?;
             guard_create_ai_seats(ai_seats, *player_count)?;
-            guard_booster_pack_pool(booster_pack_pool, *ranked)
+            guard_booster_pack_pool(booster_pack_pool, *ranked)?;
+            if matches!(mode, ServerMode::Full) {
+                if let Some(config) = format_config {
+                    config.check_strict_admission()?;
+                }
+            }
+            Ok(())
         }
         ClientMessage::JoinGameWithPassword {
             game_code,
@@ -264,6 +271,16 @@ pub fn guard_client_message_before_dispatch(
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -287,16 +304,21 @@ pub fn guard_client_message_before_dispatch(
             token,
             rotation_nonce,
         }),
+        // Every field is bound by name, so a field added later cannot pass
+        // this guard unconsidered.
         ClientMessage::CreateDraftWithSettings {
             display_name,
             source,
             set_codes,
+            kind,
+            public: _,
             password,
             timer_seconds,
-            pod_size,
-            kind,
             tournament_format,
-            ..
+            pod_policy: _,
+            pod_size,
+            fifo_policy,
+            request_id: _,
         } => {
             // Normalize the new tagged object and legacy root spelling before
             // validating any candidate token or touching a pool map.
@@ -309,20 +331,27 @@ pub fn guard_client_message_before_dispatch(
                 *pod_size,
                 *kind,
                 *tournament_format,
-            )
+            )?;
+            guard_native_fifo_policy(fifo_policy.as_ref())
         }
         ClientMessage::JoinDraftWithPassword {
             draft_code,
             display_name,
             password,
+            request_id: _,
         } => guard_join_draft_with_password(draft_code, display_name, password),
-        ClientMessage::DraftAction { draft_code, action } => {
+        ClientMessage::DraftAction {
+            draft_code,
+            action,
+            request_id: _,
+        } => {
             guard_draft_action(draft_code)?;
             guard_draft_action_payload(action)
         }
         ClientMessage::ReconnectDraft {
             draft_code,
             player_token,
+            request_id: _,
         } => guard_reconnect_draft(draft_code, player_token),
         ClientMessage::SpectateDraft { draft_code } => guard_spectate_draft(draft_code),
     }
@@ -366,6 +395,31 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
             request_id: request.request_id.clone(),
             message: reason,
         },
+        // A `SubmitTournamentDeck` bounds failure IS routinely trippable by a
+        // non-hostile client: unlike the other tournament frames (a name or token
+        // field), its `DeckData` can legitimately approach the per-list caps, and
+        // an over-budget deck is a rejected submission rather than a malformed
+        // frame. It also adopts the optional tournament correlation contract, so a
+        // correlated submission settles as a correlated `TournamentActionRejected`
+        // — the client's correlated authority ignores a bare `Error`. An
+        // uncorrelated (`None`) submission keeps the operational-error disposal
+        // below, the same control the sibling tournament frames use.
+        ClientMessage::SubmitTournamentDeck {
+            request_id: Some(request_id),
+            ..
+        } => ServerMessage::TournamentActionRejected {
+            request_id: *request_id,
+            message: reason,
+        },
+        // A native draft command carries its own request id, and every refusal
+        // it receives, before dispatch or in it, answers that id on the
+        // requesting socket, so the client settles that one command.
+        ClientMessage::CreateDraftWithSettings { request_id, .. }
+        | ClientMessage::JoinDraftWithPassword { request_id, .. }
+        | ClientMessage::DraftAction { request_id, .. }
+        | ClientMessage::ReconnectDraft { request_id, .. } => {
+            ServerMessage::draft_rejected(*request_id, reason)
+        }
 
         // Every remaining variant keeps the operational-error behavior: a
         // bounds failure on these is a malformed frame, not a rejected game
@@ -394,10 +448,6 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::UpdateLobbyMetadata { .. }
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::UnregisterLobby { .. }
-        | ClientMessage::CreateDraftWithSettings { .. }
-        | ClientMessage::JoinDraftWithPassword { .. }
-        | ClientMessage::DraftAction { .. }
-        | ClientMessage::ReconnectDraft { .. }
         | ClientMessage::SpectateDraft { .. }
         | ClientMessage::RequestTakeback(_)
         | ClientMessage::RespondTakeback { .. }
@@ -413,6 +463,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::GetTournament { .. }
         | ClientMessage::StartTournamentRound { .. }
         | ClientMessage::ReportMatchResult { .. }
+        | ClientMessage::SubmitTournamentDeck { .. }
         | ClientMessage::DropFromTournament { .. }
         | ClientMessage::EndTournament { .. }
         | ClientMessage::RenewTournamentCredential { .. } => ServerMessage::error(reason),
@@ -542,6 +593,16 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
             player_token,
             outcome,
         }),
+        ClientMessage::SubmitTournamentDeck {
+            code,
+            player_token,
+            deck,
+            request_id: _,
+        } => validate_submit_tournament_deck_fields(SubmitTournamentDeckFields {
+            code,
+            player_token,
+            deck,
+        }),
         ClientMessage::DropFromTournament {
             code,
             player_token,
@@ -647,6 +708,7 @@ mod tests {
         ManaSourceSelection, ManaType, TapsForManaSelection,
     };
     use engine::types::{GameAction, ObjectId};
+    use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
     #[test]
@@ -711,6 +773,35 @@ mod tests {
             requested_code: requested_code.map(str::to_string),
             booster_pack_pool,
         }
+    }
+
+    /// CR 903.12h: Full mode runs the config, so a recorded Brawl threshold the
+    /// lobby relay admits is refused there; today's configs pass.
+    #[test]
+    fn full_mode_refuses_a_recorded_legacy_format_config() {
+        use engine::types::format::FormatConfig;
+        let with_config = |config: FormatConfig| {
+            let mut msg = create_game_with_settings(false, None, None);
+            if let ClientMessage::CreateGameWithSettings { format_config, .. } = &mut msg {
+                *format_config = Some(config);
+            }
+            msg
+        };
+        for config in [FormatConfig::brawl(), FormatConfig::historic_brawl()] {
+            let legacy = with_config(FormatConfig {
+                commander_damage_threshold: Some(21),
+                ..config.clone()
+            });
+            assert!(guard_client_message_before_dispatch(&legacy, ServerMode::LobbyOnly).is_ok());
+            let err = guard_client_message_before_dispatch(&legacy, ServerMode::Full).unwrap_err();
+            assert!(err.contains("commander_damage_threshold"), "{err}");
+            assert!(
+                guard_client_message_before_dispatch(&with_config(config), ServerMode::Full)
+                    .is_ok()
+            );
+        }
+        let commander = with_config(FormatConfig::commander());
+        assert!(guard_client_message_before_dispatch(&commander, ServerMode::Full).is_ok());
     }
 
     /// Both native dispatch guards carry the requested-code shape rule, in
@@ -1050,6 +1141,18 @@ mod tests {
                 },
             ),
             (
+                "deck.main_deck",
+                ClientMessage::SubmitTournamentDeck {
+                    code: "TOUR01".into(),
+                    player_token: "tok".into(),
+                    deck: crate::protocol::DeckData {
+                        main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                        ..Default::default()
+                    },
+                    request_id: None,
+                },
+            ),
+            (
                 "player_token",
                 ClientMessage::DropFromTournament {
                     code: "TOUR01".into(),
@@ -1121,6 +1224,15 @@ mod tests {
                 pairing_id: 0,
                 player_token: "tok".into(),
                 outcome: PodOutcome::Draw,
+                request_id: None,
+            },
+            ClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".into(),
+                player_token: "tok".into(),
+                deck: crate::protocol::DeckData {
+                    main_deck: vec!["Forest".into()],
+                    ..Default::default()
+                },
                 request_id: None,
             },
             ClientMessage::DropFromTournament {
@@ -1234,6 +1346,40 @@ mod tests {
                 }
                 other => panic!("a tournament frame must not answer as {other:?}"),
             }
+        }
+    }
+
+    /// A correlated `SubmitTournamentDeck` (its optional `request_id` present)
+    /// whose deck fails its bounds answers as a correlated
+    /// `TournamentActionRejected` carrying the EXACT request id, so the client's
+    /// correlated authority settles the pending submission rather than ignoring a
+    /// bare `Error`. The uncorrelated (`None`) frame in the control test above
+    /// keeps the operational-error channel. REVERT-FAIL: route the `Some` arm back
+    /// to `ServerMessage::error` and this exact-id assertion fails.
+    #[test]
+    fn correlated_submit_tournament_deck_rejection_preserves_the_request_id() {
+        let request_id = crate::protocol::TournamentRequestId(7);
+        let msg = ClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".into(),
+            player_token: "tok".into(),
+            deck: crate::protocol::DeckData {
+                main_deck: vec!["Forest".into(); MAX_MAIN_DECK_ENTRIES + 1],
+                ..Default::default()
+            },
+            request_id: Some(request_id),
+        };
+        let reason = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+        match wire_rejection_message(&msg, reason.clone()) {
+            ServerMessage::TournamentActionRejected {
+                request_id: got,
+                message,
+            } => {
+                assert_eq!(got, request_id);
+                assert_eq!(message, reason);
+            }
+            other => panic!(
+                "a correlated deck submission must answer as TournamentActionRejected, got {other:?}"
+            ),
         }
     }
 
@@ -1399,5 +1545,87 @@ mod tests {
         // safe only because `to_lobby_client_message` never clones it (the
         // paired half lives in `phase-server`).
         assert!(guard_broker_projection_inbound(&frame).is_ok());
+    }
+
+    /// Every native draft command refused by its wire bounds answers its own
+    /// request on the correlated refusal, carrying the guard's reason; the
+    /// uncorrelated spectator frame keeps the operational `Error`.
+    #[test]
+    fn draft_command_wire_rejections_answer_their_own_request() {
+        use crate::protocol::{DraftCommandRefusal, DraftRequestId};
+        use lobby_broker::validation::{MAX_DISPLAY_NAME_LEN, MAX_GAME_CODE_LEN, MAX_TOKEN_LEN};
+
+        let id = |value: u64| DraftRequestId::try_from(value).unwrap();
+        let long_code = "C".repeat(MAX_GAME_CODE_LEN + 1);
+        let frames = [
+            (
+                201,
+                ClientMessage::CreateDraftWithSettings {
+                    display_name: "A".repeat(MAX_DISPLAY_NAME_LEN + 1),
+                    source: Some(crate::protocol::DraftSourceIntent::Uniform {
+                        set_codes: vec!["TST".to_string()],
+                    }),
+                    set_codes: None,
+                    kind: draft_core::types::DraftKind::Premier,
+                    public: true,
+                    password: None,
+                    timer_seconds: None,
+                    tournament_format: draft_core::types::TournamentFormat::Swiss,
+                    pod_policy: draft_core::types::PodPolicy::Competitive,
+                    pod_size: 8,
+                    fifo_policy: None,
+                    request_id: id(201),
+                },
+            ),
+            (
+                202,
+                ClientMessage::JoinDraftWithPassword {
+                    draft_code: long_code.clone(),
+                    display_name: "Bob".to_string(),
+                    password: None,
+                    request_id: id(202),
+                },
+            ),
+            (
+                203,
+                ClientMessage::DraftAction {
+                    draft_code: long_code.clone(),
+                    action: draft_core::types::DraftAction::StartDraft,
+                    request_id: id(203),
+                },
+            ),
+            (
+                204,
+                ClientMessage::ReconnectDraft {
+                    draft_code: "ABCD12".to_string(),
+                    player_token: "t".repeat(MAX_TOKEN_LEN + 1),
+                    request_id: id(204),
+                },
+            ),
+        ];
+        for (expected_id, frame) in frames {
+            let reason =
+                guard_client_message_before_dispatch(&frame, ServerMode::Full).unwrap_err();
+            match wire_rejection_message(&frame, reason.clone()) {
+                ServerMessage::DraftCommandRefused {
+                    request_id,
+                    refusal: DraftCommandRefusal::Rejected { reason: answered },
+                } => {
+                    assert_eq!(request_id, id(expected_id));
+                    assert_eq!(answered, reason);
+                }
+                other => panic!("draft command {expected_id} was answered uncorrelated: {other:?}"),
+            }
+        }
+
+        let spectate = ClientMessage::SpectateDraft {
+            draft_code: long_code,
+        };
+        let reason = guard_client_message_before_dispatch(&spectate, ServerMode::Full).unwrap_err();
+        assert!(reason.contains("draft_code"), "{reason}");
+        match wire_rejection_message(&spectate, reason.clone()) {
+            ServerMessage::Error { message, .. } => assert_eq!(message, reason),
+            other => panic!("a spectator frame carries no request id: {other:?}"),
+        }
     }
 }

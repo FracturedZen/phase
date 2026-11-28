@@ -851,6 +851,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -976,6 +978,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -1060,6 +1064,8 @@ mod tests {
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination: Zone::Graveyard,
                         target: TargetFilter::Any,
@@ -1229,6 +1235,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -2082,6 +2090,7 @@ mod tests {
 
         let mut ability = ResolvedAbility::new(
             Effect::Token {
+                enters_blocking: None,
                 name: "Soldier".to_string(),
                 power: PtValue::Fixed(1),
                 toughness: PtValue::Fixed(1),
@@ -2098,6 +2107,7 @@ mod tests {
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
+                additional_members: Vec::new(),
             },
             vec![],
             source,
@@ -2839,6 +2849,8 @@ mod tests {
     fn hits_to_hand() -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,

@@ -491,6 +491,12 @@ struct PrintedCounter {
     spare: ObjectId,
     payment_lands: Vec<ObjectId>,
     looked: Vec<ObjectId>,
+    /// An extra responder Island appended LAST: the wrong-player discriminator.
+    /// Auto-tap sorts identical basic-land rows stably, so it taps the earlier
+    /// `caster_lands` first and this spare stays untapped at the prompt; a tap
+    /// rider bound to the caster (`You`) would tap it, a payer-bound rider
+    /// leaves it alone.
+    caster_spare: ObjectId,
 }
 
 /// Real response-cast pipeline. The payer's casting, payment and rider-witness
@@ -533,6 +539,8 @@ fn printed_counter_prompt_with_redirects(
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination,
                         target: TargetFilter::SelfRef,
@@ -568,6 +576,7 @@ fn printed_counter_prompt_with_redirects(
     let caster_lands = (0..(x.unwrap_or(1) + 1))
         .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
         .collect::<Vec<_>>();
+    let caster_spare = scenario.add_basic_land(P1, ManaColor::Blue);
     let second = scenario.add_card_to_library_top(P1, "Second known card");
     let first = scenario.add_card_to_library_top(P1, "First known card");
     let mut runner = scenario.build();
@@ -623,6 +632,10 @@ fn printed_counter_prompt_with_redirects(
         !outcome.state().objects[&spare].abilities.is_empty(),
         "spare Forest has a working mana ability"
     );
+    assert!(
+        !outcome.state().objects[&caster_spare].tapped,
+        "auto-tap determinism pin: the appended-last caster spare stays untapped at the prompt"
+    );
     drop(bear_cast);
     PrintedCounter {
         runner,
@@ -630,6 +643,7 @@ fn printed_counter_prompt_with_redirects(
         spare,
         payment_lands,
         looked: vec![first, second],
+        caster_spare,
     }
 }
 
@@ -693,6 +707,17 @@ fn power_sink_acknowledged_and_declined_zero_and_nonzero() {
                     board.runner.state().objects[&board.spare].tapped,
                     "unpaid X={x} must deliver its tap rider even after Counter happened"
                 );
+                assert!(
+                    board
+                        .payment_lands
+                        .iter()
+                        .all(|land| board.runner.state().objects[land].tapped),
+                    "unpaid X={x} taps every payer mana-ability land, not just the spare"
+                );
+                assert!(
+                    !board.runner.state().objects[&board.caster_spare].tapped,
+                    "unpaid X={x} taps the declining payer's lands, not the caster's"
+                );
                 assert_eq!(answer.events.iter().filter(|event| matches!(event, engine::types::events::GameEvent::SpellCountered { object_id, .. } if *object_id == board.bear)).count(), 1);
             }
         }
@@ -748,6 +773,17 @@ fn power_sink_unpaid_outcome_survives_counter_destination_replacement_pause() {
             Zone::Exile | Zone::Hand
         ));
         assert!(board.runner.state().objects[&board.spare].tapped);
+        assert!(
+            board
+                .payment_lands
+                .iter()
+                .all(|land| board.runner.state().objects[land].tapped),
+            "resumed rider taps every payer mana-ability land, not just the spare"
+        );
+        assert!(
+            !board.runner.state().objects[&board.caster_spare].tapped,
+            "resumed rider taps the declining payer's lands, not the caster's"
+        );
         assert_eq!(answer.events.iter().chain(resumed.events.iter()).filter(|event| matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == board.spare)).count(), 1);
         assert!(matches!(
             board.runner.state().waiting_for,
@@ -1130,7 +1166,12 @@ fn answered_unless_prompt_after_the_active_player_left_gives_priority_to_the_nex
             engine::types::phase::TurnDirection::Normal
         );
         // CR 800.4a: P0 leaves through the engine's elimination authority.
-        engine::game::elimination::eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+        engine::game::elimination::eliminate_player(
+            runner.state_mut(),
+            P0,
+            engine::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(runner.state().players[0].is_eliminated);
         assert!(runner.state().game_end.is_none());
         assert_eq!(runner.state().active_player, P0);

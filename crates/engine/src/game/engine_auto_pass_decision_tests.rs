@@ -28,8 +28,11 @@ fn stack_entry(controller: PlayerId) -> StackEntry {
         controller,
         kind: StackEntryKind::KeywordAction {
             action: KeywordAction::Equip {
-                equipment_id: ObjectId(0),
-                target_creature_id: ObjectId(0),
+                equipment: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(0), 0),
+                target_creature: crate::types::identifiers::ObjectIncarnationRef::of(
+                    ObjectId(0),
+                    0,
+                ),
             },
         },
     }
@@ -623,6 +626,7 @@ fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability
 
 fn insect_token_effect() -> Effect {
     Effect::Token {
+        enters_blocking: None,
         name: "Insect".to_string(),
         power: PtValue::Fixed(1),
         toughness: PtValue::Fixed(1),
@@ -638,6 +642,7 @@ fn insect_token_effect() -> Effect {
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
+        additional_members: Vec::new(),
     }
 }
 
@@ -2035,6 +2040,16 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
             .representatives,
         [PlayerId(0)].into_iter().collect()
     );
+    // CR 805.5b: P0 passes alone - the active team retains priority until the
+    // teammate passes too.
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::Priority {
+            player: PlayerId(0)
+        }
+    ));
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("active teammate completes the team pass");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::Priority {
@@ -2046,6 +2061,14 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
     run_auto_pass_loop(&mut state, &mut result)
         .expect("the fixture's auto-pass drive is representable");
+    // The loop passes P2 then stops for the unpassed teammate P3 (no progress
+    // loop); P3's manual pass completes the team and resolves the stack.
+    if !state.stack.is_empty() {
+        let tail = apply(&mut state, PlayerId(3), GameAction::PassPriority)
+            .expect("opposing teammate completes the team pass");
+        result.events.extend(tail.events);
+        result.waiting_for = tail.waiting_for;
+    }
 
     assert!(state.stack.is_empty());
     assert!(state.stack_resolution_session.is_none());
@@ -2394,7 +2417,7 @@ fn install_recheck_session(state: &mut GameState, verified: &[PlayerId]) {
         .stack_resolution_session
         .as_mut()
         .expect("the session was just installed")
-        .verified_pass_representatives
+        .verified_pass_owners
         .extend(verified.iter().copied());
 }
 
@@ -2653,9 +2676,34 @@ fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
     // The look-ahead: with an own inert entry above the bounce, the skipped
-    // window over the bounce is authorized only when nothing can be lost.
+    // window over the bounce is authorized only when nothing can be lost. The
+    // bounce is a trigger here (Guildless Commons: "When this land enters,
+    // return a land you control to its owner's hand."), since a spell resolves
+    // alone and its window is never looked ahead to.
     for (forest_tapped, limit) in [(false, 1), (true, 2)] {
         let mut state = own_bounce_of_your_land(forest_tapped);
+        let spell = state.stack.pop_back().expect("the bounce is on the stack");
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = spell.kind
+        else {
+            unreachable!("own_bounce_of_your_land pushes a spell with an ability");
+        };
+        state.stack.push_back(StackEntry {
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: spell.source_id,
+                ability,
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Guildless Commons".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            ..spell
+        });
         push_simple_stack_entry(&mut state, 30_502, PlayerId(0));
         install_recheck_session(&mut state, &[PlayerId(1)]);
         assert_eq!(
@@ -2707,6 +2755,206 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
             assert!(is_break(&decision), "untapped Forest: the window is held");
         } else {
             assert!(is_pass(&decision), "tapped Forest: own top passes");
+        }
+    }
+}
+
+/// Basalt Monolith, verbatim.
+const BASALT_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{3}: Untap this artifact.";
+
+/// P0's Basalt Monolith, untapped or tapped, with its own "{3}: Untap this
+/// artifact." alone on the stack.
+fn own_basalt_untap(monolith_tapped: bool) -> GameState {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let monolith = scenario
+        .add_artifact_from_oracle(PlayerId(0), "Basalt Monolith", BASALT_MONOLITH)
+        .id();
+    let mut state = scenario.build().state().clone();
+    state.objects.get_mut(&monolith).unwrap().tapped = monolith_tapped;
+    state.stack.push_back(StackEntry {
+        id: ObjectId(30_601),
+        source_id: monolith,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: monolith,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                monolith,
+                PlayerId(0),
+            )),
+        },
+    });
+    state
+}
+
+/// CR 701.26b + CR 605.3a: an own activated ability that would waste an untap
+/// on its untapped mana source is `Held`, so a
+/// rechecking session pauses an unverified representative's live window. No
+/// skipped window is authorized over it, as over any activated ability, which
+/// resolves alone.
+#[test]
+fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
+    // The look-ahead: with an own inert entry above the untap, the boundary
+    // stops before the activation either way. It resolves alone, so its window
+    // is read when it comes, not ahead of time.
+    for monolith_tapped in [false, true] {
+        let mut state = own_basalt_untap(monolith_tapped);
+        push_simple_stack_entry(&mut state, 30_602, PlayerId(0));
+        install_recheck_session(&mut state, &[PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&state),
+            Some(1),
+            "Monolith tapped: {monolith_tapped}"
+        );
+    }
+
+    let mut held = own_basalt_untap(false);
+    install_recheck_session(&mut held, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut held,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // Control: with Monolith tapped the untap is not wasted, so the own-object
+    // standing pass authorizes the window again.
+    let mut granted = own_basalt_untap(true);
+    install_recheck_session(&mut granted, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut granted,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// Pushes P0's activated ability `id`, Basalt Monolith's "{3}: Untap this
+/// artifact" shape: a fresh source untapping itself.
+fn push_own_self_untap_activation(state: &mut GameState, id: u64) {
+    let source_id = ObjectId(id);
+    state.stack.push_back(StackEntry {
+        id: source_id,
+        source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            )),
+        },
+    });
+}
+
+/// A spell or an activated ability never joins a resolver batch, so the
+/// look-ahead neither reads a window over one nor runs past it: a stack of
+/// queued activations is one window per entry under either session policy, and
+/// a run of inert entries above one stops before it.
+#[test]
+fn authorized_limit_does_not_look_past_an_activated_ability() {
+    for policy in [
+        StackResolutionPolicy::Committed,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+    ] {
+        let mut activations = priority_state();
+        for id in 30_701..=30_703 {
+            push_own_self_untap_activation(&mut activations, id);
+        }
+        install_stack_resolution_session(
+            &mut activations,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&activations),
+            Some(1),
+            "{policy:?}: queued activations"
+        );
+
+        let mut inert_above = priority_state();
+        push_own_self_untap_activation(&mut inert_above, 30_711);
+        for id in 30_712..=30_713 {
+            push_simple_stack_entry(&mut inert_above, id, PlayerId(0));
+        }
+        install_stack_resolution_session(
+            &mut inert_above,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        inert_above
+            .stack_resolution_session
+            .as_mut()
+            .expect("the session was just installed")
+            .verified_pass_owners
+            .extend([PlayerId(0), PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&inert_above),
+            Some(2),
+            "{policy:?}: the inert run above the activation"
+        );
+    }
+}
+
+/// CR 117.3d: Resolve All is consent to resolve the stack, so a `Committed`
+/// session passes through the window the rechecking session pauses at.
+#[test]
+fn committed_session_passes_through_an_own_top_held_for_a_wasted_untap() {
+    let mut state = own_basalt_untap(false);
+    install_stack_resolution_session(
+        &mut state,
+        BTreeSet::from([PlayerId(0), PlayerId(1)]),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::Committed,
+        BTreeMap::new(),
+    );
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut state,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// CR 117.1d + CR 605.3a: a turn-boundary session breaks on an own top that is
+/// `Held` for a wasted untap, and keeps passing own tops otherwise.
+#[test]
+fn until_end_of_turn_breaks_on_an_own_top_held_for_a_wasted_untap() {
+    for (monolith_tapped, expect_break) in [(false, true), (true, false)] {
+        let mut state = own_basalt_untap(monolith_tapped);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let decision = priority_auto_pass_decision(&state, PlayerId(0));
+        if expect_break {
+            assert!(is_break(&decision), "untapped Monolith: the window is held");
+        } else {
+            assert!(is_pass(&decision), "tapped Monolith: own top passes");
         }
     }
 }
@@ -3063,5 +3311,217 @@ fn a_session_ending_pass_finishes_a_completed_baseline_until_stack_empty() {
         state.auto_pass.is_empty(),
         "the completed baseline preference must not survive the session's end: {:?}",
         state.auto_pass
+    );
+}
+
+/// VM-F1 (F3/D2.4 + phase-2 addendum): a finished non-representative
+/// UntilStackEmpty key is scrubbed from the live map AND the session
+/// baseline, so teardown cannot resurrect it. Lives in the submodule
+/// because only a synthetic entry grows the stack past the key's initial
+/// length (Bolt/Counter-only boards cannot). CR 805.5b: overlay entries are
+/// exactly the session representatives' keys.
+#[test]
+fn finished_teammate_until_stack_empty_scrubbed_live_and_baseline() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    push_simple_stack_entry(&mut state, 41_001, PlayerId(2));
+    // Opposing meaningful actions: the runner pauses at P2 with the session
+    // live instead of draining the cohort.
+    add_non_mana_activated_artifact(&mut state, PlayerId(2));
+    add_non_mana_activated_artifact(&mut state, PlayerId(3));
+
+    // Reach setup: session {P0}; live {P0 overlay, P1 USE0}; baseline
+    // {P0 EOC, P1 USE0}; one synthetic entry. P1's key is finished — the
+    // stack grew past its initial length of 0.
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 0,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+    let baseline: BTreeMap<PlayerId, AutoPassMode> = state
+        .auto_pass
+        .iter()
+        .map(|(&player, &mode)| (player, mode))
+        .collect();
+    install_stack_resolution_session(
+        &mut state,
+        BTreeSet::from([PlayerId(0)]),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::Committed,
+        baseline,
+    );
+    assert_eq!(state.stack.len(), 1, "reach: one synthetic entry");
+    let session = state
+        .stack_resolution_session
+        .as_ref()
+        .expect("reach: session installed");
+    assert_eq!(session.representatives, BTreeSet::from([PlayerId(0)]));
+    assert!(
+        matches!(
+            state.auto_pass.get(&PlayerId(1)),
+            Some(AutoPassMode::UntilStackEmpty {
+                initial_stack_len: 0,
+                ..
+            })
+        ),
+        "reach: P1's finished key live"
+    );
+    assert!(
+        session
+            .auto_pass_overlay
+            .baseline
+            .contains_key(&PlayerId(1)),
+        "reach: P1's key in the baseline"
+    );
+
+    // Beat: P1's explicit pass. The boundary runner takes P0's cohort beat,
+    // runs the finish sweep, then pauses at P2's meaningful action with the
+    // session live.
+    apply(&mut state, PlayerId(1), GameAction::PassPriority)
+        .expect("teammate pass must be accepted");
+
+    // Mid: session live, P1 scrubbed from both representations.
+    assert!(
+        state.stack_resolution_session.is_some(),
+        "the session survives the teammate pass"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "mid: the finished P1 key is scrubbed from the live map"
+    );
+    assert!(
+        !state
+            .stack_resolution_session
+            .as_ref()
+            .expect("the session was just asserted live")
+            .auto_pass_overlay
+            .baseline
+            .contains_key(&PlayerId(1)),
+        "mid: the finished P1 key is scrubbed from the baseline"
+    );
+
+    // Teardown exact: restoring the session must not resurrect P1.
+    assert!(
+        take_and_restore_stack_resolution_session(&mut state),
+        "reach: teardown ran"
+    );
+    assert!(state.stack_resolution_session.is_none());
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "teardown must not restore P1's finished preference"
+    );
+    assert_eq!(
+        state.auto_pass.get(&PlayerId(0)),
+        Some(&AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        }),
+        "reach: teardown restored P0's baseline preference"
+    );
+}
+
+/// VM-T1 (F3/D2.1+D2.7): a non-representative's MyNextTurnStart clears when
+/// the TEAM's next turn begins, surviving the opposing team's intervening
+/// turn. CR 805.4 + CR 805.4a: a shared team takes one turn.
+#[test]
+fn teammate_my_next_turn_start_clears_at_team_next_turn() {
+    let mut state = GameState::new(
+        crate::types::format::FormatConfig::two_headed_giant(),
+        4,
+        42,
+    );
+    state.turn_number = 1;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    // Libraries: every seat draws on its team's turns, and a deck-out loss
+    // would confound the sweep assertions.
+    for (seat, base) in [
+        (PlayerId(0), 60_000u64),
+        (PlayerId(1), 60_010),
+        (PlayerId(2), 60_020),
+        (PlayerId(3), 60_030),
+    ] {
+        for n in 0..2 {
+            create_object(
+                &mut state,
+                CardId(base + n),
+                seat,
+                format!("T1 Library Filler {n}"),
+                Zone::Library,
+            );
+        }
+        let library_len = state
+            .players
+            .iter()
+            .find(|player| player.id == seat)
+            .expect("seat exists")
+            .library
+            .len();
+        assert_eq!(library_len, 2, "reach: {seat:?} library staged");
+    }
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::MyNextTurnStart,
+        },
+    );
+    state.auto_pass.insert(
+        PlayerId(0),
+        AutoPassMode::UntilTurnBoundary {
+            until: TurnBoundary::EndOfCurrentTurn,
+        },
+    );
+
+    // Reach: own-key pre.
+    assert!(state.auto_pass.contains_key(&PlayerId(1)));
+
+    let mut events = Vec::new();
+    crate::game::turns::start_next_turn(&mut state, &mut events);
+    assert_eq!(state.active_player, PlayerId(2));
+    assert!(
+        state.game_end.is_none() && state.players.iter().all(|p| !p.is_eliminated),
+        "reach: no elimination confound on the opposing team's turn"
+    );
+    // P2-mid retained: the opposing team's turn is not P1's team's turn.
+    assert!(
+        state.auto_pass.contains_key(&PlayerId(1)),
+        "MyNextTurnStart must survive the opposing team's turn start"
+    );
+    // EOC-gone sibling: the boundary axis gates the retain.
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(0)),
+        "EndOfCurrentTurn must clear at the next turn start"
+    );
+
+    crate::game::turns::start_next_turn(&mut state, &mut events);
+    assert_eq!(state.active_player, PlayerId(0));
+    assert!(
+        state.game_end.is_none() && state.players.iter().all(|p| !p.is_eliminated),
+        "reach: no elimination confound on the own team's turn"
+    );
+    assert!(
+        !state.auto_pass.contains_key(&PlayerId(1)),
+        "MyNextTurnStart must clear at the owner's team next turn"
     );
 }

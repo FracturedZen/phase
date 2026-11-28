@@ -1724,7 +1724,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(fight_effect()),
+                    replacement_effect: Box::new(fight_def()),
                 },
             ),
         ));
@@ -1754,6 +1754,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Token {
+                    enters_blocking: None,
                     name: "T".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -1770,6 +1771,7 @@ mod tests {
                     supertypes: vec![],
                     static_abilities: vec![grant_fight_static()],
                     enter_with_counters: vec![],
+                    additional_members: Vec::new(),
                 },
             ),
         ));

@@ -147,6 +147,7 @@ pub fn resolve(
         owner: token_owner,
         count,
         copy: Box::new(CopyTokenSpec {
+            blocking_attacker: None,
             values: Box::new(values),
             display: DisplayIdentity {
                 display_source: DisplaySource::Card,
@@ -164,6 +165,9 @@ pub fn resolve(
             controller: ability.controller,
             // Pool-drawn values name no donor object; empty mods are stamp-proof.
             donor: None,
+            // CR 707.8a: a format-pool copy is built from one card face, so it carries no
+            // other face; a double-faced pool card (Momir) is not modeled as double-faced.
+            double_faced: None,
         }),
     });
 

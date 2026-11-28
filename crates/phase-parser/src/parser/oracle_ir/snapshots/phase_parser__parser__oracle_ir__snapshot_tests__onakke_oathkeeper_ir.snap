@@ -44,7 +44,11 @@ expression: "&ir"
               "scaling": {
                 "type": "PerAffectedCreature"
               },
-              "defended": "Planeswalker"
+              "defended": {
+                "Planeswalker": {
+                  "subtype": null
+                }
+              }
             },
             "affected_zone": null,
             "effect_zone": null,
@@ -184,7 +188,6 @@ expression: "&ir"
             "activation_zone": "Graveyard",
             "description": "{4}{W}{W}, Exile this card from your graveyard: Return target planeswalker card from your graveyard to the battlefield.",
             "stages": [
-              "NormalizeActivatedManaInstead",
               "ExtractCostReduction",
               "ExtractManaSpendTrigger"
             ]

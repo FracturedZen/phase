@@ -24,6 +24,11 @@ export interface ActiveQuickDraftMeta {
   runLosses?: number;
   runDraws?: number;
   currentGameId?: string;
+  /**
+   * The local FIFO session this record saves, as the engine issued it. Absent
+   * for a legacy session; resume routes by it.
+   */
+  localFifoSessionId?: string;
 }
 
 export type DraftMatchResult = "win" | "loss" | "draw";
@@ -52,6 +57,14 @@ export interface DraftRunState {
   lastOpponentSeat?: number;
   /** Exact engine tokens; an empty array is authoritative, absence is legacy. */
   draft_set_codes?: string[];
+  /**
+   * CR 100.2b + CR 702.139b: the draft session's resolved minimum deck size at
+   * launch (a Cube may configure other than 40). The match's format config
+   * carries it so the engine's "minimum deck size" companion condition reads
+   * the session's value. Absent in legacy records, which keep the format's.
+   */
+  min_deck_size?: number;
+  companion?: string | null;
   activeMatch?: DraftRunActiveMatch;
 }
 
@@ -90,8 +103,8 @@ export interface DraftMatchPayload {
    * Cube source applies.
    */
   booster_pack_pool?: string[] | null;
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+  player: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
+  opponent: { main_deck: string[]; sideboard: string[]; commander: string[]; companion?: string[] };
   ai_decks: never[];
 }
 
@@ -140,7 +153,11 @@ function parseActiveMeta(raw: string | null): ActiveQuickDraftMeta | null {
       || typeof value.setCode !== "string"
       || typeof value.difficulty !== "number"
       || typeof value.pickCount !== "number"
-      || typeof value.updatedAt !== "number") return null;
+      || typeof value.updatedAt !== "number"
+      || (value.localFifoSessionId !== undefined
+        && (typeof value.localFifoSessionId !== "string" || value.localFifoSessionId.length === 0))) {
+      return null;
+    }
     return value as unknown as ActiveQuickDraftMeta;
   } catch {
     return null;

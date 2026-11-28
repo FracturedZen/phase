@@ -120,6 +120,8 @@ fn add_counter_count_replacement(
 
 fn squirrel_spec() -> TokenSpec {
     TokenSpec {
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
         characteristics: TokenCharacteristics {
             display_name: "Squirrel".to_string(),
             power: Some(1),
@@ -211,6 +213,9 @@ fn mauhur_does_not_add_counters_to_unlisted_creature_types() {
         bear,
         CounterType::Plus1Plus1,
         1,
+        // The harness drives the authority as the effect placement the
+        // replacement under test modifies.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
         &mut events,
     ));
 
@@ -553,7 +558,10 @@ fn chatterfang_style_token_replacement_does_not_become_amassed_army() {
         .with_replacement_definition(
             ReplacementDefinition::new(ReplacementEvent::CreateToken)
                 .token_owner_scope(ControllerRef::You)
-                .additional_token_spec(squirrel_spec()),
+                .additional_token_spec(
+                    squirrel_spec(),
+                    engine::types::ability::AdditionalTokenSpec::proportional_count(),
+                ),
         );
     let foray = scenario
         .add_spell_to_hand_from_oracle(P0, "Foray of Orcs", false, FORAY_OF_ORCS)

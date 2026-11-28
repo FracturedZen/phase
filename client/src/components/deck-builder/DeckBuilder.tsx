@@ -12,6 +12,7 @@ import { hasSearchCriteria } from "./searchFilters";
 import { CardGrid } from "./CardGrid";
 import { DeckStack } from "./DeckStack";
 import { DeckList } from "./DeckList";
+import { ExportDeckControl } from "./ExportDeckControl";
 import { StatsPanel } from "./StatsPanel";
 import type { GameFormat } from "../../adapter/types";
 import { CommanderPanel } from "./CommanderPanel";
@@ -48,6 +49,8 @@ export function DeckBuilder({
     searchResults,
     deckName,
     bracket,
+    comboDeclaration,
+    handleComboDeclarationChange,
     savedDecks,
     justSaved,
     setJustSaved,
@@ -71,6 +74,8 @@ export function DeckBuilder({
     deckSizeRule,
     estimate,
     auditEmptyReason,
+    signals,
+    signalsEmptyReason,
     cmcValues,
     colorDistribution,
     cardCounts,
@@ -83,7 +88,6 @@ export function DeckBuilder({
     handleSearchResults,
     handleSearchTrigger,
     handleAddCard,
-    handleAddCardByName,
     handleRemoveCard,
     handleIncrementCard,
     canIncrement,
@@ -99,6 +103,7 @@ export function DeckBuilder({
     resolveSaveConflict,
     handleSetCommander,
     isCommanderEligible,
+    commanderCandidateNames,
     handleRemoveCommander,
     signatureSpellCandidates,
     companionCandidateNames,
@@ -452,6 +457,10 @@ export function DeckBuilder({
                     </button>
                   ))}
                 </div>
+                <ExportDeckControl
+                  deck={currentDeck}
+                  triggerClassName={() => "rounded-xl border border-white/8 bg-black/18 px-2 py-1 text-xs text-gray-300 hover:bg-white/6 disabled:opacity-40"}
+                />
               </div>
             )}
           </div>
@@ -498,6 +507,7 @@ export function DeckBuilder({
                         onImport={handleImport}
                         onCardHover={onCardHover}
                         format={format}
+                        commanderInferenceFormat={isCommander ? format : undefined}
                         compatibility={compatibility}
                         cardDataCache={cardDataCache}
                         groupMode={groupMode}
@@ -515,7 +525,7 @@ export function DeckBuilder({
                       commanders={commanders}
                       cardDataCache={cardDataCache}
                       groupMode={groupMode}
-                      onAddCard={handleAddCardByName}
+                      onAddCard={(entry) => handleIncrementCard(entry, "main")}
                       canAddCard={canIncrement}
                       onRemoveCard={handleRemoveCard}
                       onMoveCard={handleMoveCard}
@@ -546,7 +556,7 @@ export function DeckBuilder({
                 deckComposition="commanders-outside"
                 cardDataCache={cardDataCache}
                 deckSizeRule={deckSizeRule}
-                isCommanderEligible={isCommanderEligible}
+                commanderCandidates={commanderCandidateNames}
                 onSetCommander={handleSetCommander}
                 onRemoveCommander={handleRemoveCommander}
                 signatureSpell={deck.signature_spell?.[0]}
@@ -569,7 +579,11 @@ export function DeckBuilder({
               estimate={estimate}
               manualBracket={bracket}
               onBracketChange={handleBracketChange}
+              comboDeclaration={comboDeclaration}
+              onComboDeclarationChange={handleComboDeclarationChange}
               auditEmptyReason={auditEmptyReason}
+              signals={signals}
+              signalsEmptyReason={signalsEmptyReason}
               onCardClick={handleScrollToCard}
             />
           </div>

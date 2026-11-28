@@ -1,0 +1,432 @@
+import { STATE_CODEC_DECODE_TIMEOUT_MS } from "../adapter/state-codec-runtime";
+import { frameType } from "./stateCodecSocket";
+
+/**
+ * The bound on the interval, counted from the setup write. It spans the
+ * server's own work before the bootstrap (session lock, any AI actions it runs
+ * first, building the frame) and the transfer; it is not measured against
+ * them, so an attempt whose server work runs past it ends as a timeout and the
+ * game adapter retries within its episode budget. It does not pre-empt a decode:
+ * when it expires while the candidate's codec transport is decoding a frame, it
+ * defers once to that decode, whose own deadline (the same value, counted from
+ * the decode call) bounds the wait, so the decoder's verdict settles the
+ * interval: a delivered bootstrap confirms, and a terminal `decodeFailure`
+ * closes the candidate with its failure recorded for the episode. A game
+ * reconnect can decode its bootstrap `Full` inside the interval; a draft
+ * reattach is answered by a plain frame first (`DraftMatchStart`, or its own
+ * `DraftCommandAccepted` or `DraftCommandRefused`), so with this server no
+ * decode is in flight there.
+ */
+export const SETUP_CONFIRMATION_TIMEOUT_MS = STATE_CODEC_DECODE_TIMEOUT_MS;
+
+export type SetupConfirmationOutcome =
+  | "confirmed"
+  | "refused"
+  | "closed"
+  | "timeout"
+  | "aborted"
+  | "overflow";
+
+/**
+ * Resolves when `signal` aborts, at once if it already has; stays pending if it
+ * never does. Adapters race it against a pending setup write so a cancelled
+ * private candidate is retired at once instead of when the encoder answers.
+ * The already-aborted case matters: the transport's send can cancel the
+ * attachment synchronously, before this is called, and still return a pending
+ * receipt. (A write refused for a signal aborted before it resolves at once
+ * and is listed first in those races, so it still wins.)
+ */
+export function whenAborted(signal: AbortSignal): Promise<"abort"> {
+  return new Promise<"abort">((resolve) => {
+    if (signal.aborted) resolve("abort");
+    else signal.addEventListener("abort", () => resolve("abort"), { once: true });
+  });
+}
+
+/**
+ * `promise`'s result, or `fallback` once `timeoutMs` elapsed first. Bounds a
+ * wait on a promise an injected transport or provider owns (a setup write's
+ * receipt), which may never settle on a socket that stays open.
+ */
+export function settledWithin<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }, (error: unknown) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+/** Frames a private candidate may buffer before its setup settles. */
+export const SETUP_BUFFER_MAX_FRAMES = 64;
+/** Expanded text (UTF-16, two bytes a unit) a private candidate may buffer. */
+export const SETUP_BUFFER_MAX_TEXT_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The frames that carry an attachment's state bootstrap, by surface. The server
+ * may send one behind a prefix of small frames: a Join into a waiting room is
+ * answered with `SessionAttached`, `PlayerSlotsUpdate`, then a `StateUpdate`
+ * bootstrap (`crates/phase-server/src/main.rs:9737-9803`), and one that fills
+ * the room with `GameStarted` (`broadcast_game_started`, `:9844-9852`). So the
+ * bootstrap is recognized by its tag wherever it sits in the buffer, not by
+ * being the first answer.
+ */
+const BOOTSTRAP_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
+  game: new Set(["GameStarted", "StateUpdate"]),
+  draft: new Set(["GameStarted", "DraftStateUpdate", "DraftCommandAccepted"]),
+};
+
+/**
+ * Admission budget for the frames a private candidate buffers while its setup
+ * is unsettled. The codec transport releases its own receive charge once the
+ * adapter's handler has the frame, so the adapter, which retains the expanded
+ * text until the drain, owns this bound. It counts only backlog: the
+ * attachment's bootstrap may be as large as the transport allows, so the first
+ * frame of each bootstrap tag is not charged (a repeat of the same tag is).
+ */
+export class SetupBufferBudget {
+  private frames = 0;
+  private bytes = 0;
+  private readonly bootstrapsSeen = new Set<string>();
+
+  constructor(private readonly surface: "game" | "draft") {}
+
+  /**
+   * Records a frame whose charge the adapter waives (the answer that settles an
+   * unconfirmed attachment's receipt wait), so a later frame of the same
+   * bootstrap tag is a repeat and is charged.
+   */
+  waive(data: unknown): void {
+    if (typeof data !== "string") return;
+    const type = frameType(data);
+    if (BOOTSTRAP_FRAMES[this.surface].has(type)) this.bootstrapsSeen.add(type);
+  }
+
+  /** Charges one backlog frame; false once the buffer's budget is exhausted. */
+  admit(data: unknown): boolean {
+    if (typeof data === "string") {
+      const type = frameType(data);
+      if (BOOTSTRAP_FRAMES[this.surface].has(type) && !this.bootstrapsSeen.has(type)) {
+        this.bootstrapsSeen.add(type);
+        return true;
+      }
+      this.bytes += data.length * 2;
+    }
+    this.frames++;
+    return this.frames <= SETUP_BUFFER_MAX_FRAMES && this.bytes <= SETUP_BUFFER_MAX_TEXT_BYTES;
+  }
+}
+
+/** The server's refusal of a setup frame, as the adapters surface it. */
+export interface SetupRefusal {
+  readonly message: string;
+  readonly code?: string;
+}
+
+/** A setup frame parsed once by the interval, handed on to the adapter's dispatch. */
+export interface SetupFrameMessage {
+  readonly type: string;
+  readonly data?: unknown;
+}
+
+export type SetupFrameClass =
+  /** The positive bootstrap: the server installed the candidate's sender. */
+  | { readonly kind: "positive"; readonly message: SetupFrameMessage }
+  /** `Error`: the server refused the setup and installed nothing. Settles the interval. */
+  | { readonly kind: "refusal"; readonly refusal: SetupRefusal; readonly message: SetupFrameMessage }
+  /**
+   * Draft `DraftCommandRefused` carrying the reattach's own id: the server's
+   * answer on the candidate, which may already hold the draft seat (see
+   * {@link classifySetupFrame}). It adopts the candidate, and the refusal is
+   * then dispatched there to reject the reattach.
+   */
+  | { readonly kind: "answered"; readonly message: SetupFrameMessage }
+  /** Anything else: neither adopts nor refuses; kept in order for the adopted socket. */
+  | { readonly kind: "other" };
+
+/**
+ * What the server sends after `Reconnect` (game) and `ReconnectDraft` (draft),
+ * in `crates/phase-server/src/main.rs` unless noted.
+ *
+ * Positive bootstrap, game: `GameStarted` (`build_game_started_message` :770,
+ * queued at :10730 before the sender is installed at :10734) for a started
+ * game; `GameCreated` then `SessionAttached` (`return_full_seat_while_session_locked`
+ * :2389-2400) for a pregame seat; `StateWithheld` whose `withheld` frame is
+ * `GameStarted` (`socket_mailbox.rs:150`), which replaces that `GameStarted`
+ * when it is over the frame bound. A `StateWithheld` of a `StateUpdate` cannot
+ * precede the bootstrap, so it is not positive.
+ * Refusal, game: `Error` only (:10563-10583, the `ReconnectOutcome::Err` reply
+ * at :10840-10843, and the mode, wire and authority gates at :10062-10090).
+ *
+ * Draft: a reattach is answered by its own correlated result, sent only to the
+ * requesting socket. A reattach into an active match is answered
+ * `DraftMatchStart`, `GameStarted`, then `DraftCommandAccepted` (`Reconnected`);
+ * one with no match by that result alone; one whose match cannot attach by
+ * `DraftCommandRefused` after the seat was already installed, then an
+ * unsolicited `DraftStateUpdate`. Every refusal of the reattach, before or in
+ * dispatch, is that correlated refusal.
+ * Positive bootstrap, draft: `DraftCommandAccepted` carrying the reattach's own
+ * id whose result is `Reconnected`, the reattach's own kind, and
+ * `DraftMatchStart`, which is sent only to the seat's current sender and
+ * so proves the seat is routed to the candidate (it settles nothing: the
+ * reattach still waits for its result).
+ * Answered, draft: `DraftCommandRefused` carrying the reattach's own id. It
+ * cannot tell the client whether the server installed the candidate, so
+ * retiring it could drop a seat the server gave it, and nothing retries a
+ * reattach: the candidate is adopted, and the dispatched refusal rejects the
+ * reattach.
+ * A `DraftStateUpdate` is never the reattach's answer, a result carrying
+ * another id answers another command, and an accepted result of another kind,
+ * or one without a result, is not the reattach's: each is `other`, so the
+ * bound still runs.
+ * Refusal, draft: `Error`, which answers only a frame the server could not
+ * decode, so nothing was installed.
+ *
+ * Any other frame (pings, slot updates, lobby fan-out) is neither: it is kept
+ * in order for the adopted socket and does not settle the interval.
+ */
+const POSITIVE_FRAMES: Record<"game" | "draft", ReadonlySet<string>> = {
+  game: new Set(["GameStarted", "GameCreated", "SessionAttached"]),
+  draft: new Set(["DraftMatchStart", "DraftCommandAccepted"]),
+};
+
+/**
+ * Draft results that settle the interval only when they carry the reattach's own id
+ * (an acceptance only when its result is `Reconnected`).
+ */
+const CORRELATED_DRAFT_RESULTS: ReadonlySet<string> = new Set(["DraftCommandAccepted", "DraftCommandRefused"]);
+
+/**
+ * `draftRequestId` is the draft reattach's own request id: a draft result
+ * classifies only when it carries it. The game surface passes none.
+ */
+export function classifySetupFrame(
+  surface: "game" | "draft",
+  text: unknown,
+  draftRequestId?: number,
+): SetupFrameClass {
+  if (typeof text !== "string") return { kind: "other" };
+  // The tag comes from the canonical type-first envelope without materializing
+  // the frame, so an unrelated frame is never parsed here. A frame whose tag can
+  // settle the interval is parsed exactly once, here: a body that does not parse
+  // as that envelope is `other` (it neither adopts nor refuses, and keeps its
+  // malformed-frame handling), and the parsed envelope is what the adapter
+  // dispatches after adoption, so the bootstrap is still materialized once.
+  const type = frameType(text);
+  const settling = POSITIVE_FRAMES[surface].has(type)
+    || (surface === "draft" && type === "DraftCommandRefused")
+    || type === "Error"
+    || (surface === "game" && type === "StateWithheld");
+  if (!settling) return { kind: "other" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { kind: "other" };
+  }
+  if (typeof parsed !== "object" || parsed === null || (parsed as { type?: unknown }).type !== type) {
+    return { kind: "other" };
+  }
+  const message = parsed as SetupFrameMessage;
+  if (surface === "draft" && CORRELATED_DRAFT_RESULTS.has(type)) {
+    const requestId = (message.data as { request_id?: unknown } | null | undefined)?.request_id;
+    if (draftRequestId === undefined || requestId !== draftRequestId) return { kind: "other" };
+    if (type === "DraftCommandAccepted"
+      && (message.data as { result?: { type?: unknown } } | null | undefined)?.result?.type !== "Reconnected") {
+      return { kind: "other" };
+    }
+  }
+  if (POSITIVE_FRAMES[surface].has(type)) return { kind: "positive", message };
+  if (type === "DraftCommandRefused") return { kind: "answered", message };
+  const data = (message.data ?? {}) as { message?: unknown; code?: unknown; withheld?: unknown };
+  if (type === "StateWithheld") {
+    const withheld = data.withheld as { type?: unknown } | null | undefined;
+    return withheld?.type === "GameStarted" ? { kind: "positive", message } : { kind: "other" };
+  }
+  return {
+    kind: "refusal",
+    message,
+    refusal: {
+      message: typeof data.message === "string" ? data.message : "The server refused the setup.",
+      ...(typeof data.code === "string" ? { code: data.code } : {}),
+    },
+  };
+}
+
+/**
+ * The uncertain interval of a reconnect: from the moment a candidate's setup
+ * frame is sent until its positive bootstrap arrives.
+ *
+ * The server replaces a seat's sender when it handles `Reconnect` /
+ * `ReconnectDraft` and never closes the predecessor, so once the frame is sent
+ * neither the incumbent nor the candidate is known to own the seat. The
+ * candidate is adopted on its positive bootstrap (or, for a draft, on the
+ * server's correlated refusal of the reattach); an `Error` refusal, a close,
+ * the bound or an abort first retires both sockets.
+ *
+ * `SetupConfirmation` is the single owner of that interval for both server
+ * adapters. It settles exactly once, with whichever of these happens first:
+ *
+ *  - `confirmed`: the candidate delivered a frame of the positive bootstrap set,
+ *    or a draft candidate the server's refusal of the reattach (see
+ *    {@link classifySetupFrame});
+ *  - `refused`: the candidate delivered the server's `Error` answer to the
+ *    setup (the server installed nothing, but the incumbent's standing is no
+ *    longer known either, so it is treated like a close that carries a reason);
+ *  - `closed`: the candidate closed;
+ *  - `timeout`: the bounded wait elapsed (this also bounds a setup write whose
+ *    receipt never settles);
+ *  - `aborted`: the attachment was cancelled once its write receipt settled
+ *    ({@link watchAbort}). An abort that lands earlier, while the receipt is
+ *    pending, is bound by the adapters instead: they retire the candidate and
+ *    release the interval's gate at once, and the receipt's fate (bounded by
+ *    this owner's timeout) still decides the incumbent.
+ *
+ * A draft `DraftCommandRefused` carrying the reattach's id also confirms: it is
+ * the server's answer on a candidate that may already hold the seat (see
+ * {@link classifySetupFrame}).
+ */
+export class SetupConfirmation {
+  /** Resolves once, with the first outcome. Never rejects. */
+  readonly settled: Promise<SetupConfirmationOutcome>;
+  private resolve!: (outcome: SetupConfirmationOutcome) => void;
+  private outcome: SetupConfirmationOutcome | null = null;
+  private timer: ReturnType<typeof setTimeout> | null;
+  private abortSignal: AbortSignal | null = null;
+  private disposed = false;
+  private refusalValue: SetupRefusal | null = null;
+  private readonly onAbort = () => this.finish("aborted");
+
+  /**
+   * `decodeInFlight` reports the candidate transport's decode in flight, if
+   * any; the bound defers once to it (see {@link SETUP_CONFIRMATION_TIMEOUT_MS}).
+   */
+  constructor(
+    private readonly timeoutMs: number = SETUP_CONFIRMATION_TIMEOUT_MS,
+    private readonly decodeInFlight: () => Promise<void> | null = () => null,
+  ) {
+    this.settled = new Promise((resolve) => { this.resolve = resolve; });
+    this.timer = setTimeout(() => this.expire(), timeoutMs);
+  }
+
+  private expire(): void {
+    this.timer = null;
+    if (this.outcome !== null) return;
+    const decoding = this.decodeInFlight();
+    if (decoding === null) {
+      this.finish("timeout");
+      return;
+    }
+    // One deferral, with its own deadline: the decode comes from an injected
+    // session whose promise may never settle, so the deferral is bounded here,
+    // independently of it. Once the decode has answered, its delivery or its
+    // terminal close (both queued behind it) settles first; otherwise this
+    // times out, at the latest one further bound after the first.
+    this.timer = setTimeout(() => this.finish("timeout"), this.timeoutMs);
+    void decoding.then(() => {
+      if (this.outcome !== null || this.disposed) return;
+      if (this.timer !== null) clearTimeout(this.timer);
+      this.timer = setTimeout(() => this.finish("timeout"), 0);
+    });
+  }
+
+  /**
+   * Feeds one frame the candidate received during the interval. Returns the
+   * envelope it parsed to settle the interval, which the adapter must dispatch
+   * instead of parsing the frame again; `undefined` when it parsed nothing.
+   * A draft reattach passes its own request id (see {@link classifySetupFrame}).
+   */
+  observe(surface: "game" | "draft", data: unknown, draftRequestId?: number): SetupFrameMessage | undefined {
+    // A settled interval classifies nothing more: later frames only wait, in
+    // order, for the adopted socket's own handler.
+    if (this.outcome !== null) return undefined;
+    const frame = classifySetupFrame(surface, data, draftRequestId);
+    switch (frame.kind) {
+      case "positive":
+      case "answered":
+        this.confirm();
+        return frame.message;
+      case "refusal":
+        this.refuse(frame.refusal);
+        return frame.message;
+      case "other":
+        return undefined;
+    }
+  }
+
+  /** The candidate delivered its positive bootstrap. */
+  confirm(): void {
+    this.finish("confirmed");
+  }
+
+  /** The candidate delivered the server's refusal of the setup. */
+  refuse(refusal: SetupRefusal): void {
+    if (this.outcome !== null) return;
+    this.refusalValue = refusal;
+    this.finish("refused");
+  }
+
+  /** The refusal that settled this confirmation, when it was refused. */
+  get refusal(): SetupRefusal | null {
+    return this.refusalValue;
+  }
+
+  /** The candidate's unsettled frame buffer overflowed its budget. */
+  overflow(): void {
+    this.finish("overflow");
+  }
+
+  /** The candidate closed. */
+  closed(): void {
+    this.finish("closed");
+  }
+
+  /** From now on an abort of `signal` settles this confirmation. */
+  watchAbort(signal: AbortSignal): void {
+    if (this.outcome !== null) return;
+    if (signal.aborted) {
+      this.finish("aborted");
+      return;
+    }
+    this.abortSignal = signal;
+    signal.addEventListener("abort", this.onAbort, { once: true });
+  }
+
+  /** The outcome so far, or null while the interval is still open. */
+  get current(): SetupConfirmationOutcome | null {
+    return this.outcome;
+  }
+
+  /** Releases the timer and the abort listener; idempotent. */
+  dispose(): void {
+    this.disposed = true;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.abortSignal?.removeEventListener("abort", this.onAbort);
+    this.abortSignal = null;
+  }
+
+  private finish(outcome: SetupConfirmationOutcome): void {
+    if (this.outcome !== null) return;
+    this.outcome = outcome;
+    this.dispose();
+    this.resolve(outcome);
+  }
+}
+
+/**
+ * Reports a listener failure that must not unwind its caller as an uncaught
+ * error: a window `error` event, which a raw socket's handler would raise and
+ * telemetry records as `js_error`.
+ */
+export function reportUncaughtError(error: unknown): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new ErrorEvent("error", {
+    error,
+    message: error instanceof Error ? error.message : String(error),
+  }));
+}

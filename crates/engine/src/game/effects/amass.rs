@@ -14,7 +14,7 @@ use crate::types::game_state::{GameState, PendingCounterPostAction};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
+    CounterCause, EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenSpec,
 };
 use std::collections::HashSet;
 
@@ -115,6 +115,8 @@ pub(crate) fn continue_amass_on_army(
             object_id,
             CounterType::Plus1Plus1,
             count,
+            // CR 614.16: amass's counters are placed by a resolving ability.
+            CounterCause::ResolvingEffect,
             events,
         )
     {
@@ -222,9 +224,12 @@ fn create_army_token(
         sacrifice_at: None,
         source_id: ability.source_id,
         controller: ability.controller,
+        blocking_attacker: None,
+        blocking_attacker_incarnation: None,
     };
 
     let proposed = ProposedEvent::CreateToken {
+        redirected_to: None,
         owner: controller,
         spec: Box::new(spec),
         copy: None,
@@ -304,8 +309,16 @@ mod tests {
         assert!(army.is_token);
         assert_eq!(army.power, Some(2));
         assert_eq!(army.toughness, Some(2));
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Army".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Army"));
         assert_eq!(army.color, vec![ManaColor::Black]);
         // 2 +1/+1 counters
         assert_eq!(
@@ -374,8 +387,12 @@ mod tests {
             .filter_map(|id| state.objects.get(id))
             .find(|obj| obj.card_types.subtypes.iter().any(|s| s == "Army"))
             .unwrap();
-        assert!(army.card_types.subtypes.contains(&"Zombie".to_string()));
-        assert!(army.card_types.subtypes.contains(&"Orc".to_string()));
+        assert!(army
+            .card_types
+            .subtypes
+            .iter()
+            .any(|i: &String| i == "Zombie"));
+        assert!(army.card_types.subtypes.iter().any(|i: &String| i == "Orc"));
     }
 
     #[test]
@@ -383,29 +400,34 @@ mod tests {
         let mut scenario = GameScenario::new();
         let chatterfang_replacement = ReplacementDefinition::new(ReplacementEvent::CreateToken)
             .token_owner_scope(ControllerRef::You)
-            .additional_token_spec(TokenSpec {
-                characteristics: TokenCharacteristics {
-                    display_name: "Squirrel".to_string(),
-                    power: Some(1),
-                    toughness: Some(1),
-                    loyalty: None,
-                    core_types: vec![CoreType::Creature],
-                    subtypes: vec!["Squirrel".to_string()],
-                    supertypes: Vec::new(),
-                    colors: vec![ManaColor::Green],
-                    keywords: Vec::new(),
+            .additional_token_spec(
+                TokenSpec {
+                    blocking_attacker: None,
+                    blocking_attacker_incarnation: None,
+                    characteristics: TokenCharacteristics {
+                        display_name: "Squirrel".to_string(),
+                        power: Some(1),
+                        toughness: Some(1),
+                        loyalty: None,
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Squirrel".to_string()],
+                        supertypes: Vec::new(),
+                        colors: vec![ManaColor::Green],
+                        keywords: Vec::new(),
+                    },
+                    script_name: "Squirrel".to_string(),
+                    static_abilities: Vec::new(),
+                    enter_with_counters: Vec::new(),
+                    tapped: false,
+                    enters_attacking: false,
+                    attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
+                    attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+                    sacrifice_at: None,
+                    source_id: ObjectId(0),
+                    controller: P0,
                 },
-                script_name: "Squirrel".to_string(),
-                static_abilities: Vec::new(),
-                enter_with_counters: Vec::new(),
-                tapped: false,
-                enters_attacking: false,
-                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
-                attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
-                sacrifice_at: None,
-                source_id: ObjectId(0),
-                controller: P0,
-            });
+                crate::types::ability::AdditionalTokenSpec::proportional_count(),
+            );
         scenario
             .add_creature(P0, "Chatterfang, Squirrel General", 3, 3)
             .with_subtypes(vec!["Squirrel", "Warrior"])

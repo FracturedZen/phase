@@ -94,7 +94,11 @@ vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }
 
 import { DraftPodPage } from "../DraftPodPage";
 import { isHostedPodRecoveryInFlight, useDraftPodStore } from "../../stores/draftPodStore";
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import {
+  DRAFT_RECOVERY_CONNECTION_ERROR,
+  DRAFT_RECOVERY_INCOMPATIBLE_ERROR,
+  useMultiplayerDraftStore,
+} from "../../stores/multiplayerDraftStore";
 import { useConnectivityStore } from "../../stores/connectivityStore";
 
 /** An engine-published `DraftPlayerView` slice containing the procedure the intro reads.
@@ -148,6 +152,16 @@ function savedSession(name: string): { text: string; verdict: RestorableDraftSes
   const saved = fixture.saved_sessions[name];
   if (!saved) throw new Error(`The fixture has no saved session named ${name}`);
   return { text: JSON.stringify(saved.session), verdict: saved.verdict };
+}
+
+function setupProcedure(kind: string) {
+  const commander = kind === "CommanderDraft";
+  return draftProcedureFixture({
+    min_pod_size: commander ? 3 : 2,
+    allowed_pod_sizes: commander ? [3, 4, 5, 6, 7, 8] : [2, 3, 4, 5, 6, 7, 8],
+    cards_per_pick: commander ? 2 : 1,
+    post_draft_play: commander ? "CompleteImmediately" : "TournamentPairings",
+  });
 }
 
 describe("DraftPodPage ?kind= mode entry", () => {
@@ -226,7 +240,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
       draftStarted: true, draftCode: capture.roomCode, draftSessionJson: saved.text,
       poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     };
-    mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused, raw: refused });
+    mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused });
     mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
 
     const user = userEvent.setup();
@@ -266,7 +280,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
       draftStarted: true, draftCode: captureA.roomCode, draftSessionJson: saved.text,
       poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     };
-    mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused, raw: refused });
+    mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused });
     mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
 
     const user = userEvent.setup();
@@ -301,10 +315,10 @@ describe("DraftPodPage ?kind= mode entry", () => {
     expect(useDraftPodStore.getState().hostRecoveryFailure).toBeNull();
     // Until the guest route's setup procedure arrives, the retired failure
     // leaves its key as the setup error, and the join form shows it translated.
-    expect(useDraftPodStore.getState().configError).toBe("podError.incompatible");
+    expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_INCOMPATIBLE_ERROR);
     await user.click(screen.getByRole("button", { name: /Join a Pod/ }));
     expect(screen.getByPlaceholderText("Enter room code...")).toBeInTheDocument();
-    expect(screen.queryByText("podError.incompatible")).toBeNull();
+    expect(screen.queryByText(DRAFT_RECOVERY_INCOMPATIBLE_ERROR)).toBeNull();
     expect(screen.getByText("This draft is incompatible with your protocol version.")).toBeInTheDocument();
     expect(mocks.draftProcedure).toHaveBeenCalledTimes(2);
     expect(mocks.draftProcedure).toHaveBeenLastCalledWith("Premier", "Swiss");
@@ -317,7 +331,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     }));
     expect(useDraftPodStore.getState().configError).toBeNull();
     expect(screen.queryByText("This draft is incompatible with your protocol version.")).toBeNull();
-    expect(screen.queryByText("podError.incompatible")).toBeNull();
+    expect(screen.queryByText(DRAFT_RECOVERY_INCOMPATIBLE_ERROR)).toBeNull();
   });
 
   it.each(["absent", "invalid"] as const)("loads the setup procedure on a fresh guest route whose guest resume is %s", async (outcome) => {
@@ -410,11 +424,32 @@ describe("DraftPodPage ?kind= mode entry", () => {
     // intentionally not simulated by a replacement lifecycle action.
     const saved = savedSession("fifo_drafting");
     const refusedB = { ...ownerB, draftStarted: true, draftSessionJson: saved.text };
-    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: refusedB, raw: refusedB });
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: refusedB });
     mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
     let rendered = renderAt("/draft-pod?entry=host");
     await waitFor(() => expect(screen.getByText("This draft is incompatible with your protocol version.")).toBeInTheDocument());
     assertAOwns();
+    rendered.unmount();
+    useDraftPodStore.getState().reset();
+
+    // A saved session the draft engine cannot read. Every allocation answers
+    // with a peer, so a check that admitted B would allocate and hand over; a
+    // queued one-time answer would be left for the next leg.
+    const unreadable = savedSession("legacy_review_unknown_flow");
+    const unreadableB = { ...ownerB, draftStarted: true, draftSessionJson: unreadable.text };
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: unreadableB });
+    mocks.checkRestorableSession.mockResolvedValue(unreadable.verdict);
+    mocks.recoveryHostRoom.mockImplementation(async () => hostResult(ownerB.roomCode));
+    rendered = renderAt("/draft-pod?entry=host");
+    // Reach: the recovery settled, with a recorded failure or a new owner.
+    await waitFor(() => expect(
+      useDraftPodStore.getState().hostRecoveryFailure !== null
+        || useMultiplayerDraftStore.getState().hostPersistenceId !== ownerA.persistenceId,
+    ).toBe(true));
+    assertAOwns();
+    expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("unreadable");
+    expect(await screen.findByText("This saved draft cannot be read, so it cannot be resumed.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
     rendered.unmount();
     useDraftPodStore.getState().reset();
 
@@ -434,7 +469,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     useDraftPodStore.getState().reset();
 
     let resolveAllocation!: (value: ReturnType<typeof hostResult>) => void;
-    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB, raw: ownerB });
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB });
     mocks.recoveryHostRoom.mockImplementationOnce(() => new Promise<ReturnType<typeof hostResult>>((resolve) => { resolveAllocation = resolve; }));
     rendered = renderAt("/draft-pod?entry=host");
     await waitFor(() => expect(mocks.recoveryHostRoom).toHaveBeenCalledTimes(2));
@@ -444,7 +479,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     useDraftPodStore.getState().reset();
 
     let resolveStale!: (value: ReturnType<typeof hostResult>) => void;
-    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB, raw: ownerB });
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB });
     mocks.recoveryHostRoom.mockImplementationOnce(() => new Promise<ReturnType<typeof hostResult>>((resolve) => { resolveStale = resolve; }));
     rendered = renderAt("/draft-pod?entry=host");
     await waitFor(() => expect(mocks.recoveryHostRoom).toHaveBeenCalledTimes(3));
@@ -461,18 +496,18 @@ describe("DraftPodPage ?kind= mode entry", () => {
     };
     useDraftPodStore.getState().reset();
 
-    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB, raw: ownerB });
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB });
     mocks.recoveryHostRoom.mockResolvedValueOnce(hostResult(ownerB.roomCode));
     mocks.recoveryInitialize.mockRejectedValueOnce(new Error("B initialization failed"));
     rendered = renderAt("/draft-pod?entry=host");
     await waitFor(() => expect(useDraftPodStore.getState().hostRecoveryFailure?.kind).toBe("initializationFailure"));
-    expect(useDraftPodStore.getState().configError).toBe("podError.connection");
+    expect(useDraftPodStore.getState().configError).toBe(DRAFT_RECOVERY_CONNECTION_ERROR);
     assertAOwns();
     rendered.unmount();
     useDraftPodStore.getState().reset();
 
     let finishB!: () => void;
-    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB, raw: ownerB });
+    mocks.loadDraftHostSession.mockResolvedValueOnce({ type: "admitted", session: ownerB });
     mocks.recoveryHostRoom.mockResolvedValueOnce(hostResult(ownerB.roomCode));
     mocks.recoveryInitialize.mockImplementationOnce(() => new Promise<void>((resolve) => { finishB = resolve; }));
     rendered = renderAt("/draft-pod?entry=host");
@@ -495,7 +530,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
       poolInput: { type: "Set" as const, data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
     };
     const capture = { id: savedPod.persistenceId, roomCode: savedPod.roomCode, updatedAt: 20 };
-    const admitted = { type: "admitted" as const, session: savedPod, raw: savedPod };
+    const admitted = { type: "admitted" as const, session: savedPod };
     const mounts = { count: 0 };
     const nav: { current: NavigateFunction | null } = { current: null };
 
@@ -593,7 +628,7 @@ describe("DraftPodPage ?kind= mode entry", () => {
     it("shows the failure screen again when Try Reconnecting re-reads a persisting incompatibility", async () => {
       const saved = savedSession("fifo_drafting");
       const refused = { ...savedPod, draftStarted: true, draftSessionJson: saved.text };
-      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused, raw: refused });
+      mocks.loadDraftHostSession.mockResolvedValue({ type: "admitted", session: refused });
       mocks.checkRestorableSession.mockResolvedValue(saved.verdict);
       const user = userEvent.setup();
       renderAt("/draft-pod?entry=host");
@@ -989,11 +1024,12 @@ describe("DraftPodPage ?kind= mode entry", () => {
     renderAt("/draft-pod");
     await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
 
+    // Premier's procedure offers the format radios; Commander's does not.
+    if (tournamentFormat === "SingleElimination") {
+      await user.click(await screen.findByRole("radio", { name: "Single Elimination" }));
+    }
     if (kind === "CommanderDraft") {
       await user.click(screen.getByRole("radio", { name: "Commander" }));
-    }
-    if (tournamentFormat === "SingleElimination") {
-      await user.click(screen.getByRole("radio", { name: "Single Elimination" }));
     }
 
     await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual(expectedSizes));
@@ -1070,6 +1106,67 @@ describe("DraftPodPage ?kind= mode entry", () => {
       "7 players",
       "8 players",
     ]);
+  });
+
+  it("hides the tournament format and round-based policy copy for a procedure that completes immediately", async () => {
+    const pendingCommander: Array<() => void> = [];
+    mocks.draftProcedure.mockImplementation((kind: string) => kind === "CommanderDraft"
+      ? new Promise((resolve) => pendingCommander.push(() => resolve(setupProcedure(kind))))
+      : Promise.resolve(setupProcedure(kind)));
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+    expect(screen.getByText("Tournament Format")).toBeInTheDocument();
+    expect(screen.getByText(/automatic round advancement/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "Commander" }));
+    await waitFor(() => expect(pendingCommander.length).toBeGreaterThan(0));
+    // The previous kind's published procedure must not keep the block up while Commander loads.
+    expect(screen.queryByRole("radio", { name: "Swiss" })).toBeNull();
+    expect(screen.queryByText("Tournament Format")).toBeNull();
+
+    act(() => pendingCommander.forEach((resolve) => resolve()));
+    await waitFor(() => expect(useDraftPodStore.getState().allowedPodSizes).toEqual([3, 4, 5, 6, 7, 8]));
+    expect(screen.getByRole("radio", { name: "Commander" })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: "Swiss" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Single Elimination" })).toBeNull();
+    expect(screen.queryByText("Tournament Format")).toBeNull();
+    expect(screen.getByText("Timed picks and automatic picks on timeout.")).toBeInTheDocument();
+    expect(screen.queryByText(/automatic round advancement/)).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: "Casual" }));
+    expect(screen.getByText("Untimed picks and host controls for resolving issues.")).toBeInTheDocument();
+    expect(screen.queryByText(/deck changes between rounds/)).toBeNull();
+
+    await user.click(screen.getByRole("radio", { name: "Premier" }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+    expect(screen.getByText("Tournament Format")).toBeInTheDocument();
+    expect(screen.getByText(/deck changes between rounds/)).toBeInTheDocument();
+  });
+
+  it("keeps the tournament format block while a format change reloads the procedure", async () => {
+    const pendingElimination: Array<() => void> = [];
+    mocks.draftProcedure.mockImplementation((kind: string, tournamentFormat: string) =>
+      tournamentFormat === "SingleElimination"
+        ? new Promise((resolve) => pendingElimination.push(() => resolve(setupProcedure(kind))))
+        : Promise.resolve(setupProcedure(kind)));
+
+    const user = userEvent.setup();
+    renderAt("/draft-pod");
+    await user.click(screen.getByRole("button", { name: /Host a Pod/ }));
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Swiss" })).toBeChecked());
+
+    await user.click(screen.getByRole("radio", { name: "Single Elimination" }));
+    await waitFor(() => expect(pendingElimination.length).toBeGreaterThan(0));
+    expect(useDraftPodStore.getState().allowedPodSizes).toBeNull();
+    expect(screen.getByRole("radio", { name: "Single Elimination" })).toBeChecked();
+
+    act(() => pendingElimination.forEach((resolve) => resolve()));
+    await waitFor(() =>
+      expect(useDraftPodStore.getState().procedureCacheKey?.tournamentFormat).toBe("SingleElimination"));
+    expect(screen.getByRole("radio", { name: "Single Elimination" })).toBeChecked();
   });
 
   it("keeps the real cube panel mounted across pending floor changes", async () => {
